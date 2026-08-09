@@ -1,0 +1,640 @@
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from dataclasses import dataclass, fields
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from typing import Iterable
+
+from mdrk_builder.application.extractors import (
+    IcfObservation,
+    extract_admission_datetime,
+    extract_clinical_datetime,
+    extract_clinical_sections,
+    extract_conclusion,
+    extract_discharge_datetime,
+    extract_icf_observations,
+    extract_mdrk_meeting_datetimes,
+    extract_patient_identity,
+    extract_procedures,
+    extract_scale_measurements,
+)
+from mdrk_builder.domain import (
+    Episode,
+    IcfDomain,
+    IcfQualifier,
+    ReviewIssue,
+    ReviewSeverity,
+    SourceDocument,
+    SpecialistFinding,
+    SpecialistRole,
+)
+from mdrk_builder.infrastructure.classifier import DocumentClassification, classify_document
+from mdrk_builder.infrastructure.converter import ConversionError, DocumentNormalizer
+from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, read_docx
+
+
+@dataclass(slots=True)
+class ScannedRecord:
+    document: ParsedDocument
+    classification: DocumentClassification
+    clinical_datetime: datetime | None
+
+
+def discover_source_files(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        raise NotADirectoryError(folder)
+    return sorted(
+        (
+            path
+            for path in folder.rglob("*")
+            if path.is_file()
+            and path.suffix.casefold() in DocumentNormalizer.SUPPORTED
+            and not path.name.startswith("~$")
+        ),
+        key=lambda path: str(path).casefold(),
+    )
+
+
+def _next_calendar_day(value: date) -> date:
+    return value + timedelta(days=1)
+
+
+def _most_common_datetime(values: Iterable[datetime | None]) -> tuple[datetime | None, set[datetime]]:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None, set()
+    counts = Counter(present)
+    return counts.most_common(1)[0][0], set(present)
+
+
+def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
+    identities = [(extract_patient_identity(item.document), item) for item in records]
+    priority = {
+        SpecialistRole.NEUROLOGIST: 3,
+        SpecialistRole.FRM: 3,
+        SpecialistRole.OTHER: 1,
+    }
+    identities.sort(
+        key=lambda pair: (
+            priority.get(pair[1].classification.role, 2),
+            pair[1].clinical_datetime or datetime.min,
+        ),
+        reverse=True,
+    )
+    fields = ("full_name", "birth_date", "sex", "medical_record_number")
+    for field_name in fields:
+        choices = [getattr(identity, field_name) for identity, _ in identities if getattr(identity, field_name)]
+        if not choices:
+            continue
+        chosen = choices[0]
+        setattr(episode.identity, field_name, chosen)
+        distinct = {str(value).casefold() for value in choices}
+        source = next(item.document.source_path for identity, item in identities if getattr(identity, field_name) == chosen)
+        episode.field_sources[f"identity.{field_name}"] = source
+        if len(distinct) > 1:
+            severity = (
+                ReviewSeverity.BLOCKING
+                if field_name == "medical_record_number"
+                else ReviewSeverity.WARNING
+            )
+            message = (
+                "В папке найдены разные номера ИБ. Выберите папку только одной госпитализации."
+                if field_name == "medical_record_number"
+                else f"В источниках различаются значения поля «{field_name}». Выбрано: {chosen}"
+            )
+            episode.issues.append(
+                ReviewIssue(
+                    f"identity_conflict_{field_name}",
+                    message,
+                    severity,
+                    f"identity.{field_name}",
+                    source,
+                )
+            )
+
+
+def _merge_dates(episode: Episode, records: list[ScannedRecord]) -> None:
+    admission, admission_values = _most_common_datetime(extract_admission_datetime(item.document) for item in records)
+    episode.admission_datetime = admission
+    admission_dates = {value.date() for value in admission_values}
+    if len(admission_dates) > 1:
+        episode.issues.append(
+            ReviewIssue(
+                "mixed_hospitalizations_admission_date",
+                "В папке найдены разные даты поступления. Выберите папку только одной госпитализации.",
+                ReviewSeverity.BLOCKING,
+                "admission_datetime",
+            )
+        )
+    elif len(admission_values) > 1:
+        episode.issues.append(
+            ReviewIssue(
+                "admission_time_conflict",
+                "В источниках различается время поступления в рамках одной даты",
+                ReviewSeverity.WARNING,
+                "admission_datetime",
+            )
+        )
+    discharge_values = [extract_discharge_datetime(item.document) for item in records]
+    discharge_present = [value for value in discharge_values if value is not None]
+    episode.discharge_datetime = max(discharge_present) if discharge_present else None
+    if episode.admission_datetime:
+        episode.initial_meeting_at = datetime.combine(
+            _next_calendar_day(episode.admission_datetime.date()), time(8, 0)
+        )
+    scheduled_final_candidates = [
+        meeting
+        for item in records
+        for meeting in extract_mdrk_meeting_datetimes(item.document)
+        if (episode.initial_meeting_at is None or meeting > episode.initial_meeting_at)
+        and (episode.discharge_datetime is None or meeting <= episode.discharge_datetime)
+    ]
+    final_candidates = [
+        item.clinical_datetime
+        for item in records
+        if item.clinical_datetime is not None
+        and item.classification.document_type not in {
+            "administrative",
+            "assignment_sheet",
+            "other_consilium",
+            "final",
+        }
+    ]
+    latest_source = max(final_candidates, default=None)
+    if scheduled_final_candidates:
+        episode.final_meeting_at = max(scheduled_final_candidates)
+    elif latest_source:
+        episode.final_meeting_at = latest_source
+    elif episode.discharge_datetime:
+        episode.final_meeting_at = datetime.combine(episode.discharge_datetime.date(), time(11, 0))
+    if episode.admission_datetime and episode.discharge_datetime:
+        episode.course_duration_days = (
+            episode.discharge_datetime.date() - episode.admission_datetime.date()
+        ).days
+        if episode.course_duration_days <= 0:
+            episode.course_duration_days = 1
+
+
+def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) -> None:
+    clinical_records = [
+        item
+        for item in records
+        if item.classification.document_type
+        not in {"administrative", "assignment_sheet", "other_consilium"}
+    ]
+    physician_records = [
+        item
+        for item in clinical_records
+        if item.classification.role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+    ]
+    extracted = {
+        id(record): extract_clinical_sections(record.document) for record in clinical_records
+    }
+
+    def eligible_as_of(
+        values: list[ScannedRecord],
+        boundary: datetime | None,
+    ) -> list[ScannedRecord]:
+        dated = [
+            item
+            for item in values
+            if item.clinical_datetime is not None
+            and (boundary is None or item.clinical_datetime <= boundary)
+        ]
+        eligible = dated or [item for item in values if item.clinical_datetime is None]
+        return sorted(eligible, key=lambda item: item.clinical_datetime or datetime.min)
+
+    def fill_as_of(
+        target,
+        provenance: dict[str, Path],
+        boundary: datetime | None,
+    ) -> None:
+        physician_eligible = eligible_as_of(physician_records, boundary)
+        all_eligible = eligible_as_of(clinical_records, boundary)
+        specialist_fallback_fields = {"laboratory_results", "instrumental_results"}
+        for field_info in fields(target):
+            field_name = field_info.name
+            candidates = [
+                (record, extracted[id(record)][field_name])
+                for record in physician_eligible
+                if extracted[id(record)][field_name]
+            ]
+            if not candidates and field_name in specialist_fallback_fields:
+                candidates = [
+                    (record, extracted[id(record)][field_name])
+                    for record in all_eligible
+                    if extracted[id(record)][field_name]
+                ]
+            if not candidates:
+                continue
+            record, value = candidates[-1]
+            setattr(target, field_name, value)
+            provenance[f"sections.{field_name}"] = record.document.source_path
+
+    fill_as_of(
+        episode.initial_sections,
+        episode.initial_field_sources,
+        episode.initial_meeting_at,
+    )
+    fill_as_of(episode.sections, episode.field_sources, episode.final_meeting_at)
+
+
+def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
+    allowed = {
+        SpecialistRole.FRM,
+        SpecialistRole.NEUROLOGIST,
+        SpecialistRole.PHYSICAL_THERAPIST,
+        SpecialistRole.OCCUPATIONAL_THERAPIST,
+        SpecialistRole.LOGOPEDIST,
+        SpecialistRole.NEUROPSYCHOLOGIST,
+        SpecialistRole.PATHOPSYCHOLOGIST,
+    }
+    for record in records:
+        role = record.classification.role
+        if role not in allowed:
+            continue
+        conclusion = extract_conclusion(record.document, role)
+        scales = extract_scale_measurements(record.document, role, record.clinical_datetime)
+        if conclusion or scales:
+            episode.findings.append(
+                SpecialistFinding(
+                    role=role,
+                    conclusion=conclusion,
+                    source_datetime=record.clinical_datetime,
+                    source=record.document.source_path,
+                    scales=scales,
+                )
+            )
+
+
+def _observation_map(observations: list[IcfObservation]) -> dict[tuple[str, str], IcfObservation]:
+    return {
+        (item.code.casefold().replace(" ", ""), " ".join(item.description.casefold().split())): item
+        for item in observations
+    }
+
+
+def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[tuple[ScannedRecord, list[IcfObservation]]]]:
+    grouped: dict[SpecialistRole, list[tuple[ScannedRecord, list[IcfObservation]]]] = defaultdict(list)
+    for record in records:
+        observations = extract_icf_observations(record.document)
+        role = record.classification.role
+        if role is SpecialistRole.OTHER:
+            continue
+        physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
+        personal_factor_roles = {
+            SpecialistRole.NEUROPSYCHOLOGIST,
+            SpecialistRole.PATHOPSYCHOLOGIST,
+        }
+        filtered: list[IcfObservation] = []
+        for observation in observations:
+            is_personal_factor = observation.code.casefold().startswith("pf")
+            if is_personal_factor and role not in personal_factor_roles:
+                continue
+            owner = observation.specialist
+            compatible_owner = owner is role or (
+                role in physician_roles and owner in physician_roles
+            )
+            if owner is not None and not compatible_owner:
+                continue
+            if role in physician_roles and owner is None and not observation.code.casefold().startswith("s"):
+                continue
+            filtered.append(observation)
+        observations = filtered
+        if observations:
+            grouped[role].append((record, observations))
+    for values in grouped.values():
+        values.sort(key=lambda pair: pair[0].clinical_datetime or datetime.min)
+    return grouped
+
+
+def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
+    for role, profiles in _profile_records(records).items():
+        profile_maps = [(record, _observation_map(values)) for record, values in profiles]
+        all_keys = list(dict.fromkeys(key for _, values in profile_maps for key in values))
+        for key in all_keys:
+            occurrences = [(record, values[key]) for record, values in profile_maps if key in values]
+
+            def as_of(boundary: datetime | None):
+                dated = [
+                    (record, observation)
+                    for record, observation in occurrences
+                    if record.clinical_datetime is not None
+                    and (boundary is None or record.clinical_datetime <= boundary)
+                ]
+                return dated or [
+                    (record, observation)
+                    for record, observation in occurrences
+                    if record.clinical_datetime is None
+                ]
+
+            initial_occurrences = as_of(episode.initial_meeting_at)
+            final_occurrences = as_of(episode.final_meeting_at)
+            if not final_occurrences:
+                # A source written after MDRK-2 cannot introduce or update a row.
+                continue
+
+            initial_record = None
+            initial_obs = None
+            initial = None
+            if initial_occurrences:
+                initial_record, initial_obs = initial_occurrences[-1]
+                initial = initial_obs.ratings[0] if initial_obs.ratings else None
+
+            final_record, final_obs = final_occurrences[-1]
+            explicit_repeat = (
+                len(final_obs.ratings) >= 2
+                or final_record.classification.document_type in {"final", "follow_up"}
+                or (
+                    final_record.clinical_datetime is not None
+                    and episode.initial_meeting_at is not None
+                    and final_record.clinical_datetime > episode.initial_meeting_at
+                )
+            )
+            final = final_obs.current if explicit_repeat else None
+            sample = final_obs if final_obs is not None else initial_obs
+            if sample is None:
+                continue
+            is_personal_factor = sample.code.casefold().startswith("pf")
+            has_distinct_final_source = (
+                final_record is not initial_record
+                or final_record.clinical_datetime is not None
+                and episode.initial_meeting_at is not None
+                and final_record.clinical_datetime > episode.initial_meeting_at
+            )
+            domain = IcfDomain(
+                code=sample.code,
+                description=sample.description,
+                specialist=role,
+                initial=initial,
+                final=final,
+                note=sample.note,
+                initial_source=(
+                    initial_record.document.source_path
+                    if initial_record is not None and (initial is not None or is_personal_factor)
+                    else None
+                ),
+                final_source=(
+                    final_record.document.source_path
+                    if final is not None or is_personal_factor and has_distinct_final_source
+                    else None
+                ),
+            )
+            episode.icf_domains.append(domain)
+            if (
+                not domain.code.casefold().startswith("pf")
+                and (domain.initial is None or domain.final is None)
+            ):
+                episode.issues.append(
+                    ReviewIssue(
+                        "icf_incomplete_pair",
+                        f"Домен {domain.code} присутствует только в одной временной точке",
+                        ReviewSeverity.WARNING,
+                        f"icf.{domain.code}",
+                        domain.final_source or domain.initial_source,
+                    )
+                )
+
+    initial_medication = episode.initial_sections.medication.strip()
+    final_medication = episode.sections.medication.strip()
+    if initial_medication or final_medication:
+        matching = [
+            item for item in episode.icf_domains if item.code.casefold().replace(" ", "") == "e1101"
+        ]
+        existing = matching[0] if matching else None
+        initial_medication_source = episode.initial_field_sources.get("sections.medication")
+        final_medication_source = episode.field_sources.get("sections.medication")
+        medication_source = final_medication_source or initial_medication_source
+        owner = next(
+            (
+                record.classification.role
+                for record in records
+                if record.document.source_path == medication_source
+                and record.classification.role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+            ),
+            SpecialistRole.NEUROLOGIST,
+        )
+        qualifier = IcfQualifier(4, facilitator=True)
+        if existing:
+            existing.specialist = owner
+            if initial_medication:
+                existing.initial = qualifier
+            if final_medication:
+                existing.final = qualifier
+            existing.note = existing.note or "препараты"
+            if initial_medication:
+                existing.initial_source = initial_medication_source or existing.initial_source
+            if final_medication:
+                existing.final_source = final_medication_source or existing.final_source
+            episode.icf_domains = [
+                item for item in episode.icf_domains if item is existing or item not in matching
+            ]
+        else:
+            episode.icf_domains.append(
+                IcfDomain(
+                    code="e1101",
+                    description="Лекарственные препараты",
+                    specialist=owner,
+                    initial=qualifier if initial_medication else None,
+                    final=qualifier if final_medication else None,
+                    note="препараты",
+                    initial_source=initial_medication_source if initial_medication else None,
+                    final_source=final_medication_source if final_medication else None,
+                )
+            )
+
+    episode.icf_domains.sort(
+        key=lambda item: (
+            {"b": 0, "s": 1, "d": 2, "e": 3, "p": 4}.get(item.code[:1].casefold(), 9),
+            item.specialist.value,
+            item.code.casefold(),
+            item.description.casefold(),
+        )
+    )
+
+
+def _collect_procedures(episode: Episode, records: list[ScannedRecord]) -> None:
+    assignment_records = [item for item in records if item.classification.document_type == "assignment_sheet"]
+    assignment_records.sort(key=lambda item: item.clinical_datetime or datetime.min)
+    if assignment_records:
+        episode.procedures = extract_procedures(assignment_records[-1].document)
+    if not episode.procedures:
+        episode.issues.append(
+            ReviewIssue(
+                "procedures_missing",
+                "Лист назначений не найден или из него не удалось посчитать процедуры",
+                ReviewSeverity.WARNING,
+                "procedures",
+            )
+        )
+    for procedure in episode.procedures:
+        if procedure.actual_count is None:
+            episode.issues.append(
+                ReviewIssue(
+                    "procedure_count_missing",
+                    f"Не удалось посчитать количество для «{procedure.name}»",
+                    ReviewSeverity.WARNING,
+                    "procedures",
+                    procedure.source,
+                )
+            )
+        if procedure.count_needs_review:
+            episode.issues.append(
+                ReviewIssue(
+                    "procedure_count_ambiguous",
+                    f"Количество для «{procedure.name}» получено из неоднозначных отметок «+»; проверьте его вручную.",
+                    ReviewSeverity.WARNING,
+                    "procedures",
+                    procedure.source,
+                )
+            )
+    if episode.procedures and any(not procedure.frequency for procedure in episode.procedures):
+        episode.issues.append(
+            ReviewIssue(
+                "procedure_frequency_missing",
+                "Кратность не выводилась из общего числа отметок «+»; при необходимости заполните её вручную.",
+                ReviewSeverity.WARNING,
+                "procedures.frequency",
+            )
+        )
+
+
+def _minimum_field_issues(episode: Episode) -> None:
+    required = {
+        "identity.full_name": (episode.identity.full_name, "ФИО пациента"),
+        "identity.medical_record_number": (episode.identity.medical_record_number, "номер ИБ"),
+        "admission_datetime": (episode.admission_datetime, "дата поступления"),
+        "initial_sections.clinical_diagnosis": (
+            episode.initial_sections.clinical_diagnosis,
+            "клинический диагноз на момент МДРК1",
+        ),
+        "sections.clinical_diagnosis": (episode.sections.clinical_diagnosis, "клинический диагноз"),
+    }
+    for field_name, (value, label) in required.items():
+        if value:
+            continue
+        episode.issues.append(
+            ReviewIssue(
+                f"required_{field_name.replace('.', '_')}",
+                f"Не найдено обязательное поле: {label}. Заполните его вручную.",
+                ReviewSeverity.BLOCKING,
+                field_name,
+            )
+        )
+    optional_sections = (
+        ("initial_sections.rehabilitation_potential", episode.initial_sections.rehabilitation_potential, "реабилитационный потенциал для МДРК1"),
+        ("initial_sections.goal", episode.initial_sections.goal, "цель для МДРК1"),
+        ("initial_sections.tasks", episode.initial_sections.tasks, "задачи для МДРК1"),
+        ("sections.rehabilitation_potential", episode.sections.rehabilitation_potential, "реабилитационный потенциал для МДРК2"),
+    )
+    for field_name, value, label in optional_sections:
+        if value:
+            continue
+        episode.issues.append(
+            ReviewIssue(
+                f"review_{field_name.replace('.', '_')}",
+                f"Не найдено поле «{label}». Заполните его вручную или оставьте пустым после проверки.",
+                ReviewSeverity.WARNING,
+                field_name,
+            )
+        )
+    for source in episode.sources:
+        if source.clinical_datetime is None and source.role is not SpecialistRole.OTHER:
+            episode.issues.append(
+                ReviewIssue(
+                    "source_datetime_missing",
+                    f"Не определена клиническая дата: {source.path.name}",
+                    ReviewSeverity.WARNING,
+                    "sources",
+                    source.path,
+                )
+            )
+
+
+def scan_patient_folder(
+    folder: Path,
+    *,
+    normalizer: DocumentNormalizer | None = None,
+    initial_meeting_at: datetime | None = None,
+    final_meeting_at: datetime | None = None,
+) -> Episode:
+    folder = folder.resolve()
+    episode = Episode(folder=folder)
+    source_files = discover_source_files(folder)
+    if not source_files:
+        episode.issues.append(
+            ReviewIssue(
+                "no_word_sources",
+                "В выбранной папке нет DOCX, DOC или RTF",
+                ReviewSeverity.BLOCKING,
+                "folder",
+            )
+        )
+        return episode
+
+    owns_normalizer = normalizer is None
+    normalizer = normalizer or DocumentNormalizer()
+    records: list[ScannedRecord] = []
+    failures = 0
+    try:
+        for source_path in source_files:
+            try:
+                normalized = normalizer.normalize(source_path)
+                document = read_docx(normalized, source_path=source_path)
+                classification = classify_document(document)
+                if classification.is_mdrk:
+                    continue
+                clinical_datetime = (
+                    None
+                    if classification.document_type in {"administrative", "assignment_sheet", "other_consilium"}
+                    else extract_clinical_datetime(document)
+                )
+                episode.sources.append(
+                    SourceDocument(
+                        path=source_path,
+                        role=classification.role,
+                        clinical_datetime=clinical_datetime,
+                        document_type=classification.document_type,
+                        extraction_method="docx" if source_path.suffix.casefold() == ".docx" else "converted",
+                        sha256=document.sha256,
+                    )
+                )
+                records.append(ScannedRecord(document, classification, clinical_datetime))
+            except (ConversionError, OSError, ValueError, KeyError) as exc:
+                failures += 1
+                episode.issues.append(
+                    ReviewIssue(
+                        "source_read_failed",
+                        f"Не удалось прочитать {source_path.name}: {exc}",
+                        ReviewSeverity.WARNING,
+                        "sources",
+                        source_path,
+                    )
+                )
+    finally:
+        if owns_normalizer:
+            normalizer.close()
+
+    if failures and failures >= max(3, len(source_files) // 2):
+        episode.issues.append(
+            ReviewIssue(
+                "systematic_read_failure",
+                "Не удалось прочитать значительную часть исходных документов",
+                ReviewSeverity.BLOCKING,
+                "sources",
+            )
+        )
+    if records:
+        _merge_identity(episode, records)
+        _merge_dates(episode, records)
+        if initial_meeting_at is not None:
+            episode.initial_meeting_at = initial_meeting_at
+        if final_meeting_at is not None:
+            episode.final_meeting_at = final_meeting_at
+        _latest_clinical_sections(episode, records)
+        _collect_findings(episode, records)
+        _merge_icf(episode, records)
+        _collect_procedures(episode, records)
+    _minimum_field_issues(episode)
+    return episode
