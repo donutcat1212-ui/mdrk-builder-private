@@ -140,6 +140,31 @@ def test_sections_split_completed_interventions_and_prefixed_movement_regimen() 
     assert sections["movement_regimen"] == "свободный"
 
 
+def test_plan_treatment_preserves_medication_lines_and_short_regimen() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "План лечения Режим свободный",
+                "Диета ОВД",
+                "Назначения Медикаментозная терапия:",
+                "С гипотензивной целью: Perindoprili 4 mg утром",
+                "Таб. Индапамид 1,5 мг утром",
+                "С гиполипидемической целью: Atorvastatini 40 мг вечером",
+                "Немедикаментозная терапия:",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["movement_regimen"] == "свободный"
+    assert sections["medication"].splitlines() == [
+        "С гипотензивной целью: Perindoprili 4 mg утром",
+        "Таб. Индапамид 1,5 мг утром",
+        "С гиполипидемической целью: Atorvastatini 40 мг вечером",
+    ]
+
+
 def test_completed_interventions_split_inline_instrumental_marker() -> None:
     document = _document(
         "Выполненные медицинские вмешательства "
@@ -537,6 +562,7 @@ def test_physician_scales_are_extracted_from_bounded_narrative_lines() -> None:
                 "Модифицированная шкала Ренкин: 3",
                 "NRS-2002: низкий риск",
                 "Индекс мобильности Ривермид: 8",
+                "СКФ: 63,73",
                 "Шкала Бартел: 75",
                 "Дополнительные сведения: ШРМ 4",
             )
@@ -553,6 +579,7 @@ def test_physician_scales_are_extracted_from_bounded_narrative_lines() -> None:
         ("Модифицированная шкала Рэнкина", "3"),
         ("NRS 2002", "низкий риск"),
         ("Индекс мобильности Ривермид", "8"),
+        ("СКФ", "63,73"),
         ("Шкала Бартел", "75"),
         ("Шкала реабилитационной маршрутизации (ШРМ)", "4"),
     ]

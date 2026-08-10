@@ -14,6 +14,7 @@ from mdrk_builder.infrastructure.docx_layout import (
 )
 from mdrk_builder.infrastructure.docx_template import (
     FONT_NAME,
+    FONT_SIZE_PT,
     STYLE_BODY,
     STYLE_LABEL,
     STYLE_MCF_CODE,
@@ -24,6 +25,7 @@ from mdrk_builder.infrastructure.docx_template import (
     STYLE_TASK,
     STYLE_TITLE,
     STYLE_WARNING,
+    TABLE_FONT_SIZE_PT,
     canonical_template_path,
     create_canonical_template,
 )
@@ -55,10 +57,12 @@ def test_canonical_resource_has_sanitized_page_and_style_contract() -> None:
         STYLE_TASK,
         STYLE_WARNING,
     )
+    table_styles = {STYLE_TABLE, STYLE_TABLE_HEADER, STYLE_MCF_CODE}
     for name in expected_styles:
         style = document.styles[name]
         assert style.font.name == FONT_NAME
-        assert style.font.size.pt == 10
+        expected_size = TABLE_FONT_SIZE_PT if name in table_styles else FONT_SIZE_PT
+        assert style.font.size.pt == expected_size
 
     properties = document.core_properties
     assert properties.author == "MDRK Builder"

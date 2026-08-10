@@ -27,7 +27,8 @@ from .docx_layout import (
 
 TEMPLATE_FILENAME = "canonical_mdrk_template.docx"
 FONT_NAME = "Times New Roman"
-FONT_SIZE_PT = 10
+FONT_SIZE_PT = 12
+TABLE_FONT_SIZE_PT = 10
 
 STYLE_BODY = "MDRK Body"
 STYLE_TITLE = "MDRK Title"
@@ -115,11 +116,11 @@ def _configure_styles(document: Document) -> None:
     )
 
     table = _paragraph_style(styles, STYLE_TABLE, body)
-    _set_font(table)
+    _set_font(table, size_pt=TABLE_FONT_SIZE_PT)
     _set_paragraph_format(table, alignment=WD_ALIGN_PARAGRAPH.LEFT)
 
     table_header = _paragraph_style(styles, STYLE_TABLE_HEADER, table)
-    _set_font(table_header, bold=True)
+    _set_font(table_header, bold=True, size_pt=TABLE_FONT_SIZE_PT)
     _set_paragraph_format(
         table_header,
         alignment=WD_ALIGN_PARAGRAPH.CENTER,
@@ -127,7 +128,7 @@ def _configure_styles(document: Document) -> None:
     )
 
     mcf_code = _paragraph_style(styles, STYLE_MCF_CODE, table)
-    _set_font(mcf_code)
+    _set_font(mcf_code, size_pt=TABLE_FONT_SIZE_PT)
     _set_paragraph_format(mcf_code, alignment=WD_ALIGN_PARAGRAPH.CENTER)
 
     task = _paragraph_style(styles, STYLE_TASK, styles["List Number"])
@@ -158,9 +159,14 @@ def _character_style(styles: object, name: str) -> BaseStyle:
         return styles.add_style(name, WD_STYLE_TYPE.CHARACTER)  # type: ignore[attr-defined]
 
 
-def _set_font(style: BaseStyle, *, bold: bool = False) -> None:
+def _set_font(
+    style: BaseStyle,
+    *,
+    bold: bool = False,
+    size_pt: int = FONT_SIZE_PT,
+) -> None:
     style.font.name = FONT_NAME
-    style.font.size = Pt(FONT_SIZE_PT)
+    style.font.size = Pt(size_pt)
     style.font.bold = bold
     style.font.color.rgb = RGBColor(0, 0, 0)
     run_properties = style.element.get_or_add_rPr()

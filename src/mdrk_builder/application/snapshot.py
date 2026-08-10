@@ -138,7 +138,26 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         )
         sample = current or initial or values[-1]
         rows.append(ScaleRow(role, sample.name, initial, current))
-    rows.sort(key=lambda item: (item.role.value, item.name.casefold()))
+    physician_order = (
+        "ривермид",
+        "рэнкин",
+        "nrs 2002",
+        "скф",
+        "реабилитационной маршрутизации",
+        "бартел",
+    )
+
+    def scale_sort_key(item: ScaleRow) -> tuple[str, int, str]:
+        normalized = item.name.casefold()
+        priority = next(
+            (index for index, token in enumerate(physician_order) if token in normalized),
+            len(physician_order),
+        )
+        if item.role not in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:
+            priority = 0
+        return item.role.value, priority, normalized
+
+    rows.sort(key=scale_sort_key)
     return tuple(rows)
 
 

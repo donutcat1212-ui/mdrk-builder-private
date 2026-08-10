@@ -37,6 +37,7 @@ def _representative_episode(folder: Path) -> Episode:
     episode.identity.birth_date = date(1968, 2, 20)
     episode.identity.sex = "муж"
     episode.identity.medical_record_number = "СКП9001/99"
+    episode.department = "Отделение медицинской реабилитации для пациентов с нарушением функции ЦНС №2"
     episode.admission_datetime = datetime(2026, 6, 4, 12, 15)
     episode.discharge_datetime = datetime(2026, 6, 20, 10)
     episode.initial_meeting_at = initial_at
@@ -53,7 +54,7 @@ def _representative_episode(folder: Path) -> Episode:
     initial_sections.risks = "риск падения"
     initial_sections.movement_regimen = "палатный"
     initial_sections.diet = "ОВД"
-    initial_sections.medication = "Исходная базисная терапия."
+    initial_sections.medication = "Исходная строка терапии 1.\nИсходная строка терапии 2."
     initial_sections.goal = "Повысить мобильность и самостоятельность."
     initial_sections.tasks = "1. Улучшить равновесие\n2. Расширить дистанцию ходьбы"
 
@@ -97,6 +98,14 @@ def _representative_episode(folder: Path) -> Episode:
                 SpecialistRole.NEUROLOGIST,
                 "Сознание ясное. Неврологический статус стабилен.",
                 initial_at,
+                scales=[
+                    ScaleMeasurement(
+                        "СКФ",
+                        "63,73",
+                        initial_at,
+                        SpecialistRole.NEUROLOGIST,
+                    )
+                ],
             ),
             SpecialistFinding(
                 SpecialistRole.PHYSICAL_THERAPIST,
@@ -175,13 +184,14 @@ def _assert_signature_table_page_separator(document) -> None:
     procedure_index = body_children.index(procedures._tbl)
     signature_index = body_children.index(signatures._tbl)
 
-    assert signature_index == procedure_index + 2
-    separator = body_children[procedure_index + 1]
-    assert separator.tag == qn("w:p")
-    properties = separator.find(qn("w:pPr"))
-    assert properties is not None
-    assert properties.find(qn("w:pageBreakBefore")) is not None
-    assert properties.find(qn("w:keepNext")) is not None
+    assert signature_index == procedure_index + 3
+    separators = body_children[procedure_index + 1 : signature_index]
+    assert all(separator.tag == qn("w:p") for separator in separators)
+    assert all(
+        separator.find("./w:pPr/w:pageBreakBefore", separator.nsmap) is None
+        for separator in separators
+    )
+    assert separators[-1].find("./w:pPr/w:keepNext", separators[-1].nsmap) is not None
 
 
 def _cell_fill(cell) -> str | None:
@@ -263,7 +273,7 @@ def _assert_table_geometry_and_pagination(document) -> None:
             for cell in row.cells:
                 _assert_ooxml_child_order(cell._tc.get_or_add_tcPr(), cell_property_order)
 
-        header_count = 3 if table.rows[0].cells[0].text == "МКФ категориальный профиль" else 1
+        header_count = 2 if table.rows[0].cells[0].text == "МКФ категориальный профиль" else 1
         for row in table.rows[:header_count]:
             assert row._tr.get_or_add_trPr().find(qn("w:tblHeader")) is not None
 
@@ -305,9 +315,30 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     assert "Дата и время выписки:" not in initial_text
     assert "Уточнённый диагноз" in final_text
     assert "Исходный диагноз" not in final_text
-    assert "Дата и время выписки: 20.06.2026 10:00" in final_text
+    assert "Дата и время выписки:" not in final_text
     assert "Достигнута в полном объёме" in final_text
     assert "Выполнены в полном объёме" in final_text
+
+    assert [paragraph.text for paragraph in initial.paragraphs[:11]] == [
+        "Консилиум мультидисциплинарной реабилитационной команды в составе "
+        "заведующего отделением, врача фрм, специалиста по физической реабилитации, "
+        "медицинского психолога/нейропсихолога, медицинского логопеда и специалиста "
+        "по эргореабилитации",
+        '"05" июня 2026 г. время: 16 час. 00 мин.',
+        "",
+        "Номер ИБ: СКП9001/99",
+        "Отделение медицинской реабилитации для пациентов с нарушением функции ЦНС №2.",
+        "",
+        "ФИО пациента: Тестов Алексей Юрьевич",
+        "Дата рождения: «20» февраля 1968г. (58 лет)",
+        "Пол: муж",
+        "",
+        "1. Клинический диагноз",
+    ]
+    assert initial.paragraphs[3].runs[-1].bold
+    assert initial.paragraphs[3].runs[-1].underline
+    assert initial.paragraphs[6].runs[-1].bold
+    assert initial.paragraphs[6].runs[-1].underline
 
     initial_mcf = _find_table(initial, "МКФ категориальный профиль")
     final_mcf = _find_table(final, "МКФ категориальный профиль")
@@ -360,13 +391,53 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     for cell in final_mcf.rows[2].cells[2:13]:
         _assert_compact_header_cell(cell)
 
+    problem_headers = [
+        row for row in initial_mcf.rows if row.cells[6].text == "Проблемы"
+    ]
+    assert len(problem_headers) == 2
+    for header_row in problem_headers:
+        assert [header_row.cells[index].text for index in range(2, 6)] == ["", "", "", ""]
+        assert header_row.cells[6].text == "Проблемы"
+    environment_index, environment_header = next(
+        (index, row)
+        for index, row in enumerate(initial_mcf.rows)
+        if row.cells[2].text == "Позитивные\nфакторы"
+    )
+    assert environment_header.cells[7].text == "Барьеры"
+    environment_scale = initial_mcf.rows[environment_index + 1]
+    assert [environment_scale.cells[index].text for index in range(2, 11)] == [
+        "4+", "3+", "2+", "1+", "0", "1", "2", "3", "4"
+    ]
+
     initial_scale = _find_table(initial, "Шкала/опросник")
-    final_scale = _find_table(final, "Шкала/опросник")
+    final_scale = next(
+        table
+        for table in final.tables
+        if any(row.cells[0].text == "Шкала Тинетти" for row in table.rows)
+    )
     assert len(initial_scale.columns) == 2
     assert len(final_scale.columns) == 3
     assert initial_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[2].text == "24 балла"
+
+    physician_table = _find_table(initial, "Дата и время\nрасчета шкалы")
+    assert len(physician_table.columns) == 3
+    assert [cell.text for cell in physician_table.rows[0].cells] == [
+        "Дата и время\nрасчета шкалы",
+        "Шкала/опросник",
+        "Результат расчета",
+    ]
+    physician_heading = next(
+        paragraph
+        for paragraph in initial.paragraphs
+        if paragraph.text.startswith("Результат осмотра врача физической")
+    )
+    assert physician_heading.text == (
+        "Результат осмотра врача физической и реабилитационной медицины "
+        "(05 июня 2026 16:00):"
+    )
+    assert not physician_heading.runs[0].bold
 
     procedures = _find_table(initial, "Реабилитационные процедуры")
     _assert_compact_header_cell(procedures.rows[0].cells[2])
@@ -396,10 +467,29 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     conclusion_labels = [
         paragraph
         for paragraph in initial.paragraphs
-        if paragraph.text == "Заключение: "
+        if paragraph.text.startswith("Заключение: ")
     ]
     assert conclusion_labels
-    assert all(paragraph.paragraph_format.keep_with_next for paragraph in conclusion_labels)
+
+    plan_heading = next(
+        paragraph for paragraph in initial.paragraphs if paragraph.text == "Режим и питание:"
+    )
+    medication_heading = next(
+        paragraph
+        for paragraph in initial.paragraphs
+        if paragraph.text == "Медикаментозное лечение:"
+    )
+    procedures_heading = next(
+        paragraph
+        for paragraph in initial.paragraphs
+        if paragraph.text == "Реабилитационные мероприятия:"
+    )
+    assert all(
+        paragraph.runs[0].bold and paragraph.runs[0].underline
+        for paragraph in (plan_heading, medication_heading, procedures_heading)
+    )
+    assert "Исходная строка терапии 1." in [p.text for p in initial.paragraphs]
+    assert "Исходная строка терапии 2." in [p.text for p in initial.paragraphs]
 
     _assert_table_geometry_and_pagination(initial)
     _assert_table_geometry_and_pagination(final)

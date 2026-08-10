@@ -60,6 +60,7 @@ PHYSICIAN_SCALE_TOKENS = (
     "rankin",
     "nrs 2002",
     "бартел",
+    "скф",
     "реабилитационной маршрутизации",
 )
 PHYSICIAN_NARRATIVE_SCALES = (
@@ -76,6 +77,7 @@ PHYSICIAN_NARRATIVE_SCALES = (
         r"^Модифицированная\s+шкала\s+Р[еэ]нкин\w*\s*[:–—-]\s*(.+)$",
     ),
     ("NRS 2002", r"^NRS\s*[-–—]?\s*2002\s*[:–—-]\s*(.+)$"),
+    ("СКФ", r"^СКФ\s*[:–—-]\s*(.+)$"),
     ("Шкала Бартел", r"^Шкала\s+Бартел\w*\s*[:–—-]\s*(.+)$"),
 )
 
@@ -313,7 +315,7 @@ SECTION_STARTS: dict[str, tuple[str, ...]] = {
     "movement_regimen": (r"двигательн\w*\s+режим",),
     "diet": (r"\bдиета\b",),
     "medication": (
-        r"(?:план\s+лечения\s+)?медикаментозн\w*\s+(?:лечение|терапия)",
+        r"(?:назначения\s+)?(?:план\s+лечения\s+)?медикаментозн\w*\s+(?:лечение|терапия)",
         r"лекарственн\w*\s+терап\w*",
     ),
     "goal": (r"цель\s+на\s+этап\s+медицинской\s+реабилитации",),
@@ -325,7 +327,7 @@ SECTION_STOP = re.compile(
     r"инструментальные исследования|результаты осмотров|реабилитационный потенциал|факторы,? ограничивающие|"
     r"факторы риска|диагноз клинический|цель на этап|цель,? поставленная на этап|"
     r"задачи медицинской|индивидуальный план|двигательный режим|диета|"
-    r"медикаментозная (?:терапия|лечение)|немедикаментозное лечение|"
+    r"медикаментозная (?:терапия|лечение)|немедикаментозн\w* (?:лечение|терапия)|"
     r"реабилитационные мероприятия|реабилитационный диагноз|функциональный диагноз|динамика|"
     r"логопедический статус|нейропсихологический статус|обоснование диагноза|"
     r"выполненные медицинские вмешательства|план обследования|план лечения|назначения|"
@@ -335,7 +337,12 @@ SECTION_STOP = re.compile(
 )
 
 
-def extract_section(document: ParsedDocument, patterns: tuple[str, ...]) -> str:
+def extract_section(
+    document: ParsedDocument,
+    patterns: tuple[str, ...],
+    *,
+    preserve_lines: bool = False,
+) -> str:
     lines = _document_lines(document)
     heading_prefix = r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
     for index, line in enumerate(lines):
@@ -350,12 +357,20 @@ def extract_section(document: ParsedDocument, patterns: tuple[str, ...]) -> str:
                     break
                 if following.strip():
                     values.append(following.strip())
-            return clean_text(" ".join(values))
+            cleaned = [clean_text(value) for value in values if clean_text(value)]
+            return "\n".join(cleaned) if preserve_lines else clean_text(" ".join(cleaned))
     return ""
 
 
 def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
-    result = {name: extract_section(document, patterns) for name, patterns in SECTION_STARTS.items()}
+    result = {
+        name: extract_section(
+            document,
+            patterns,
+            preserve_lines=name == "medication",
+        )
+        for name, patterns in SECTION_STARTS.items()
+    }
     if not result["clinical_diagnosis"]:
         result["clinical_diagnosis"] = extract_section(document, (r"основное\s+заболевание",))
     if not result["laboratory_results"] or not result["instrumental_results"]:
@@ -433,6 +448,8 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
                 r"(?:^|\b)(?:\d+(?:\.\d+)*[.)]?\s*)?"
                 r"(?:(свободный|общий|палатный|постельный)\s+двигательный\s+режим|"
                 r"назначения\s+режим\s*[:–—.-]?\s*(свободный|общий|палатный|постельный)|"
+                r"(?:план\s+лечения\s*[:–—.-]?\s*)?режим\s*[:–—.-]?\s*"
+                r"(свободный|общий|палатный|постельный)|"
                 r"(?:план\s+лечения\s*[:–—.-]?\s*)?"
                 r"двигательн\w*\s+режим\s*[:–—.-]?\s*"
                 r"(свободный|общий|палатный|постельный))\b",
