@@ -643,7 +643,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                     "Недобор реабилитационных занятий: минимум 180 минут "
                     f"в день. {details}."
                 ),
-                severity=ReviewSeverity.BLOCKING,
+                severity=ReviewSeverity.WARNING,
                 field="procedures.daily_minutes",
                 source=source_by_date.get(deficient[0][0]),
             )

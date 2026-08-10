@@ -628,7 +628,7 @@ def test_icf_ownership_filters_physician_copy_and_keeps_dynamics_and_pf() -> Non
     assert b_domains[0].dynamic_marker == "+"
 
     structure = next(item for item in episode.icf_domains if item.code == "s110")
-    assert structure.specialist is SpecialistRole.NEUROLOGIST
+    assert structure.specialist is SpecialistRole.OTHER
     assert structure.initial and structure.final
     assert structure.initial.value == structure.final.value == 3
     assert structure.final_source == Path("/patient/physician-follow-up.docx")
@@ -636,7 +636,7 @@ def test_icf_ownership_filters_physician_copy_and_keeps_dynamics_and_pf() -> Non
 
     personal = next(item for item in episode.icf_domains if item.code == "Pf")
     assert personal.description == "Мужской, 58 лет"
-    assert personal.specialist is SpecialistRole.PATHOPSYCHOLOGIST
+    assert personal.specialist is SpecialistRole.OTHER
     assert personal.initial is None and personal.final is None
     assert any(issue.code == "personal_factor_conflict" for issue in episode.issues)
 
@@ -657,6 +657,8 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
         clinical_datetime=datetime(2026, 8, 3, 8, 39),
         tables=[
             _icf_table(
+                _row({0: "e310", 1: "Семья и ближайшие родственники", 11: "4+"}),
+                _row({0: "d550", 1: "Приём пищи", 11: "2"}),
                 ParsedRow(
                     (
                         ParsedCell(0, 1, "Pf"),
@@ -675,10 +677,17 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
 
     personal = next(item for item in episode.icf_domains if item.code == "Pf")
     assert personal.description == "Мужчина 65 лет, не работает"
-    assert personal.specialist is SpecialistRole.NEUROLOGIST
+    assert personal.specialist is SpecialistRole.OTHER
     assert personal.initial is None and personal.final is None
     assert personal.initial_source == Path("/patient/physician-initial.docx")
     assert personal.final_source is None
+    environment = next(item for item in episode.icf_domains if item.code == "e310")
+    assert environment.initial and environment.initial.display() == "4+"
+    assert environment.specialist is SpecialistRole.OTHER
+    assert environment.initial_source == Path("/patient/physician-initial.docx")
+    activity = next(item for item in episode.icf_domains if item.code == "d550")
+    assert activity.initial and activity.initial.display() == "2"
+    assert activity.specialist is SpecialistRole.OTHER
 
 
 def test_pf_is_merged_once_across_roles_and_prefers_authoritative_source() -> None:
@@ -719,7 +728,7 @@ def test_pf_is_merged_once_across_roles_and_prefers_authoritative_source() -> No
     personal = [item for item in episode.icf_domains if item.code.casefold() == "pf"]
     assert len(personal) == 1
     assert personal[0].description == "женщина, 78 лет"
-    assert personal[0].specialist is SpecialistRole.FRM
+    assert personal[0].specialist is SpecialistRole.OTHER
     assert personal[0].initial_source == Path("/patient/frm.docx")
     assert any(issue.code == "personal_factor_conflict" for issue in episode.issues)
 

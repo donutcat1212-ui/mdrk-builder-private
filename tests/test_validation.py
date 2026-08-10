@@ -54,7 +54,7 @@ def test_manual_fill_removes_stale_required_issue() -> None:
     assert not any(issue.code.startswith("required_") for issue in current_issues(episode, MdrkKind.INITIAL))
 
 
-def test_daily_rehabilitation_minutes_below_180_are_blocking() -> None:
+def test_daily_rehabilitation_minutes_below_180_are_warning() -> None:
     episode = _valid_episode()
     first_day = date(2026, 8, 4)
     second_day = date(2026, 8, 5)
@@ -93,10 +93,10 @@ def test_daily_rehabilitation_minutes_below_180_are_blocking() -> None:
     issues = current_issues(episode, MdrkKind.INITIAL)
     issue = next(item for item in issues if item.code == "rehab_daily_minutes_below_minimum")
 
-    assert issue.severity is ReviewSeverity.BLOCKING
+    assert issue.severity is ReviewSeverity.WARNING
     assert "05.08.2026 — 150 мин" in issue.message
     assert "04.08.2026" not in issue.message
-    assert not can_generate(episode, MdrkKind.INITIAL)
+    assert can_generate(episode, MdrkKind.INITIAL)
 
 
 def test_weekends_are_excluded_from_daily_rehabilitation_minimum() -> None:

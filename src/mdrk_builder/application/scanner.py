@@ -563,7 +563,7 @@ def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> N
 
         selected_record, selected_observation = initial or final
         final_record, _final_observation = final
-        role = selected_observation.specialist or selected_record.classification.role
+        role = selected_observation.specialist or SpecialistRole.OTHER
         initial_source = initial[0].document.source_path if initial is not None else None
         final_source = (
             final_record.document.source_path
@@ -626,8 +626,6 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
                 role in physician_roles and owner in physician_roles
             )
             if owner is not None and not compatible_owner:
-                continue
-            if role in physician_roles and owner is None and not observation.code.casefold().startswith("s"):
                 continue
             filtered.append(observation)
         observations = filtered
@@ -693,10 +691,15 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
                 and episode.initial_meeting_at is not None
                 and final_record.clinical_datetime > episode.initial_meeting_at
             )
+            specialist = sample.specialist or (
+                SpecialistRole.OTHER
+                if role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
+                else role
+            )
             domain = IcfDomain(
                 code=sample.code,
                 description=sample.description,
-                specialist=role,
+                specialist=specialist,
                 initial=initial,
                 final=final,
                 note=sample.note,

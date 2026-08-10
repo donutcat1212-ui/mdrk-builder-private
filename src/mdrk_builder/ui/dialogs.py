@@ -5,7 +5,13 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
-from mdrk_builder.domain import IcfDomain, Procedure, ScaleMeasurement, SpecialistFinding
+from mdrk_builder.domain import (
+    IcfDomain,
+    Procedure,
+    ScaleMeasurement,
+    SpecialistFinding,
+    SpecialistRole,
+)
 from mdrk_builder.ui.episode_adapter import (
     format_datetime,
     format_qualifier,
@@ -153,7 +159,11 @@ class IcfDomainDialog(simpledialog.Dialog):
         values = {
             "code": self.domain.code if self.domain else "",
             "description": self.domain.description if self.domain else "",
-            "role": self.domain.specialist.display_name if self.domain else "",
+            "role": (
+                self.domain.specialist.display_name
+                if self.domain and self.domain.specialist is not SpecialistRole.OTHER
+                else ""
+            ),
             "initial": format_qualifier(self.domain.initial) if self.domain else "",
             "final": format_qualifier(self.domain.final) if self.domain else "",
             "note": self.domain.note if self.domain else "",
@@ -173,7 +183,18 @@ class IcfDomainDialog(simpledialog.Dialog):
             self._variables[key] = variable
             if key == "role":
                 widget: tk.Widget = ttk.Combobox(
-                    master, textvariable=variable, values=role_names(), state="readonly", width=46
+                    master,
+                    textvariable=variable,
+                    values=(
+                        "",
+                        *(
+                            role.display_name
+                            for role in SpecialistRole
+                            if role is not SpecialistRole.OTHER
+                        ),
+                    ),
+                    state="readonly",
+                    width=46,
                 )
             else:
                 widget = ttk.Entry(master, textvariable=variable, width=49)
@@ -188,7 +209,9 @@ class IcfDomainDialog(simpledialog.Dialog):
                 raise ValueError("Введите код МКФ")
             if not self._variables["description"].get().strip():
                 raise ValueError("Введите описание домена")
-            role_from_name(self._variables["role"].get())
+            role_value = self._variables["role"].get().strip()
+            if role_value:
+                role_from_name(role_value)
             parse_qualifier(self._variables["initial"].get())
             parse_qualifier(self._variables["final"].get())
         except ValueError as exc:
@@ -201,7 +224,11 @@ class IcfDomainDialog(simpledialog.Dialog):
         self.result = IcfDomain(
             code=self._variables["code"].get().strip(),
             description=self._variables["description"].get().strip(),
-            specialist=role_from_name(self._variables["role"].get()),
+            specialist=(
+                role_from_name(self._variables["role"].get())
+                if self._variables["role"].get().strip()
+                else SpecialistRole.OTHER
+            ),
             initial=parse_qualifier(self._variables["initial"].get()),
             final=parse_qualifier(self._variables["final"].get()),
             note=self._variables["note"].get().strip(),

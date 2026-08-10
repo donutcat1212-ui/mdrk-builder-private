@@ -132,7 +132,6 @@ def _representative_episode(folder: Path) -> Episode:
                 SpecialistRole.OTHER,
                 initial=IcfQualifier(4, facilitator=True),
                 final=IcfQualifier(3, facilitator=True),
-                note="семья",
             ),
             IcfDomain(
                 "d450",
@@ -338,6 +337,7 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         None,
     ]
     initial_e310 = _find_domain_row(initial_mcf, "e310")
+    assert initial_e310.cells[13].text == ""
     assert [_cell_fill(initial_e310.cells[index]) for index in range(2, 11)] == [
         "BFBFBF",
         "BFBFBF",

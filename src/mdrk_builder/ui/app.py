@@ -801,7 +801,11 @@ class MdrkBuilderApp:
                 values=(
                     domain.code,
                     domain.description,
-                    domain.specialist.display_name,
+                    (
+                        ""
+                        if domain.specialist is SpecialistRole.OTHER
+                        else domain.specialist.display_name
+                    ),
                     domain.initial.display() if domain.initial else "",
                     domain.final.display() if domain.final else "",
                     domain.dynamic_marker if domain.dynamic_marker is not None else "?",
@@ -1202,7 +1206,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.7\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.8\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 

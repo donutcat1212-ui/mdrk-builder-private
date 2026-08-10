@@ -10,6 +10,7 @@ from mdrk_builder.application.validation import (
 from mdrk_builder.domain import (
     Episode,
     IcfDomain,
+    IcfQualifier,
     MdrkKind,
     Procedure,
     ReviewIssue,
@@ -180,6 +181,33 @@ def test_procedure_edit_preserves_extracted_schedule_provenance(tmp_path) -> Non
     assert dialog.result.duration_minutes == 45
     assert dialog.result.performed_dates == previous.performed_dates
     assert dialog.result.count_needs_review is True
+
+
+def test_icf_domain_can_keep_responsible_specialist_blank(tmp_path) -> None:
+    previous = IcfDomain(
+        code="e310",
+        description="Семья и ближайшие родственники",
+        specialist=SpecialistRole.FRM,
+        initial=IcfQualifier(4, facilitator=True),
+        initial_source=tmp_path / "невролог.docx",
+    )
+    dialog = object.__new__(dialogs_module.IcfDomainDialog)
+    dialog.domain = previous
+    dialog._variables = {
+        "code": _Variable(previous.code),
+        "description": _Variable(previous.description),
+        "role": _Variable(""),
+        "initial": _Variable("4+"),
+        "final": _Variable(""),
+        "note": _Variable(""),
+    }
+
+    assert dialog.validate()
+    dialog.apply()
+
+    assert dialog.result is not None
+    assert dialog.result.specialist is SpecialistRole.OTHER
+    assert dialog.result.initial_source == previous.initial_source
 
 
 def test_invalid_meeting_keeps_current_snapshot_and_text(monkeypatch, tmp_path) -> None:
