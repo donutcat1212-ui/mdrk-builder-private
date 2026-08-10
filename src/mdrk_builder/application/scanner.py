@@ -485,6 +485,127 @@ def _observation_map(observations: list[IcfObservation]) -> dict[tuple[str, str]
     }
 
 
+_PERSONAL_FACTOR_ROLE_PRIORITY = {
+    SpecialistRole.PATHOPSYCHOLOGIST: 70,
+    SpecialistRole.NEUROPSYCHOLOGIST: 65,
+    SpecialistRole.FRM: 60,
+    SpecialistRole.NEUROLOGIST: 55,
+    SpecialistRole.LOGOPEDIST: 30,
+    SpecialistRole.OCCUPATIONAL_THERAPIST: 25,
+    SpecialistRole.PHYSICAL_THERAPIST: 20,
+}
+
+
+def _normalized_icf_code(value: str) -> str:
+    return value.casefold().replace(" ", "")
+
+
+def _normalized_personal_factor_description(value: str) -> str:
+    return " ".join(value.casefold().replace("ё", "е").split()).strip(" .,:;")
+
+
+def _personal_factor_records(
+    records: list[ScannedRecord],
+) -> dict[str, list[tuple[ScannedRecord, IcfObservation]]]:
+    """Collect descriptive Pf rows globally instead of assigning them to one profile."""
+
+    grouped: dict[str, list[tuple[ScannedRecord, IcfObservation]]] = defaultdict(list)
+    physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
+    for record in records:
+        source_role = record.classification.role
+        if source_role not in _PERSONAL_FACTOR_ROLE_PRIORITY:
+            continue
+        for observation in extract_icf_observations(record.document):
+            code = _normalized_icf_code(observation.code)
+            if not code.startswith("pf") or not observation.description.strip():
+                continue
+            owner = observation.specialist
+            compatible_owner = owner is None or owner is source_role or (
+                source_role in physician_roles and owner in physician_roles
+            )
+            if not compatible_owner:
+                # A physician's table may contain a copied domain owned by another
+                # specialist. It is not an authoritative personal-factor source.
+                continue
+            grouped[code].append((record, observation))
+    return grouped
+
+
+def _select_personal_factor(
+    occurrences: list[tuple[ScannedRecord, IcfObservation]],
+    boundary: datetime | None,
+) -> tuple[ScannedRecord, IcfObservation] | None:
+    dated = [
+        item
+        for item in occurrences
+        if item[0].clinical_datetime is not None
+        and (boundary is None or item[0].clinical_datetime <= boundary)
+    ]
+    eligible = dated or [item for item in occurrences if item[0].clinical_datetime is None]
+    if not eligible:
+        return None
+    return max(
+        eligible,
+        key=lambda item: (
+            _PERSONAL_FACTOR_ROLE_PRIORITY[item[0].classification.role],
+            item[0].clinical_datetime or datetime.min,
+            str(item[0].document.source_path).casefold(),
+        ),
+    )
+
+
+def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> None:
+    for occurrences in _personal_factor_records(records).values():
+        initial = _select_personal_factor(occurrences, episode.initial_meeting_at)
+        final = _select_personal_factor(occurrences, episode.final_meeting_at)
+        if final is None:
+            continue
+
+        selected_record, selected_observation = initial or final
+        final_record, _final_observation = final
+        role = selected_observation.specialist or selected_record.classification.role
+        initial_source = initial[0].document.source_path if initial is not None else None
+        final_source = (
+            final_record.document.source_path
+            if initial is None or final_record.document.source_path != initial_source
+            else None
+        )
+        episode.icf_domains.append(
+            IcfDomain(
+                code=selected_observation.code,
+                description=selected_observation.description,
+                specialist=role,
+                note=selected_observation.note,
+                initial_source=initial_source,
+                final_source=final_source,
+            )
+        )
+
+        eligible_final = [
+            item
+            for item in occurrences
+            if item[0].clinical_datetime is None
+            or episode.final_meeting_at is None
+            or item[0].clinical_datetime <= episode.final_meeting_at
+        ]
+        descriptions = {
+            _normalized_personal_factor_description(item[1].description)
+            for item in eligible_final
+            if item[1].description.strip()
+        }
+        if len(descriptions) > 1:
+            episode.issues.append(
+                ReviewIssue(
+                    "personal_factor_conflict",
+                    "В источниках найдены разные формулировки персонального фактора Pf. "
+                    "Выбрана одна строка по приоритету источника; проверьте текст вручную.",
+                    ReviewSeverity.WARNING,
+                    f"icf.{selected_observation.code}",
+                    selected_record.document.source_path,
+                )
+            )
+
+
 def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[tuple[ScannedRecord, list[IcfObservation]]]]:
     grouped: dict[SpecialistRole, list[tuple[ScannedRecord, list[IcfObservation]]]] = defaultdict(list)
     for record in records:
@@ -493,14 +614,12 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
         if role is SpecialistRole.OTHER:
             continue
         physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
-        personal_factor_roles = {
-            SpecialistRole.NEUROPSYCHOLOGIST,
-            SpecialistRole.PATHOPSYCHOLOGIST,
-        }
         filtered: list[IcfObservation] = []
         for observation in observations:
             is_personal_factor = observation.code.casefold().startswith("pf")
-            if is_personal_factor and role not in personal_factor_roles:
+            if is_personal_factor:
+                # Pf is episode-level descriptive data and is merged separately
+                # across roles to avoid duplicate rows.
                 continue
             owner = observation.specialist
             compatible_owner = owner is role or (
@@ -520,6 +639,7 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
 
 
 def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
+    _merge_personal_factors(episode, records)
     for role, profiles in _profile_records(records).items():
         profile_maps = [(record, _observation_map(values)) for record, values in profiles]
         all_keys = list(dict.fromkeys(key for _, values in profile_maps for key in values))

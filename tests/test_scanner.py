@@ -13,7 +13,8 @@ from mdrk_builder.application.scanner import (
     _records_for_selected_medical_record,
     scan_patient_folder,
 )
-from mdrk_builder.domain import Episode, ReviewSeverity, SpecialistRole
+from mdrk_builder.application.snapshot import build_snapshot
+from mdrk_builder.domain import Episode, MdrkKind, ReviewSeverity, SpecialistRole
 from mdrk_builder.infrastructure.classifier import DocumentClassification
 from mdrk_builder.infrastructure.ooxml_reader import (
     BodyItem,
@@ -637,7 +638,7 @@ def test_icf_ownership_filters_physician_copy_and_keeps_dynamics_and_pf() -> Non
     assert personal.description == "Мужской, 58 лет"
     assert personal.specialist is SpecialistRole.PATHOPSYCHOLOGIST
     assert personal.initial is None and personal.final is None
-    assert not any(issue.field == "icf.Pf" for issue in episode.issues)
+    assert any(issue.code == "personal_factor_conflict" for issue in episode.issues)
 
     zero_domain = next(item for item in episode.icf_domains if item.code == "e310")
     assert zero_domain.initial and zero_domain.initial.value == 0
@@ -647,6 +648,110 @@ def test_icf_ownership_filters_physician_copy_and_keeps_dynamics_and_pf() -> Non
     assert medication.final and medication.final.display() == "4+"
     assert medication.initial_source == Path("/patient/physician-initial.docx")
     assert medication.final_source == Path("/patient/physician-initial.docx")
+
+
+def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
+    physician = _record(
+        "/patient/physician-initial.docx",
+        "",
+        clinical_datetime=datetime(2026, 8, 3, 8, 39),
+        tables=[
+            _icf_table(
+                ParsedRow(
+                    (
+                        ParsedCell(0, 1, "Pf"),
+                        ParsedCell(1, 14, "Мужчина 65 лет, не работает"),
+                    ),
+                    15,
+                )
+            )
+        ],
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 8, 4, 8)
+    episode.final_meeting_at = datetime(2026, 8, 14, 8)
+
+    _merge_icf(episode, [physician])
+
+    personal = next(item for item in episode.icf_domains if item.code == "Pf")
+    assert personal.description == "Мужчина 65 лет, не работает"
+    assert personal.specialist is SpecialistRole.NEUROLOGIST
+    assert personal.initial is None and personal.final is None
+    assert personal.initial_source == Path("/patient/physician-initial.docx")
+    assert personal.final_source is None
+
+
+def test_pf_is_merged_once_across_roles_and_prefers_authoritative_source() -> None:
+    ft = _record(
+        "/patient/ft.docx",
+        "",
+        role=SpecialistRole.PHYSICAL_THERAPIST,
+        clinical_datetime=datetime(2026, 6, 22, 10),
+        tables=[
+            _icf_table(
+                ParsedRow(
+                    (ParsedCell(0, 1, "Pf"), ParsedCell(1, 15, "женщина, возраст 78 года.")),
+                    16,
+                )
+            )
+        ],
+    )
+    frm = _record(
+        "/patient/frm.docx",
+        "",
+        role=SpecialistRole.FRM,
+        clinical_datetime=datetime(2026, 6, 22, 9),
+        tables=[
+            _icf_table(
+                ParsedRow(
+                    (ParsedCell(0, 1, "Pf"), ParsedCell(1, 14, "женщина, 78 лет")),
+                    15,
+                )
+            )
+        ],
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 23, 8)
+    episode.final_meeting_at = datetime(2026, 7, 6, 8)
+
+    _merge_icf(episode, [ft, frm])
+
+    personal = [item for item in episode.icf_domains if item.code.casefold() == "pf"]
+    assert len(personal) == 1
+    assert personal[0].description == "женщина, 78 лет"
+    assert personal[0].specialist is SpecialistRole.FRM
+    assert personal[0].initial_source == Path("/patient/frm.docx")
+    assert any(issue.code == "personal_factor_conflict" for issue in episode.issues)
+
+
+def test_pf_first_seen_after_mdrk1_does_not_leak_into_initial_snapshot() -> None:
+    later = _record(
+        "/patient/ergo-follow-up.docx",
+        "",
+        role=SpecialistRole.OCCUPATIONAL_THERAPIST,
+        clinical_datetime=datetime(2026, 6, 10, 12),
+        tables=[
+            _icf_table(
+                ParsedRow(
+                    (ParsedCell(0, 1, "Pf"), ParsedCell(1, 14, "Женщина 70 лет")),
+                    15,
+                )
+            )
+        ],
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 6, 8)
+    episode.final_meeting_at = datetime(2026, 6, 19, 8)
+
+    _merge_icf(episode, [later])
+
+    personal = next(item for item in episode.icf_domains if item.code == "Pf")
+    assert personal.initial_source is None
+    assert personal.final_source == Path("/patient/ergo-follow-up.docx")
+    assert not any(
+        item.code == "Pf" for item in build_snapshot(episode, MdrkKind.INITIAL).icf_domains
+    )
+    assert any(item.code == "Pf" for item in build_snapshot(episode, MdrkKind.FINAL).icf_domains)
 
 
 def test_follow_up_only_domain_does_not_backfill_initial_point() -> None:
