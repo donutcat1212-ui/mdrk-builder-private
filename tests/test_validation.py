@@ -5,9 +5,13 @@ import pytest
 
 from mdrk_builder.application.validation import (
     acknowledge_conflict,
+    acknowledge_issue,
     can_generate,
+    clear_issue_acknowledgements,
     current_issues,
+    has_issue_acknowledgements,
     is_conflict_acknowledged,
+    is_issue_acknowledged,
 )
 from mdrk_builder.domain import (
     Episode,
@@ -95,6 +99,174 @@ def test_daily_rehabilitation_minutes_below_180_are_blocking() -> None:
     assert not can_generate(episode, MdrkKind.INITIAL)
 
 
+def test_weekends_are_excluded_from_daily_rehabilitation_minimum() -> None:
+    episode = _valid_episode()
+    saturday = date(2026, 8, 8)
+    sunday = date(2026, 8, 9)
+    monday = date(2026, 8, 10)
+    episode.procedures.extend(
+        (
+            Procedure(
+                "ЛФК",
+                "ФТ",
+                3,
+                120,
+                "периодически",
+                performed_dates=(saturday, sunday, monday),
+            ),
+            Procedure(
+                "Занятие без длительности",
+                "ФТ",
+                1,
+                None,
+                "однократно",
+                performed_dates=(saturday,),
+            ),
+        )
+    )
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+    deficient = next(
+        issue for issue in issues if issue.code == "rehab_daily_minutes_below_minimum"
+    )
+
+    assert "10.08.2026 — 120 мин" in deficient.message
+    assert "08.08.2026" not in deficient.message
+    assert "09.08.2026" not in deficient.message
+    assert not any(
+        issue.code == "rehab_daily_minutes_incomplete" for issue in issues
+    )
+
+
+def test_weekend_only_rehabilitation_does_not_emit_daily_minute_issues() -> None:
+    episode = _valid_episode()
+    episode.procedures.append(
+        Procedure(
+            "Занятие",
+            "ФТ",
+            2,
+            None,
+            "ежедневно",
+            performed_dates=(date(2026, 8, 8), date(2026, 8, 9)),
+        )
+    )
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert not any(issue.code.startswith("rehab_daily_minutes_") for issue in issues)
+
+
+def test_any_generated_blocker_can_be_acknowledged_and_stays_visible() -> None:
+    episode = _valid_episode()
+    episode.sources.clear()
+    issue = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_physician_source"
+    )
+
+    acknowledge_issue(episode, issue, MdrkKind.INITIAL)
+    refreshed = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_physician_source"
+    )
+
+    assert refreshed.acknowledged
+    assert refreshed.severity is ReviewSeverity.INFO
+    assert "Игнорировано вручную (было: блокирующая проблема)" in refreshed.message
+    assert is_issue_acknowledged(
+        episode, refreshed, MdrkKind.INITIAL
+    )
+    assert can_generate(episode, MdrkKind.INITIAL)
+
+
+def test_acknowledged_warning_stays_visible_as_info() -> None:
+    episode = _valid_episode()
+    issue = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "review_disease_history_missing"
+    )
+
+    acknowledge_issue(episode, issue, MdrkKind.INITIAL)
+    refreshed = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "review_disease_history_missing"
+    )
+
+    assert refreshed.acknowledged
+    assert refreshed.severity is ReviewSeverity.INFO
+    assert has_issue_acknowledgements(episode)
+
+    clear_issue_acknowledgements(episode)
+
+    assert not has_issue_acknowledgements(episode)
+
+
+def test_acknowledgement_is_bound_to_issue_state_and_kind() -> None:
+    episode = _valid_episode()
+    episode.initial_sections.clinical_diagnosis = ""
+    episode.sections.clinical_diagnosis = ""
+    initial_issue = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_diagnosis"
+    )
+    acknowledge_issue(episode, initial_issue, MdrkKind.INITIAL)
+
+    final_issue = next(
+        item
+        for item in current_issues(episode, MdrkKind.FINAL)
+        if item.code == "required_diagnosis"
+    )
+
+    assert final_issue.severity is ReviewSeverity.BLOCKING
+    assert not final_issue.acknowledged
+    assert not can_generate(episode, MdrkKind.FINAL)
+    assert can_generate(episode, MdrkKind.INITIAL)
+
+    episode.initial_sections.clinical_diagnosis = "Временно заполнен"
+    current_issues(episode, MdrkKind.INITIAL)
+    episode.initial_sections.clinical_diagnosis = ""
+    recreated = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_diagnosis"
+    )
+
+    assert recreated.severity is ReviewSeverity.BLOCKING
+    assert not recreated.acknowledged
+
+
+def test_duplicate_issue_codes_can_be_acknowledged_individually() -> None:
+    episode = _valid_episode()
+    episode.procedures.extend(
+        (
+            Procedure("ЛФК", "", 1, 30, "однократно"),
+            Procedure("Тренажёр", "", 1, 30, "однократно"),
+        )
+    )
+    warnings = [
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "procedure_specialist_missing"
+    ]
+
+    acknowledge_issue(episode, warnings[0], MdrkKind.INITIAL)
+    refreshed = [
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "procedure_specialist_missing"
+    ]
+
+    assert [(item.field, item.acknowledged) for item in refreshed] == [
+        ("procedures.0", True),
+        ("procedures.1", False),
+    ]
+
+
 def test_source_conflicts_require_explicit_value_bound_acknowledgement() -> None:
     episode = _valid_episode()
     episode.identity.medical_record_number = "РУЧНОЙ 9004/99"
@@ -133,7 +305,7 @@ def test_source_conflicts_require_explicit_value_bound_acknowledgement() -> None
             "mixed_hospitalizations_admission_date",
         }
     ]
-    assert all(issue.severity is ReviewSeverity.WARNING for issue in acknowledged)
+    assert all(issue.severity is ReviewSeverity.INFO for issue in acknowledged)
     assert all("Исходный конфликт сохранён" in issue.message for issue in acknowledged)
     assert any("РУЧНОЙ 9004/99" in issue.message for issue in acknowledged)
     assert any("05.06.2026 12:30" in issue.message for issue in acknowledged)

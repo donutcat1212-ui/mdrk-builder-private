@@ -155,6 +155,8 @@ class ReviewIssue:
     severity: ReviewSeverity = ReviewSeverity.WARNING
     field: str = ""
     source: Path | None = None
+    acknowledged: bool = False
+    acknowledgement_key: str = ""
 
 
 @dataclass(slots=True)
@@ -173,6 +175,9 @@ class Episode:
     icf_domains: list[IcfDomain] = field(default_factory=list)
     procedures: list[Procedure] = field(default_factory=list)
     issues: list[ReviewIssue] = field(default_factory=list)
+    acknowledged_issues: set[str] = field(default_factory=set)
+    # Kept for backward compatibility with saved UI state from versions that
+    # allowed acknowledging only two source conflicts.
     acknowledged_conflicts: dict[str, str] = field(default_factory=dict)
     excluded_source_paths: set[Path] = field(default_factory=set)
     materialized_medical_record_number: str = ""

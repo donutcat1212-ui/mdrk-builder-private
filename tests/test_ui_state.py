@@ -2,7 +2,11 @@ import queue
 from datetime import date, datetime
 from types import SimpleNamespace
 
-from mdrk_builder.application.validation import is_conflict_acknowledged
+from mdrk_builder.application.validation import (
+    acknowledge_issue,
+    has_issue_acknowledgements,
+    is_issue_acknowledged,
+)
 from mdrk_builder.domain import (
     Episode,
     IcfDomain,
@@ -263,18 +267,21 @@ def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
     assert errors and "Сканировать" in errors[0]
 
 
-def test_selected_source_conflict_acknowledges_value_after_form_apply(
+def test_selected_issue_can_be_ignored_after_explicit_confirmation(
     monkeypatch,
     tmp_path,
 ) -> None:
-    code = "identity_conflict_medical_record_number"
+    issue = ReviewIssue(
+        code="arbitrary_non_whitelisted_blocker",
+        message="Не набрано 180 минут",
+        severity=ReviewSeverity.BLOCKING,
+        field="procedures.daily_minutes",
+        source=tmp_path / "назначения.docx",
+    )
     app = object.__new__(MdrkBuilderApp)
     app.episode = Episode(folder=tmp_path)
-    app.episode.identity.medical_record_number = "автоматический"
     app._current_kind = MdrkKind.INITIAL
-    app._issue_refs = {
-        "0": ReviewIssue(code, "Разные номера ИБ", ReviewSeverity.BLOCKING)
-    }
+    app._issue_refs = {"0": issue}
     app.issue_tree = _SelectableTree("0")
     app.status_var = _Variable()
     applied: list[MdrkKind] = []
@@ -282,7 +289,6 @@ def test_selected_source_conflict_acknowledges_value_after_form_apply(
 
     def apply_form(kind: MdrkKind) -> bool:
         applied.append(kind)
-        app.episode.identity.medical_record_number = "РУЧНОЙ 9004/99"
         return True
 
     app._apply_form = apply_form
@@ -293,13 +299,36 @@ def test_selected_source_conflict_acknowledges_value_after_form_apply(
         lambda _title, message: prompts.append(message) or True,
     )
 
-    app._acknowledge_selected_conflict()
+    app._acknowledge_selected_issue()
 
     assert applied == [MdrkKind.INITIAL]
-    assert is_conflict_acknowledged(app.episode, code)
-    assert prompts and "РУЧНОЙ 9004/99" in prompts[0]
-    assert "Остальные блокирующие проверки" in prompts[0]
-    assert "РУЧНОЙ 9004/99" in app.status_var.get()
+    assert is_issue_acknowledged(app.episode, issue, MdrkKind.INITIAL)
+    assert prompts
+    assert "БЛОКИРУЕТ" in prompts[0]
+    assert issue.message in prompts[0]
+    assert str(issue.source) in prompts[0]
+    assert "останется видимой" in prompts[0]
+    assert "игнорируется" in app.status_var.get()
+
+
+def test_reset_issue_acknowledgements_clears_all_kinds(monkeypatch, tmp_path) -> None:
+    initial_issue = ReviewIssue("initial_warning", "Нужна проверка")
+    final_issue = ReviewIssue("final_warning", "Нужна проверка в МДРК-2")
+    app = object.__new__(MdrkBuilderApp)
+    app.episode = Episode(folder=tmp_path)
+    app._current_kind = MdrkKind.INITIAL
+    app.status_var = _Variable()
+    refreshes: list[bool] = []
+    app._refresh_issues = lambda: refreshes.append(True)
+    acknowledge_issue(app.episode, initial_issue, MdrkKind.INITIAL)
+    acknowledge_issue(app.episode, final_issue, MdrkKind.FINAL)
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *_args: True)
+
+    app._reset_issue_acknowledgements()
+
+    assert not has_issue_acknowledgements(app.episode)
+    assert refreshes == [True]
+    assert "сброшено" in app.status_var.get()
 
 
 def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(

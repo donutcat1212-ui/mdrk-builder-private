@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import date
+from dataclasses import fields, is_dataclass, replace
+from datetime import date, datetime
+from enum import Enum
+from hashlib import sha256
+import json
 from pathlib import Path
+from typing import Any
 
 from mdrk_builder.application.snapshot import select_findings, select_scale_rows
 from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity, SpecialistRole
@@ -75,6 +79,134 @@ def _conflict_display_value(episode: Episode, code: str) -> str:
     return ""
 
 
+def _canonical_value(value: Any) -> Any:
+    """Return stable JSON-compatible state for an issue acknowledgement."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _canonical_value(getattr(value, item.name))
+            for item in fields(value)
+            if item.name not in {"acknowledged", "acknowledgement_key"}
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            (_canonical_value(item) for item in value),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
+        )
+    return value
+
+
+def _indexed_item(items: list[Any], index_text: str) -> Any:
+    try:
+        return items[int(index_text)]
+    except (ValueError, IndexError):
+        return items
+
+
+def _issue_field_state(episode: Episode, issue: ReviewIssue, kind: MdrkKind) -> Any:
+    """Resolve the part of the episode that can change this issue.
+
+    Validation fields are UI-oriented paths rather than direct model paths, so
+    the few collection aliases are handled explicitly. Falling back to the
+    issue itself is safe: the acknowledgement will still be bound to its text,
+    severity, field and source.
+    """
+
+    path = issue.field.split(".") if issue.field else []
+    if not path:
+        return None
+    root = path[0]
+    if root == "meeting_at":
+        return episode.meeting_at(kind)
+    if root in {"admission_datetime", "discharge_datetime", "final_meeting_at"}:
+        return getattr(episode, root)
+    if root in {"identity", "initial_sections", "sections"}:
+        value: Any = getattr(episode, root)
+        for segment in path[1:]:
+            value = getattr(value, segment, value)
+        return value
+    if root == "sources":
+        return (episode.sources, episode.excluded_source_paths)
+    if root == "findings":
+        return (episode.findings, episode.meeting_at(kind))
+    if root == "scales":
+        rows = select_scale_rows(episode, kind)
+        return _indexed_item(rows, path[1]) if len(path) > 1 else rows
+    if root == "icf":
+        return (
+            _indexed_item(episode.icf_domains, path[1])
+            if len(path) > 1
+            else episode.icf_domains
+        )
+    if root == "procedures":
+        if len(path) > 1 and path[1].isdigit():
+            return _indexed_item(episode.procedures, path[1])
+        return episode.procedures
+    return getattr(episode, root, None)
+
+
+def _issue_fingerprint(episode: Episode, issue: ReviewIssue, kind: MdrkKind) -> str:
+    payload = {
+        "episode": str(episode.folder),
+        "kind": kind.value,
+        "issue": {
+            "code": issue.code,
+            "message": issue.message,
+            "severity": issue.severity.value,
+            "field": issue.field,
+            "source": str(issue.source) if issue.source is not None else None,
+        },
+        "field_state": _canonical_value(_issue_field_state(episode, issue, kind)),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{kind.value}:{sha256(encoded).hexdigest()}"
+
+
+def acknowledge_issue(episode: Episode, issue: ReviewIssue, kind: MdrkKind) -> None:
+    """Ignore one current review issue without removing it from the review list."""
+
+    key = issue.acknowledgement_key or _issue_fingerprint(episode, issue, kind)
+    episode.acknowledged_issues.add(key)
+
+
+def clear_issue_acknowledgements(episode: Episode) -> None:
+    episode.acknowledged_issues.clear()
+    episode.acknowledged_conflicts.clear()
+
+
+def has_issue_acknowledgements(episode: Episode) -> bool:
+    return bool(episode.acknowledged_issues or episode.acknowledged_conflicts)
+
+
+def is_issue_acknowledged(
+    episode: Episode,
+    issue: ReviewIssue,
+    kind: MdrkKind,
+) -> bool:
+    if issue.acknowledged:
+        return True
+    key = issue.acknowledgement_key or _issue_fingerprint(episode, issue, kind)
+    return key in episode.acknowledged_issues
+
+
 def acknowledge_conflict(episode: Episode, code: str) -> None:
     """Acknowledge one safe-to-override source conflict for its current value."""
 
@@ -106,7 +238,7 @@ def acknowledge_conflict(episode: Episode, code: str) -> None:
 
 
 def clear_conflict_acknowledgements(episode: Episode) -> None:
-    episode.acknowledged_conflicts.clear()
+    clear_issue_acknowledgements(episode)
 
 
 def is_conflict_acknowledged(episode: Episode, code: str) -> bool:
@@ -118,23 +250,39 @@ def is_conflict_acknowledged(episode: Episode, code: str) -> bool:
     )
 
 
-def _apply_conflict_acknowledgement(
+def _apply_issue_acknowledgement(
     episode: Episode,
     issue: ReviewIssue,
+    kind: MdrkKind,
 ) -> ReviewIssue:
-    if (
-        issue.severity is not ReviewSeverity.BLOCKING
-        or not is_conflict_acknowledged(episode, issue.code)
-    ):
+    key = _issue_fingerprint(episode, issue, kind)
+    acknowledged = key in episode.acknowledged_issues or is_conflict_acknowledged(
+        episode, issue.code
+    )
+    if not acknowledged:
         return issue
     selected_value = _conflict_display_value(episode, issue.code)
+    selected_note = f" Использовать «{selected_value}»." if selected_value else ""
+    original_note = (
+        "Исходный конфликт сохранён"
+        if issue.code in ACKNOWLEDGEABLE_CONFLICT_CODES
+        else "Исходное предупреждение"
+    )
+    previous_severity = {
+        ReviewSeverity.BLOCKING: "блокирующая проблема",
+        ReviewSeverity.WARNING: "предупреждение",
+        ReviewSeverity.INFO: "информация",
+    }[issue.severity]
     return replace(
         issue,
-        severity=ReviewSeverity.WARNING,
+        severity=ReviewSeverity.INFO,
         message=(
-            f"Подтверждено вручную: использовать «{selected_value}». "
-            f"Исходный конфликт сохранён: {issue.message}"
+            f"Игнорировано вручную (было: {previous_severity})."
+            f"{selected_note} "
+            f"{original_note}: {issue.message}"
         ),
+        acknowledged=True,
+        acknowledgement_key=key,
     )
 
 
@@ -469,6 +617,8 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     source_by_date: dict[date, Path | None] = {}
     for procedure in episode.procedures:
         for performed_date in procedure.performed_dates:
+            if performed_date.weekday() >= 5:
+                continue
             source_by_date.setdefault(performed_date, procedure.source)
             if procedure.duration_minutes is None:
                 dates_with_unknown_duration.add(performed_date)
@@ -522,13 +672,25 @@ def current_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     """Combine stable extraction issues with validation of current UI values."""
 
     stable = [
-        _apply_conflict_acknowledgement(episode, issue)
-        for issue in episode.issues
+        issue for issue in episode.issues
         if issue.code not in _RECOMPUTED_CODES
         and not issue.code.startswith("required_")
         and not issue.code.startswith("review_")
     ]
-    return [*stable, *generation_issues(episode, kind)]
+    raw_issues = [*stable, *generation_issues(episode, kind)]
+
+    # Acknowledgements are state-bound. Once an issue disappears or changes,
+    # discard its old key so recreating the issue requires a fresh decision.
+    valid_keys = {_issue_fingerprint(episode, issue, kind) for issue in raw_issues}
+    kind_prefix = f"{kind.value}:"
+    episode.acknowledged_issues = {
+        key
+        for key in episode.acknowledged_issues
+        if not key.startswith(kind_prefix) or key in valid_keys
+    }
+    return [
+        _apply_issue_acknowledgement(episode, issue, kind) for issue in raw_issues
+    ]
 
 
 def can_generate(episode: Episode, kind: MdrkKind) -> bool:

@@ -17,12 +17,11 @@ from docx import Document
 
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.validation import (
-    ACKNOWLEDGEABLE_CONFLICT_CODES,
-    acknowledge_conflict,
+    acknowledge_issue,
     can_generate,
-    clear_conflict_acknowledgements,
+    clear_issue_acknowledgements,
     current_issues,
-    is_conflict_acknowledged,
+    has_issue_acknowledgements,
 )
 from mdrk_builder.domain import (
     Episode,
@@ -71,12 +70,6 @@ MEETING_RESCAN_MESSAGE = (
     "заново собрать данные на этот момент. Ручные правки будут заменены "
     "только после вашего подтверждения."
 )
-
-CONFLICT_FIELD_LABELS = {
-    "identity_conflict_medical_record_number": "Номер ИБ",
-    "mixed_hospitalizations_admission_date": "Дата и время поступления",
-}
-
 
 def _normalized_record_number(value: str) -> str:
     normalized = "".join(
@@ -405,13 +398,13 @@ class MdrkBuilderApp:
         buttons.pack(fill="x", pady=(6, 0))
         ttk.Button(
             buttons,
-            text="Подтвердить выбранный конфликт…",
-            command=self._acknowledge_selected_conflict,
+            text="Игнорировать выбранное…",
+            command=self._acknowledge_selected_issue,
         ).pack(side="left")
         ttk.Button(
             buttons,
-            text="Сбросить подтверждения",
-            command=self._reset_conflict_acknowledgements,
+            text="Сбросить игнорирование",
+            command=self._reset_issue_acknowledgements,
         ).pack(side="left", padx=4)
         ttk.Button(
             buttons,
@@ -951,67 +944,64 @@ class MdrkBuilderApp:
             return None
         return self._issue_refs.get(selected[0])
 
-    def _acknowledge_selected_conflict(self) -> None:
+    def _acknowledge_selected_issue(self) -> None:
         if not self.episode:
             messagebox.showwarning("Нет данных", "Сначала просканируйте папку эпизода.")
             return
         issue = self._selected_issue()
         if issue is None:
             messagebox.showwarning(
-                "Конфликт не выбран",
-                "Выберите блокирующую строку с номером ИБ или датой поступления.",
-            )
-            return
-        if issue.code not in ACKNOWLEDGEABLE_CONFLICT_CODES:
-            messagebox.showwarning(
-                "Нельзя подтвердить",
-                "Эта проблема требует исправления и не может быть проигнорирована.",
+                "Проблема не выбрана",
+                "Выберите любую строку в списке предупреждений.",
             )
             return
         if not self._apply_form(self._current_kind):
             return
-        if is_conflict_acknowledged(self.episode, issue.code):
+        if issue.acknowledged:
             messagebox.showinfo(
-                "Уже подтверждено",
-                "Текущее значение уже подтверждено вручную.",
+                "Уже игнорируется",
+                "Эта проблема уже игнорируется для текущих данных.",
             )
             return
 
-        label = CONFLICT_FIELD_LABELS[issue.code]
-        value = (
-            self.episode.identity.medical_record_number.strip()
-            if issue.code == "identity_conflict_medical_record_number"
-            else format_datetime(self.episode.admission_datetime)
-        )
+        source = str(issue.source) if issue.source else "не указан"
+        field = issue.field or "не указано"
         confirmed = messagebox.askyesno(
-            "Подтвердить ручное значение",
-            f"{issue.message}\n\n"
-            f"Использовать проверенное значение из формы:\n{label}: {value}\n\n"
-            "Исходный конфликт останется в предупреждениях. "
-            "Остальные блокирующие проверки продолжат действовать.",
+            "Игнорировать проблему",
+            f"Уровень: {SEVERITY_LABELS[issue.severity]}\n"
+            f"Сообщение: {issue.message}\n"
+            f"Поле: {field}\n"
+            f"Источник: {source}\n\n"
+            "Проблема останется видимой в списке. Если она блокирующая, "
+            "то перестанет мешать созданию DOCX. Остальные проверки продолжат действовать.\n\n"
+            "Игнорировать её?",
         )
         if not confirmed:
             return
         try:
-            acknowledge_conflict(self.episode, issue.code)
+            acknowledge_issue(self.episode, issue, self._current_kind)
         except ValueError as exc:
-            messagebox.showerror("Не удалось подтвердить", str(exc))
+            messagebox.showerror("Не удалось игнорировать", str(exc))
             return
         self._refresh_issues()
-        self.status_var.set(f"Подтверждено вручную: {label} = {value}")
+        self.status_var.set("Проблема игнорируется для текущих данных.")
 
-    def _reset_conflict_acknowledgements(self) -> None:
-        if not self.episode or not self.episode.acknowledged_conflicts:
-            messagebox.showinfo("Подтверждений нет", "Ручных подтверждений конфликтов нет.")
+    def _reset_issue_acknowledgements(self) -> None:
+        if not self.episode:
+            messagebox.showinfo("Игнорировать нечего", "Сначала просканируйте папку эпизода.")
+            return
+        if not has_issue_acknowledgements(self.episode):
+            messagebox.showinfo("Игнорирований нет", "Нет проигнорированных проблем.")
             return
         if not messagebox.askyesno(
-            "Сбросить подтверждения",
-            "Вернуть блокировку для вручную подтверждённых конфликтов?",
+            "Сбросить игнорирование",
+            "Снова учитывать все проигнорированные проблемы? "
+            "Блокирующие проблемы снова запретят создание DOCX.",
         ):
             return
-        clear_conflict_acknowledgements(self.episode)
+        clear_issue_acknowledgements(self.episode)
         self._refresh_issues()
-        self.status_var.set("Ручные подтверждения конфликтов сброшены.")
+        self.status_var.set("Игнорирование проблем сброшено.")
 
     def _render_form_error(self) -> None:
         self._clear_tree(self.issue_tree)
@@ -1221,7 +1211,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.4\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.5\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 
