@@ -30,7 +30,9 @@ RUSSIAN_MONTHS = {
     "ноябр": 11,
     "декабр": 12,
 }
-DATE_NUMERIC_RE = re.compile(r"(?<!\d)([0-3]?\d)[./-]([01]?\d)[./-]((?:19|20)\d{2}|\d{2})(?!\d)")
+DATE_NUMERIC_RE = re.compile(
+    r"(?<!\d)([0-3]?\d)\s*[./-]\s*([01]?\d)\s*[./-]\s*((?:19|20)\d{2}|\d{2})(?!\d)"
+)
 DATE_TEXT_RE = re.compile(
     r"[\"«_ ]*([0-3]?\d)[\"»_ ]+"
     r"(январ[ья]|феврал[ья]|марта?|апрел[ья]|ма[йя]|июн[ья]|июл[ья]|август[а]?|"
@@ -285,8 +287,8 @@ SECTION_STARTS: dict[str, tuple[str, ...]] = {
     "clinical_diagnosis": (r"заключительный\s+клинический\s+диагноз", r"клинический\s+диагноз"),
     "disease_history": (r"анамнез\s+заболевания",),
     "life_history": (r"анамнез\s+жизни",),
-    "laboratory_results": (r"лабораторн\w*\s+исследован",),
-    "instrumental_results": (r"инструментальн\w*\s+исследован",),
+    "laboratory_results": (r"лабораторн\w*\s+исследован\w*",),
+    "instrumental_results": (r"инструментальн\w*\s+исследован\w*",),
     "rehabilitation_potential": (r"реабилитационн\w*\s+потенциал",),
     "limitations": (
         r"факторы,?\s+ограничивающ\w*(?:\s+проведение\s+(?:медицинской\s+)?реабилитаци\w*(?:\s+мероприятий)?)?",
@@ -346,30 +348,55 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
         result["clinical_diagnosis"] = extract_section(document, (r"основное\s+заболевание",))
     if not result["laboratory_results"] or not result["instrumental_results"]:
         lines = _document_lines(document)
-        start = next(
+        numbered_prefix = r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
+        diagnostic_specs = (
             (
-                index
-                for index, line in enumerate(lines)
-                if line.casefold().startswith("пациентом предоставлены необходимые")
+                numbered_prefix
+                + r"пациентом\s+предоставлены\s+необходимые\s+"
+                r"для\s+госпитализации\s+документы\s*",
+                numbered_prefix + r"физикальное\s+исследование",
             ),
-            None,
+            (
+                numbered_prefix + r"выполненные\s+медицинские\s+вмешательства\s*",
+                numbered_prefix
+                + r"(?:консультация|план\s+обследования|план\s+лечения|назначения|"
+                r"физикальное\s+исследование|фамилия,\s*имя,\s*отчество)\b",
+            ),
         )
-        if start is not None:
+        for start_pattern, stop_pattern in diagnostic_specs:
+            start = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if re.match(start_pattern, line, re.IGNORECASE)
+                ),
+                None,
+            )
+            if start is None:
+                continue
             end = next(
                 (
                     index
                     for index in range(start + 1, len(lines))
-                    if re.match(r"^физикальное\s+исследование", lines[index], re.IGNORECASE)
+                    if re.match(stop_pattern, lines[index], re.IGNORECASE)
                 ),
                 len(lines),
             )
-            diagnostic_lines = lines[start:end]
+            diagnostic_lines = list(lines[start:end])
+            diagnostic_lines[0] = re.sub(
+                start_pattern,
+                "",
+                diagnostic_lines[0],
+                flags=re.IGNORECASE,
+            ).strip()
+            diagnostic_lines = [line for line in diagnostic_lines if line]
             instrumental_start = next(
                 (
                     index
                     for index, line in enumerate(diagnostic_lines)
                     if re.match(
-                        r"^(?:УЗАС|УЗИ|ЭКГ|Эхо-КГ|ЭЭГ|Рентген|КТ|МРТ)\b",
+                        numbered_prefix
+                        + r"(?:УЗАС|УЗИ|ЭКГ|Эхо[- ]?КГ|ЭЭГ|Рентген\w*|КТ|МРТ)\b",
                         line,
                         re.IGNORECASE,
                     )
@@ -377,28 +404,28 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
                 len(diagnostic_lines),
             )
             if not result["laboratory_results"]:
-                laboratory = " ".join(diagnostic_lines[:instrumental_start])
-                laboratory = re.sub(
-                    r"^Пациентом предоставлены необходимые для госпитализации документы\s*",
-                    "",
-                    laboratory,
-                    flags=re.IGNORECASE,
+                result["laboratory_results"] = clean_text(
+                    " ".join(diagnostic_lines[:instrumental_start])
                 )
-                result["laboratory_results"] = clean_text(laboratory)
             if not result["instrumental_results"]:
                 result["instrumental_results"] = clean_text(
                     " ".join(diagnostic_lines[instrumental_start:])
                 )
+            if result["laboratory_results"] and result["instrumental_results"]:
+                break
     if not result["movement_regimen"]:
         for line in _document_lines(document):
             match = re.match(
-                r"^(?:(свободный|общий|палатный|постельный)\s+двигательный\s+режим|"
-                r"назначения\s+режим\s+(свободный|общий|палатный|постельный))\b",
+                r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
+                r"(?:(свободный|общий|палатный|постельный)\s+двигательный\s+режим|"
+                r"назначения\s+режим\s+(свободный|общий|палатный|постельный)|"
+                r"(?:план\s+лечения\s+)?двигательн\w*\s+режим\s+"
+                r"(свободный|общий|палатный|постельный))\b",
                 line,
                 re.IGNORECASE,
             )
             if match:
-                value = (match.group(1) or match.group(2)).casefold()
+                value = next(group for group in match.groups() if group).casefold()
                 result["movement_regimen"] = "свободный" if value == "общий" else value
                 break
     return result
@@ -444,7 +471,7 @@ def extract_conclusion(
             blocks.append(value)
     if not blocks and role in {SpecialistRole.NEUROPSYCHOLOGIST, SpecialistRole.LOGOPEDIST}:
         heading = (
-            r"^нейропсихологический статус\s*:"
+            r"^нейропсихологический статус(?:\s+и\s+топический\s+диагноз)?\s*:"
             if role is SpecialistRole.NEUROPSYCHOLOGIST
             else r"^логопедический статус(?: при выписке)?\s*:"
         )
@@ -454,10 +481,23 @@ def extract_conclusion(
             values: list[str] = []
             for following in lines[index + 1 :]:
                 if re.match(
-                    r"^(?:исследование анамнеза|рекомендовано|медицинский психолог|медицинский логопед)\b",
+                    r"^(?:исследование анамнеза|на основании данных|рекомендовано|медицинский психолог|медицинский логопед)\b",
                     following,
                     re.IGNORECASE,
                 ):
+                    break
+                values.append(following)
+            value = clean_text(" ".join(values))
+            if value:
+                blocks.append(value)
+            break
+    if not blocks and role is SpecialistRole.LOGOPEDIST:
+        for index, line in enumerate(lines):
+            if not re.match(r"^(?:т\s*\.\s*о\s*\.|\u0442аким\s+образом\b)", line, re.IGNORECASE):
+                continue
+            values = [line]
+            for following in lines[index + 1 : index + 4]:
+                if re.match(r"^(?:медицинский\s+логопед|подпись)\b", following, re.IGNORECASE):
                     break
                 values.append(following)
             value = clean_text(" ".join(values))

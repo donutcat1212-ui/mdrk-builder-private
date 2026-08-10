@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from mdrk_builder.application.snapshot import select_findings, select_scale_rows
 from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity, SpecialistRole
 
@@ -12,6 +14,8 @@ _RECOMPUTED_CODES = {
     "required_meeting_datetime",
     "required_physician_source",
     "meeting_before_admission",
+    "discharge_before_admission",
+    "meeting_after_discharge",
     "final_meeting_not_after_initial",
     "icf_incomplete_pair",
     "icf_initial_missing",
@@ -25,7 +29,109 @@ _RECOMPUTED_CODES = {
     "participant_conclusion_missing",
     "scale_initial_missing",
     "scale_final_missing",
+    "source_selection_stale_record_number",
+    "source_selection_stale_admission",
 }
+
+ACKNOWLEDGEABLE_CONFLICT_CODES = frozenset(
+    {
+        "identity_conflict_medical_record_number",
+        "mixed_hospitalizations_admission_date",
+    }
+)
+
+
+def _normalized_record_number(value: str) -> str:
+    normalized = "".join(
+        character
+        for character in value.casefold().replace("№", "")
+        if character.isalnum() or character == "/"
+    )
+    while normalized.startswith("скп"):
+        normalized = normalized.removeprefix("скп")
+    return normalized
+
+
+def _conflict_fingerprint(episode: Episode, code: str) -> str | None:
+    if code == "identity_conflict_medical_record_number":
+        value = _normalized_record_number(episode.identity.medical_record_number)
+        return value or None
+    if code == "mixed_hospitalizations_admission_date":
+        value = episode.admission_datetime
+        return value.isoformat(timespec="minutes") if value is not None else None
+    return None
+
+
+def _conflict_display_value(episode: Episode, code: str) -> str:
+    if code == "identity_conflict_medical_record_number":
+        return episode.identity.medical_record_number.strip()
+    if code == "mixed_hospitalizations_admission_date":
+        value = episode.admission_datetime
+        return value.strftime("%d.%m.%Y %H:%M") if value is not None else ""
+    return ""
+
+
+def acknowledge_conflict(episode: Episode, code: str) -> None:
+    """Acknowledge one safe-to-override source conflict for its current value."""
+
+    if code not in ACKNOWLEDGEABLE_CONFLICT_CODES:
+        raise ValueError("Эту блокирующую проблему нельзя подтвердить вручную")
+    if (
+        code == "identity_conflict_medical_record_number"
+        and episode.materialized_medical_record_number
+        and _normalized_record_number(episode.identity.medical_record_number)
+        != _normalized_record_number(episode.materialized_medical_record_number)
+    ):
+        raise ValueError(
+            "Номер ИБ изменён. Нажмите «Сканировать», чтобы заново собрать эпизод "
+            "по этому номеру, и затем подтвердите конфликт."
+        )
+    if (
+        code == "mixed_hospitalizations_admission_date"
+        and episode.materialized_admission_datetime is not None
+        and episode.admission_datetime != episode.materialized_admission_datetime
+    ):
+        raise ValueError(
+            "Дата поступления изменена. Нажмите «Сканировать», чтобы пересчитать даты эпизода, "
+            "и затем подтвердите конфликт."
+        )
+    fingerprint = _conflict_fingerprint(episode, code)
+    if fingerprint is None:
+        raise ValueError("Сначала заполните проверенное значение вручную")
+    episode.acknowledged_conflicts[code] = fingerprint
+
+
+def clear_conflict_acknowledgements(episode: Episode) -> None:
+    episode.acknowledged_conflicts.clear()
+
+
+def is_conflict_acknowledged(episode: Episode, code: str) -> bool:
+    fingerprint = _conflict_fingerprint(episode, code)
+    return (
+        code in ACKNOWLEDGEABLE_CONFLICT_CODES
+        and fingerprint is not None
+        and episode.acknowledged_conflicts.get(code) == fingerprint
+    )
+
+
+def _apply_conflict_acknowledgement(
+    episode: Episode,
+    issue: ReviewIssue,
+) -> ReviewIssue:
+    if (
+        issue.severity is not ReviewSeverity.BLOCKING
+        or not is_conflict_acknowledged(episode, issue.code)
+    ):
+        return issue
+    selected_value = _conflict_display_value(episode, issue.code)
+    return replace(
+        issue,
+        severity=ReviewSeverity.WARNING,
+        message=(
+            f"Подтверждено вручную: использовать «{selected_value}». "
+            f"Исходный конфликт сохранён: {issue.message}"
+        ),
+    )
 
 
 def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
@@ -77,6 +183,38 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             )
         )
 
+    if (
+        episode.materialized_medical_record_number
+        and _normalized_record_number(episode.identity.medical_record_number)
+        != _normalized_record_number(episode.materialized_medical_record_number)
+    ):
+        issues.append(
+            ReviewIssue(
+                code="source_selection_stale_record_number",
+                message=(
+                    "Номер ИБ изменён после сканирования. Нажмите «Сканировать», чтобы "
+                    "заново отобрать источники и клинические данные."
+                ),
+                severity=ReviewSeverity.BLOCKING,
+                field="identity.medical_record_number",
+            )
+        )
+    if (
+        episode.materialized_admission_datetime is not None
+        and episode.admission_datetime != episode.materialized_admission_datetime
+    ):
+        issues.append(
+            ReviewIssue(
+                code="source_selection_stale_admission",
+                message=(
+                    "Дата поступления изменена после сканирования. Нажмите «Сканировать», чтобы "
+                    "пересчитать границы эпизода и заново отобрать данные."
+                ),
+                severity=ReviewSeverity.BLOCKING,
+                field="admission_datetime",
+            )
+        )
+
     selected_meeting = episode.meeting_at(kind)
     if (
         selected_meeting is not None
@@ -87,6 +225,32 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             ReviewIssue(
                 code="meeting_before_admission",
                 message="Время заседания указано раньше поступления",
+                severity=ReviewSeverity.BLOCKING,
+                field="meeting_at",
+            )
+        )
+    if (
+        episode.admission_datetime is not None
+        and episode.discharge_datetime is not None
+        and episode.discharge_datetime < episode.admission_datetime
+    ):
+        issues.append(
+            ReviewIssue(
+                code="discharge_before_admission",
+                message="Дата выписки указана раньше даты поступления",
+                severity=ReviewSeverity.BLOCKING,
+                field="admission_datetime",
+            )
+        )
+    if (
+        selected_meeting is not None
+        and episode.discharge_datetime is not None
+        and selected_meeting > episode.discharge_datetime
+    ):
+        issues.append(
+            ReviewIssue(
+                code="meeting_after_discharge",
+                message="Время заседания указано позже выписки",
                 severity=ReviewSeverity.BLOCKING,
                 field="meeting_at",
             )
@@ -109,6 +273,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     if not any(
         source.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
         for source in episode.sources
+        if episode.source_is_active(source)
     ):
         issues.append(
             ReviewIssue(
@@ -126,6 +291,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     participating_sources = [
         source
         for source in episode.sources
+        if episode.source_is_active(source)
         if source.role is not SpecialistRole.OTHER
         and (
             source.clinical_datetime is None
@@ -300,7 +466,7 @@ def current_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     """Combine stable extraction issues with validation of current UI values."""
 
     stable = [
-        issue
+        _apply_conflict_acknowledgement(episode, issue)
         for issue in episode.issues
         if issue.code not in _RECOMPUTED_CODES
         and not issue.code.startswith("required_")

@@ -89,7 +89,14 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
             continue
         chosen = choices[0]
         setattr(episode.identity, field_name, chosen)
-        distinct = {str(value).casefold() for value in choices}
+        distinct = {
+            (
+                _normalized_record_number(str(value))
+                if field_name == "medical_record_number"
+                else str(value).casefold()
+            )
+            for value in choices
+        }
         source = next(item.document.source_path for identity, item in identities if getattr(identity, field_name) == chosen)
         episode.field_sources[f"identity.{field_name}"] = source
         if len(distinct) > 1:
@@ -99,9 +106,26 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
                 else ReviewSeverity.WARNING
             )
             message = (
-                "В папке найдены разные номера ИБ. Выберите папку только одной госпитализации."
+                "В папке найдены разные номера ИБ. Проверьте номер эпизода "
+                "в форме и подтвердите ручное значение."
                 if field_name == "medical_record_number"
                 else f"В источниках различаются значения поля «{field_name}». Выбрано: {chosen}"
+            )
+            issue_source = next(
+                (
+                    item.document.source_path
+                    for identity, item in identities
+                    if getattr(identity, field_name)
+                    and (
+                        _normalized_record_number(
+                            str(getattr(identity, field_name))
+                        )
+                        != _normalized_record_number(str(chosen))
+                        if field_name == "medical_record_number"
+                        else getattr(identity, field_name) != chosen
+                    )
+                ),
+                source,
             )
             episode.issues.append(
                 ReviewIssue(
@@ -109,22 +133,133 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
                     message,
                     severity,
                     f"identity.{field_name}",
-                    source,
+                    issue_source,
                 )
             )
 
 
-def _merge_dates(episode: Episode, records: list[ScannedRecord]) -> None:
-    admission, admission_values = _most_common_datetime(extract_admission_datetime(item.document) for item in records)
-    episode.admission_datetime = admission
+def _normalized_record_number(value: str) -> str:
+    normalized = "".join(
+        character
+        for character in value.casefold().replace("№", "")
+        if character.isalnum() or character == "/"
+    )
+    while normalized.startswith("скп"):
+        normalized = normalized.removeprefix("скп")
+    return normalized
+
+
+def _records_for_selected_medical_record(
+    episode: Episode,
+    records: list[ScannedRecord],
+) -> list[ScannedRecord]:
+    """Exclude explicitly different medical records from episode-derived data.
+
+    Related discharge summaries may legitimately live in the patient folder.
+    They remain visible as sources, but must not supply this rehabilitation
+    episode's dates, sections, findings, ICF or procedures.
+    """
+
+    selected = _normalized_record_number(episode.identity.medical_record_number)
+    if not selected:
+        return records
+    active: list[ScannedRecord] = []
+    for record in records:
+        candidate = extract_patient_identity(record.document).medical_record_number
+        if candidate and _normalized_record_number(candidate) != selected:
+            source = record.document.source_path
+            episode.excluded_source_paths.add(source)
+            episode.issues.append(
+                ReviewIssue(
+                    "source_medical_record_mismatch",
+                    (
+                        f"Источник относится к другой ИБ ({candidate}) и не используется "
+                        f"для эпизода {episode.identity.medical_record_number}."
+                    ),
+                    ReviewSeverity.INFO,
+                    "sources",
+                    source,
+                )
+            )
+            continue
+        active.append(record)
+    return active
+
+
+def _refresh_record_number_conflict_source(
+    episode: Episode,
+    records: list[ScannedRecord],
+) -> None:
+    selected = _normalized_record_number(episode.identity.medical_record_number)
+    if not selected:
+        return
+    conflicting_source = next(
+        (
+            record.document.source_path
+            for record in records
+            if (
+                candidate := extract_patient_identity(
+                    record.document
+                ).medical_record_number
+            )
+            and _normalized_record_number(candidate) != selected
+        ),
+        None,
+    )
+    if conflicting_source is None:
+        return
+    for issue in episode.issues:
+        if issue.code == "identity_conflict_medical_record_number":
+            issue.source = conflicting_source
+
+
+def _merge_dates(
+    episode: Episode,
+    records: list[ScannedRecord],
+    *,
+    admission_datetime_override: datetime | None = None,
+) -> None:
+    admission_pairs = [
+        (extract_admission_datetime(item.document), item)
+        for item in records
+    ]
+    admission, admission_values = _most_common_datetime(
+        value for value, _ in admission_pairs
+    )
+    episode.admission_datetime = admission_datetime_override or admission
     admission_dates = {value.date() for value in admission_values}
     if len(admission_dates) > 1:
+        selected_date = (
+            episode.admission_datetime.date()
+            if episode.admission_datetime is not None
+            else None
+        )
+        issue_source = next(
+            (
+                item.document.source_path
+                for value, item in admission_pairs
+                if value is not None
+                and (selected_date is None or value.date() != selected_date)
+            ),
+            next(
+                (
+                    item.document.source_path
+                    for value, item in admission_pairs
+                    if value is not None
+                ),
+                None,
+            ),
+        )
         episode.issues.append(
             ReviewIssue(
                 "mixed_hospitalizations_admission_date",
-                "В папке найдены разные даты поступления. Выберите папку только одной госпитализации.",
+                (
+                    "В источниках найдены разные даты поступления. Проверьте дату эпизода "
+                    "в форме, повторите сканирование и подтвердите ручное значение."
+                ),
                 ReviewSeverity.BLOCKING,
                 "admission_datetime",
+                issue_source,
             )
         )
     elif len(admission_values) > 1:
@@ -161,7 +296,14 @@ def _merge_dates(episode: Episode, records: list[ScannedRecord]) -> None:
             "final",
         }
     ]
-    latest_source = max(final_candidates, default=None)
+    latest_source = max(
+        (
+            value
+            for value in final_candidates
+            if episode.initial_meeting_at is None or value > episode.initial_meeting_at
+        ),
+        default=None,
+    )
     if scheduled_final_candidates:
         episode.final_meeting_at = max(scheduled_final_candidates)
     elif latest_source:
@@ -169,11 +311,15 @@ def _merge_dates(episode: Episode, records: list[ScannedRecord]) -> None:
     elif episode.discharge_datetime:
         episode.final_meeting_at = datetime.combine(episode.discharge_datetime.date(), time(11, 0))
     if episode.admission_datetime and episode.discharge_datetime:
-        episode.course_duration_days = (
+        duration_days = (
             episode.discharge_datetime.date() - episode.admission_datetime.date()
         ).days
-        if episode.course_duration_days <= 0:
+        if duration_days > 0:
+            episode.course_duration_days = duration_days
+        elif duration_days == 0:
             episode.course_duration_days = 1
+        else:
+            episode.course_duration_days = None
 
 
 def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) -> None:
@@ -209,8 +355,22 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         target,
         provenance: dict[str, Path],
         boundary: datetime | None,
+        meeting_field: str,
     ) -> None:
         physician_eligible = eligible_as_of(physician_records, boundary)
+        future_physician_records = (
+            sorted(
+                (
+                    item
+                    for item in physician_records
+                    if item.clinical_datetime is not None
+                    and item.clinical_datetime > boundary
+                ),
+                key=lambda item: item.clinical_datetime or datetime.max,
+            )
+            if boundary is not None
+            else []
+        )
         all_eligible = eligible_as_of(clinical_records, boundary)
         specialist_fallback_fields = {"laboratory_results", "instrumental_results"}
         for field_info in fields(target):
@@ -220,6 +380,33 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                 for record in physician_eligible
                 if extracted[id(record)][field_name]
             ]
+            if not candidates and future_physician_records:
+                future_candidates = [
+                    (record, extracted[id(record)][field_name])
+                    for record in future_physician_records
+                    if extracted[id(record)][field_name]
+                ]
+                if future_candidates:
+                    candidates = [future_candidates[0]]
+                    preview = future_candidates[0][0]
+                    if not any(
+                        issue.code == "physician_source_after_meeting"
+                        and issue.field == meeting_field
+                        for issue in episode.issues
+                    ):
+                        episode.issues.append(
+                            ReviewIssue(
+                                "physician_source_after_meeting",
+                                (
+                                    "Врачебный источник с клиническими данными датирован "
+                                    "позже заседания. Поля показаны в форме только для проверки; "
+                                    "измените время заседания и повторите сканирование."
+                                ),
+                                ReviewSeverity.BLOCKING,
+                                meeting_field,
+                                preview.document.source_path,
+                            )
+                        )
             if not candidates and field_name in specialist_fallback_fields:
                 candidates = [
                     (record, extracted[id(record)][field_name])
@@ -236,8 +423,14 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         episode.initial_sections,
         episode.initial_field_sources,
         episode.initial_meeting_at,
+        "initial_meeting_at",
     )
-    fill_as_of(episode.sections, episode.field_sources, episode.final_meeting_at)
+    fill_as_of(
+        episode.sections,
+        episode.field_sources,
+        episode.final_meeting_at,
+        "final_meeting_at",
+    )
 
 
 def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
@@ -558,6 +751,8 @@ def scan_patient_folder(
     normalizer: DocumentNormalizer | None = None,
     initial_meeting_at: datetime | None = None,
     final_meeting_at: datetime | None = None,
+    medical_record_number_override: str | None = None,
+    admission_datetime_override: datetime | None = None,
 ) -> Episode:
     folder = folder.resolve()
     episode = Episode(folder=folder)
@@ -627,14 +822,46 @@ def scan_patient_folder(
         )
     if records:
         _merge_identity(episode, records)
-        _merge_dates(episode, records)
+        if medical_record_number_override is not None:
+            cleaned_override = medical_record_number_override.strip()
+            if cleaned_override:
+                episode.identity.medical_record_number = cleaned_override
+                episode.field_sources.pop("identity.medical_record_number", None)
+                _refresh_record_number_conflict_source(episode, records)
+        episode_records = _records_for_selected_medical_record(episode, records)
+        if medical_record_number_override and not any(
+            _normalized_record_number(
+                extract_patient_identity(record.document).medical_record_number
+            )
+            == _normalized_record_number(medical_record_number_override)
+            for record in records
+            if extract_patient_identity(record.document).medical_record_number
+        ):
+            episode.issues.append(
+                ReviewIssue(
+                    "record_number_override_without_source",
+                    (
+                        "Введённый вручную номер ИБ не найден ни в одном источнике. "
+                        "Проверьте номер и повторите сканирование."
+                    ),
+                    ReviewSeverity.BLOCKING,
+                    "identity.medical_record_number",
+                )
+            )
+        _merge_dates(
+            episode,
+            episode_records,
+            admission_datetime_override=admission_datetime_override,
+        )
+        episode.materialized_medical_record_number = episode.identity.medical_record_number
+        episode.materialized_admission_datetime = episode.admission_datetime
         if initial_meeting_at is not None:
             episode.initial_meeting_at = initial_meeting_at
         if final_meeting_at is not None:
             episode.final_meeting_at = final_meeting_at
-        _latest_clinical_sections(episode, records)
-        _collect_findings(episode, records)
-        _merge_icf(episode, records)
-        _collect_procedures(episode, records)
+        _latest_clinical_sections(episode, episode_records)
+        _collect_findings(episode, episode_records)
+        _merge_icf(episode, episode_records)
+        _collect_procedures(episode, episode_records)
     _minimum_field_issues(episode)
     return episode

@@ -23,6 +23,14 @@ def _haystack(document: ParsedDocument) -> tuple[str, str]:
 
 def classify_document(document: ParsedDocument) -> DocumentClassification:
     path_text, content = _haystack(document)
+    leading_lines = [
+        cleaned.casefold()
+        for paragraph in document.paragraphs[:12]
+        for raw_line in paragraph.splitlines()
+        if (cleaned := clean_text(raw_line))
+    ][:24]
+    leading_content = clean_text(" ".join(leading_lines[:8])).casefold()[:1600]
+    heading_content = clean_text(" ".join(leading_lines)).casefold()[:4000]
     if "консилиум мультидисциплинарной реабилитационной команды" in content:
         return DocumentClassification(SpecialistRole.OTHER, "mdrk", is_mdrk=True, confidence=1.0)
 
@@ -69,6 +77,19 @@ def classify_document(document: ParsedDocument) -> DocumentClassification:
         role_scores[role] += 5 * sum(pattern in content for pattern in content_patterns)
 
     scored_role = max(role_scores, key=role_scores.get)
+    treating_neurologist = bool(
+        re.search(
+            r"лечащ\w*\s+врач\s*,?\s*врач[- ]невролог\b",
+            content,
+        )
+    )
+    treating_frm = bool(
+        re.search(
+            r"лечащ\w*\s+врач\s*,?\s*(?:врач\s+фрм\b|"
+            r"врач\w*\s+физическ\w*\s+и\s+реабилитационн\w*\s+медицин\w*)",
+            content,
+        )
+    )
     explicit_frm = any(
         token in content
         for token in (
@@ -81,21 +102,74 @@ def classify_document(document: ParsedDocument) -> DocumentClassification:
         SpecialistRole.NEUROLOGIST,
         SpecialistRole.OTHER,
     }
-    role = (
-        SpecialistRole.FRM
-        if explicit_frm and scored_role in physician_or_unknown
-        else scored_role
+    heading_role_patterns = (
+        (SpecialistRole.PATHOPSYCHOLOGIST, r"\bпатопсихолог\w*"),
+        (SpecialistRole.NEUROPSYCHOLOGIST, r"\bнейропсихолог\w*"),
+        (SpecialistRole.LOGOPEDIST, r"\bлогопед\w*"),
+        (SpecialistRole.OCCUPATIONAL_THERAPIST, r"\b(?:эрготерап|эргореабил)\w*"),
+        (
+            SpecialistRole.PHYSICAL_THERAPIST,
+            r"\bспециалист\w*\s+по\s+физическ\w*\s+реабилитац\w*",
+        ),
     )
-    score = max(role_scores[role], 20 if explicit_frm else 0)
+    specialist_heading_pattern = re.compile(
+        r"\b(?:первичн|повторн|заключительн|итогов)\w*\b.{0,100}"
+        r"\b(?:осмотр|консультаци\w*|обследовани\w*)\b",
+        re.IGNORECASE,
+    )
+    heading_role = next(
+        (
+            candidate
+            for line in leading_lines
+            if specialist_heading_pattern.search(line)
+            for candidate, pattern in heading_role_patterns
+            if re.search(pattern, line)
+        ),
+        None,
+    )
+    physician_template_heading = "лечащим врачом" in leading_content
+    physician_override_allowed = physician_template_heading or scored_role in physician_or_unknown
+    if heading_role is not None:
+        role = heading_role
+    elif treating_neurologist and physician_override_allowed:
+        # A physician template can mention every MDRK participant in its plan.
+        # The treating doctor's own job title is stronger evidence than those
+        # incidental specialist mentions.
+        role = SpecialistRole.NEUROLOGIST
+    elif treating_frm and physician_override_allowed:
+        role = SpecialistRole.FRM
+    else:
+        role = (
+            SpecialistRole.FRM
+            if explicit_frm and scored_role in physician_or_unknown
+            else scored_role
+        )
+    score = max(
+        role_scores[role],
+        20 if explicit_frm or heading_role is role else 0,
+    )
     if score == 0:
         role = SpecialistRole.OTHER
 
-    if any(token in content for token in ("выписной", "заключительный", "курс реабилитации завершен")):
+    heading_patterns = (
+        (
+            "initial",
+            r"\bпервичн\w*\s+(?:осмотр|консультаци\w*|обследовани\w*)",
+        ),
+        ("final", r"\b(?:выписной|заключительный)\b|курс реабилитации завершен"),
+        ("follow_up", r"\bповторн\w*\s+(?:осмотр|консультаци\w*)"),
+    )
+    heading_matches = [
+        (match.start(), kind)
+        for kind, pattern in heading_patterns
+        if (match := re.search(pattern, heading_content)) is not None
+    ]
+    if heading_matches:
+        document_type = min(heading_matches)[1]
+    elif any(token in content for token in ("выписной", "заключительный", "курс реабилитации завершен")):
         document_type = "final"
-    elif any(token in content for token in ("повторный осмотр", "динамика", "повторная консультация")):
+    elif any(token in content for token in ("повторный осмотр", "повторная консультация")):
         document_type = "follow_up"
-    elif any(token in content for token in ("первичный осмотр", "первичная консультация")):
-        document_type = "initial"
     elif re.search(r"\bзаключение\b", content):
         document_type = "consultation"
     else:

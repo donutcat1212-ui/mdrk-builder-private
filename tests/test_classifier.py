@@ -71,3 +71,101 @@ def test_incidental_frm_mention_does_not_override_profile_specialist() -> None:
     )
 
     assert classification.role is SpecialistRole.LOGOPEDIST
+
+
+def test_treating_neurologist_and_primary_heading_beat_incidental_plan_mentions() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/corrupted-name.docx",
+            "\n".join(
+                (
+                    "ПЕРВИЧНЫЙ ОСМОТР",
+                    "(лечащим врачом совместно с заведующим отделением)",
+                    "План: консультация нейропсихолога и логопеда.",
+                    "Повторная консультация хирурга через 14 дней.",
+                    "Коммунарова Н.А., лечащий врач, врач-невролог /___/",
+                    "Поляев Б.Б., заведующий, врач ФРМ /___/",
+                )
+            ),
+        )
+    )
+
+    assert classification.role is SpecialistRole.NEUROLOGIST
+    assert classification.document_type == "initial"
+
+
+def test_treating_neurologist_beats_standalone_recommended_specialist_line() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/corrupted-name.docx",
+            "\n".join(
+                (
+                    "ПЕРВИЧНЫЙ ОСМОТР",
+                    "(лечащим врачом совместно с заведующим отделением)",
+                    "Показана консультация нейропсихолога.",
+                    "Коммунарова Н.А., лечащий врач, врач-невролог /___/",
+                )
+            ),
+        )
+    )
+
+    assert classification.role is SpecialistRole.NEUROLOGIST
+    assert classification.document_type == "initial"
+
+
+def test_primary_neuropsychology_heading_beats_incidental_dynamics_word() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/neuropsychology.docx",
+            "Первичное обследование медицинского психолога (нейропсихолога). "
+            "В пробе отсутствует динамика запоминания.",
+        )
+    )
+
+    assert classification.role is SpecialistRole.NEUROPSYCHOLOGIST
+    assert classification.document_type == "initial"
+
+
+def test_profile_specialist_is_not_overridden_by_copied_treating_doctor_signature() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/лого/первичная консультация.docx",
+            "Первичная консультация медицинского логопеда. "
+            "Из выписки: Коммунарова Н.А., лечащий врач, врач-невролог.",
+        )
+    )
+
+    assert classification.role is SpecialistRole.LOGOPEDIST
+
+
+def test_discharge_heading_precedes_historical_primary_exam() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/discharge.docx",
+            "Выписной эпикриз. В истории: Первичный осмотр выполнен 01.01.2026.",
+        )
+    )
+
+    assert classification.document_type == "final"
+
+
+def test_primary_heading_in_fifth_paragraph_is_still_a_heading() -> None:
+    paragraphs = [
+        "ГБУЗ Тестовая больница",
+        "Отделение медицинской реабилитации",
+        "Пациент: Тестов Тест Тестович",
+        "История болезни: 123/26",
+        "Первичный осмотр невролога",
+        "Повторная консультация хирурга через 14 дней.",
+    ]
+    document = ParsedDocument(
+        source_path=Path("/patient/neutral.docx"),
+        normalized_path=Path("/patient/neutral.docx"),
+        paragraphs=paragraphs,
+        body_items=[BodyItem("paragraph", index) for index in range(len(paragraphs))],
+    )
+
+    classification = classify_document(document)
+
+    assert classification.role is SpecialistRole.NEUROLOGIST
+    assert classification.document_type == "initial"

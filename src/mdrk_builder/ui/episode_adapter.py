@@ -199,6 +199,7 @@ def episode_signatory_roles(
     roles = {
         source.role
         for source in episode.sources
+        if episode.source_is_active(source)
         if source.role is not SpecialistRole.OTHER
         and (
             source.clinical_datetime is None

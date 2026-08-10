@@ -172,6 +172,10 @@ class Episode:
     icf_domains: list[IcfDomain] = field(default_factory=list)
     procedures: list[Procedure] = field(default_factory=list)
     issues: list[ReviewIssue] = field(default_factory=list)
+    acknowledged_conflicts: dict[str, str] = field(default_factory=dict)
+    excluded_source_paths: set[Path] = field(default_factory=set)
+    materialized_medical_record_number: str = ""
+    materialized_admission_datetime: datetime | None = None
     initial_field_sources: dict[str, Path] = field(default_factory=dict)
     field_sources: dict[str, Path] = field(default_factory=dict)
     initial_meeting_at: datetime | None = None
@@ -185,3 +189,7 @@ class Episode:
 
     def participating_roles(self) -> set[SpecialistRole]:
         return {finding.role for finding in self.findings if finding.conclusion or finding.scales}
+
+    def source_is_active(self, source: SourceDocument | Path) -> bool:
+        path = source.path if isinstance(source, SourceDocument) else source
+        return path not in self.excluded_source_paths

@@ -62,6 +62,15 @@ def test_clinical_datetime_prefers_labeled_document_time_over_filename() -> None
     assert extract_clinical_datetime(document) == datetime(2026, 6, 5, 14, 30)
 
 
+def test_clinical_datetime_accepts_space_inside_numeric_date() -> None:
+    document = _document(
+        "Дата приема, время: 03.08. 2026, 16:00\n"
+        "Первичное обследование нейропсихолога"
+    )
+
+    assert extract_clinical_datetime(document) == datetime(2026, 8, 3, 16)
+
+
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:
     document = _document(
         "Фамилия, имя, отчество: Астраханский Алексей Юрьевич\n"
@@ -109,6 +118,50 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
     assert sections["instrumental_results"].startswith("ЭКГ")
 
 
+def test_sections_split_completed_interventions_and_prefixed_movement_regimen() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Выполненные медицинские вмешательства Клинический анализ крови: норма",
+                "Клинический анализ мочи: без патологии",
+                "Рентгенография ОГК: без очаговых изменений",
+                "ЭКГ: ритм синусовый",
+                "Консультация хирурга: не копировать",
+                "План лечения Двигательный режим свободный",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["laboratory_results"].startswith("Клинический анализ крови")
+    assert "Консультация" not in sections["instrumental_results"]
+    assert sections["instrumental_results"].startswith("Рентгенография")
+    assert sections["movement_regimen"] == "свободный"
+
+
+def test_numbered_completed_interventions_split_and_stop_cleanly() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "1. Выполненные медицинские вмешательства Клинический анализ крови: норма",
+                "1.1 Клинический анализ мочи: без патологии",
+                "2. Рентгенография ОГК: без очаговых изменений",
+                "2.1 ЭКГ: ритм синусовый",
+                "3. План лечения Двигательный режим свободный",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["laboratory_results"].startswith("Клинический анализ крови")
+    assert "Рентгенография" not in sections["laboratory_results"]
+    assert "План лечения" not in sections["instrumental_results"]
+    assert sections["instrumental_results"].startswith("2. Рентгенография")
+    assert sections["movement_regimen"] == "свободный"
+
+
 def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> None:
     document = _document(
         "\n".join(
@@ -124,6 +177,43 @@ def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> Non
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
         "1. Сохранность высших психических функций."
     )
+
+
+def test_conclusion_accepts_topical_neuropsych_heading_and_stops_at_recommendations() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Нейропсихологический статус и топический диагноз :",
+                "1. Снижение нейродинамических показателей.",
+                "2. Нарушение произвольной регуляции.",
+                "На основании данных рекомендован курс: не включать",
+            )
+        )
+    )
+
+    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
+        "1. Снижение нейродинамических показателей. "
+        "2. Нарушение произвольной регуляции."
+    )
+
+
+def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Понимание речи сохранено.",
+                "Т.о. на момент исследования нарушений не выявлено.",
+                "На основании данных логопедические занятия не показаны.",
+                "Медицинский логопед Тестова А.А.",
+            )
+        )
+    )
+
+    conclusion = extract_conclusion(document, SpecialistRole.LOGOPEDIST)
+
+    assert conclusion.startswith("Т.о.")
+    assert "занятия не показаны" in conclusion
+    assert "Тестова" not in conclusion
 
 
 def test_icf_extracts_owner_and_preserves_merged_personal_factor() -> None:

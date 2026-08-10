@@ -15,10 +15,18 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from docx import Document
 
 from mdrk_builder.application.scanner import scan_patient_folder
-from mdrk_builder.application.validation import can_generate, current_issues
+from mdrk_builder.application.validation import (
+    ACKNOWLEDGEABLE_CONFLICT_CODES,
+    acknowledge_conflict,
+    can_generate,
+    clear_conflict_acknowledgements,
+    current_issues,
+    is_conflict_acknowledged,
+)
 from mdrk_builder.domain import (
     Episode,
     MdrkKind,
+    ReviewIssue,
     ReviewSeverity,
     ScaleMeasurement,
     SourceDocument,
@@ -39,6 +47,7 @@ from mdrk_builder.ui.episode_adapter import (
     format_datetime,
     parse_episode_folder,
     parse_episode_form_data,
+    parse_optional_datetime,
     parse_optional_meeting_datetime,
     sections_for,
 )
@@ -56,6 +65,22 @@ MEETING_RESCAN_MESSAGE = (
     "только после вашего подтверждения."
 )
 
+CONFLICT_FIELD_LABELS = {
+    "identity_conflict_medical_record_number": "Номер ИБ",
+    "mixed_hospitalizations_admission_date": "Дата и время поступления",
+}
+
+
+def _normalized_record_number(value: str) -> str:
+    normalized = "".join(
+        character
+        for character in value.casefold().replace("№", "")
+        if character.isalnum() or character == "/"
+    )
+    while normalized.startswith("скп"):
+        normalized = normalized.removeprefix("скп")
+    return normalized
+
 
 class MdrkBuilderApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -71,6 +96,7 @@ class MdrkBuilderApp:
         self._entry_variables: dict[str, tk.StringVar] = {}
         self._text_fields: dict[str, tk.Text] = {}
         self._scale_refs: list[tuple[int, int]] = []
+        self._issue_refs: dict[str, ReviewIssue] = {}
 
         self.folder_var = tk.StringVar()
         self.kind_var = tk.StringVar(value=MdrkKind.INITIAL.value)
@@ -268,11 +294,12 @@ class MdrkBuilderApp:
             self.source_tree.heading(column, text=heading)
             self.source_tree.column(column, width=width, minwidth=65, anchor="w")
         self.source_tree.tag_configure("used", background="#e3f3df")
+        self.source_tree.tag_configure("excluded", background="#e4e4e4", foreground="#666666")
         ttk.Label(
             tab,
             text=(
                 "Зелёным отмечены исходники, из которых взяты поля, заключения, шкалы, МКФ "
-                "или процедуры. Выбор другой версии исходника в MVP не поддерживается."
+                "или процедуры. Серым — документы с другим номером ИБ; они видны, но не участвуют в сборке."
             ),
         ).pack(anchor="w", pady=(6, 0))
 
@@ -358,9 +385,23 @@ class MdrkBuilderApp:
         self.issue_tree.tag_configure("blocking", background="#ffd6d6")
         self.issue_tree.tag_configure("warning", background="#fff4c2")
         self.issue_tree.tag_configure("info", background="#e6f1ff")
-        ttk.Button(tab, text="Обновить после правок", command=self._refresh_issues).pack(
-            anchor="w", pady=(6, 0)
-        )
+        buttons = ttk.Frame(tab)
+        buttons.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            buttons,
+            text="Подтвердить выбранный конфликт…",
+            command=self._acknowledge_selected_conflict,
+        ).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="Сбросить подтверждения",
+            command=self._reset_conflict_acknowledgements,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            buttons,
+            text="Обновить после правок",
+            command=self._refresh_issues,
+        ).pack(side="left")
 
     @staticmethod
     def _create_tree_with_scrollbars(
@@ -423,6 +464,7 @@ class MdrkBuilderApp:
         ):
             self._clear_tree(tree)
         self._scale_refs = []
+        self._issue_refs = {}
         self._update_action_states()
 
     def _choose_folder(self) -> None:
@@ -445,8 +487,16 @@ class MdrkBuilderApp:
             entered_meeting = parse_optional_meeting_datetime(
                 meeting_variable.get() if meeting_variable is not None else ""
             )
+            record_variable = self._entry_variables.get("record_number")
+            entered_record_number = (
+                record_variable.get().strip() if record_variable is not None else ""
+            )
+            admission_variable = self._entry_variables.get("admission")
+            entered_admission = parse_optional_datetime(
+                admission_variable.get() if admission_variable is not None else ""
+            )
         except ValueError as exc:
-            messagebox.showerror("Проверьте время заседания", str(exc))
+            messagebox.showerror("Проверьте даты и реквизиты", str(exc))
             return
         if not folder.is_dir():
             messagebox.showerror("Папка не найдена", "Выберите существующую папку эпизода.")
@@ -456,25 +506,59 @@ class MdrkBuilderApp:
             "Текущие ручные правки будут заменены результатами нового сканирования. Продолжить?",
         ):
             return
-        meeting_override: dict[str, datetime] = {}
+        scan_overrides: dict[str, datetime | str] = {}
         if self.episode is not None:
-            initial_meeting = self.episode.initial_meeting_at
-            final_meeting = self.episode.final_meeting_at
-            if self._current_kind is MdrkKind.INITIAL:
-                initial_meeting = entered_meeting
+            record_number_changed = (
+                bool(entered_record_number)
+                and _normalized_record_number(entered_record_number)
+                != _normalized_record_number(
+                    self.episode.materialized_medical_record_number
+                    or self.episode.identity.medical_record_number
+                )
+            )
+            admission_changed = (
+                entered_admission is not None
+                and entered_admission
+                != (
+                    self.episode.materialized_admission_datetime
+                    or self.episode.admission_datetime
+                )
+            )
+            metadata_changed = record_number_changed or admission_changed
+            if entered_record_number:
+                scan_overrides["medical_record_number_override"] = entered_record_number
+            if entered_admission is not None and (
+                not record_number_changed or admission_changed
+            ):
+                scan_overrides["admission_datetime_override"] = entered_admission
+
+            if metadata_changed:
+                current_meeting = self.episode.meeting_at(self._current_kind)
+                if entered_meeting is not None and entered_meeting != current_meeting:
+                    override_name = (
+                        "initial_meeting_at"
+                        if self._current_kind is MdrkKind.INITIAL
+                        else "final_meeting_at"
+                    )
+                    scan_overrides[override_name] = entered_meeting
             else:
-                final_meeting = entered_meeting
-            if initial_meeting is not None:
-                meeting_override["initial_meeting_at"] = initial_meeting
-            if final_meeting is not None:
-                meeting_override["final_meeting_at"] = final_meeting
+                initial_meeting = self.episode.initial_meeting_at
+                final_meeting = self.episode.final_meeting_at
+                if self._current_kind is MdrkKind.INITIAL:
+                    initial_meeting = entered_meeting
+                else:
+                    final_meeting = entered_meeting
+                if initial_meeting is not None:
+                    scan_overrides["initial_meeting_at"] = initial_meeting
+                if final_meeting is not None:
+                    scan_overrides["final_meeting_at"] = final_meeting
         elif entered_meeting is not None:
             override_name = (
                 "initial_meeting_at"
                 if self._current_kind is MdrkKind.INITIAL
                 else "final_meeting_at"
             )
-            meeting_override[override_name] = entered_meeting
+            scan_overrides[override_name] = entered_meeting
         self._invalidate_episode()
         self._set_folder_field(str(folder))
         self._scan_folder = folder
@@ -484,7 +568,7 @@ class MdrkBuilderApp:
         def worker() -> None:
             try:
                 self._scan_results.put(
-                    (scan_patient_folder(folder, **meeting_override), None)
+                    (scan_patient_folder(folder, **scan_overrides), None)
                 )
             except Exception as exc:  # delivered to the UI thread
                 self._scan_results.put((None, exc))
@@ -731,11 +815,16 @@ class MdrkBuilderApp:
         used_paths.update(domain.final_source for domain in self.episode.icf_domains if domain.final_source)
         used_paths.update(procedure.source for procedure in self.episode.procedures if procedure.source)
         for index, source in enumerate(self.episode.sources):
+            tags = (
+                ("excluded",)
+                if not self.episode.source_is_active(source)
+                else (("used",) if source.path in used_paths else ())
+            )
             self.source_tree.insert(
                 "",
                 "end",
                 iid=str(index),
-                tags=(("used",) if source.path in used_paths else ()),
+                tags=tags,
                 values=(
                     source.role.display_name,
                     format_datetime(source.clinical_datetime),
@@ -806,16 +895,20 @@ class MdrkBuilderApp:
     def _refresh_issues(self) -> None:
         if not self.episode:
             self._clear_tree(self.issue_tree)
+            self._issue_refs = {}
             return
         if not self._apply_form_without_messages():
             self._render_form_error()
             return
         self._clear_tree(self.issue_tree)
+        self._issue_refs = {}
         for index, issue in enumerate(current_issues(self.episode, self._current_kind)):
+            row_id = str(index)
+            self._issue_refs[row_id] = issue
             self.issue_tree.insert(
                 "",
                 "end",
-                iid=str(index),
+                iid=row_id,
                 tags=(issue.severity.value,),
                 values=(
                     SEVERITY_LABELS[issue.severity],
@@ -825,8 +918,77 @@ class MdrkBuilderApp:
                 ),
             )
 
+    def _selected_issue(self) -> ReviewIssue | None:
+        selected = self.issue_tree.selection()
+        if not selected:
+            return None
+        return self._issue_refs.get(selected[0])
+
+    def _acknowledge_selected_conflict(self) -> None:
+        if not self.episode:
+            messagebox.showwarning("Нет данных", "Сначала просканируйте папку эпизода.")
+            return
+        issue = self._selected_issue()
+        if issue is None:
+            messagebox.showwarning(
+                "Конфликт не выбран",
+                "Выберите блокирующую строку с номером ИБ или датой поступления.",
+            )
+            return
+        if issue.code not in ACKNOWLEDGEABLE_CONFLICT_CODES:
+            messagebox.showwarning(
+                "Нельзя подтвердить",
+                "Эта проблема требует исправления и не может быть проигнорирована.",
+            )
+            return
+        if not self._apply_form(self._current_kind):
+            return
+        if is_conflict_acknowledged(self.episode, issue.code):
+            messagebox.showinfo(
+                "Уже подтверждено",
+                "Текущее значение уже подтверждено вручную.",
+            )
+            return
+
+        label = CONFLICT_FIELD_LABELS[issue.code]
+        value = (
+            self.episode.identity.medical_record_number.strip()
+            if issue.code == "identity_conflict_medical_record_number"
+            else format_datetime(self.episode.admission_datetime)
+        )
+        confirmed = messagebox.askyesno(
+            "Подтвердить ручное значение",
+            f"{issue.message}\n\n"
+            f"Использовать проверенное значение из формы:\n{label}: {value}\n\n"
+            "Исходный конфликт останется в предупреждениях. "
+            "Остальные блокирующие проверки продолжат действовать.",
+        )
+        if not confirmed:
+            return
+        try:
+            acknowledge_conflict(self.episode, issue.code)
+        except ValueError as exc:
+            messagebox.showerror("Не удалось подтвердить", str(exc))
+            return
+        self._refresh_issues()
+        self.status_var.set(f"Подтверждено вручную: {label} = {value}")
+
+    def _reset_conflict_acknowledgements(self) -> None:
+        if not self.episode or not self.episode.acknowledged_conflicts:
+            messagebox.showinfo("Подтверждений нет", "Ручных подтверждений конфликтов нет.")
+            return
+        if not messagebox.askyesno(
+            "Сбросить подтверждения",
+            "Вернуть блокировку для вручную подтверждённых конфликтов?",
+        ):
+            return
+        clear_conflict_acknowledgements(self.episode)
+        self._refresh_issues()
+        self.status_var.set("Ручные подтверждения конфликтов сброшены.")
+
     def _render_form_error(self) -> None:
         self._clear_tree(self.issue_tree)
+        self._issue_refs = {}
         self.issue_tree.insert(
             "",
             "end",
@@ -1002,7 +1164,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.2\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.3\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 

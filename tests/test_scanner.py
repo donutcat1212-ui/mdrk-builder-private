@@ -9,6 +9,7 @@ from mdrk_builder.application.scanner import (
     _merge_dates,
     _merge_icf,
     _merge_identity,
+    _records_for_selected_medical_record,
     scan_patient_folder,
 )
 from mdrk_builder.domain import Episode, ReviewSeverity, SpecialistRole
@@ -192,6 +193,236 @@ def test_mixed_record_numbers_and_admission_dates_are_blocking() -> None:
     }
     assert "identity_conflict_medical_record_number" in blocking_codes
     assert "mixed_hospitalizations_admission_date" in blocking_codes
+    admission_conflict = next(
+        issue
+        for issue in episode.issues
+        if issue.code == "mixed_hospitalizations_admission_date"
+    )
+    assert admission_conflict.source == Path("/patient/stay-2.docx")
+
+
+def test_equivalent_record_number_formats_do_not_create_false_conflict() -> None:
+    records = [
+        _record(
+            "/patient/a.docx",
+            "Номер ИБ: СКП5906/26",
+            clinical_datetime=datetime(2026, 8, 3, 9),
+        ),
+        _record(
+            "/patient/b.docx",
+            "Номер ИБ: 5906 / 26",
+            clinical_datetime=datetime(2026, 8, 3, 8),
+        ),
+    ]
+    episode = Episode(Path("/patient"))
+
+    _merge_identity(episode, records)
+
+    assert not any(
+        issue.code == "identity_conflict_medical_record_number"
+        for issue in episode.issues
+    )
+
+
+def test_record_number_conflict_points_to_genuinely_different_source() -> None:
+    equivalent_path = Path("/patient/equivalent.docx")
+    foreign_path = Path("/patient/foreign.docx")
+    records = [
+        _record(
+            "/patient/chosen.docx",
+            "Номер ИБ: СКП5906/26",
+            clinical_datetime=datetime(2026, 8, 3, 10),
+        ),
+        _record(
+            str(equivalent_path),
+            "Номер ИБ: 5906 / 26",
+            clinical_datetime=datetime(2026, 8, 3, 9),
+        ),
+        _record(
+            str(foreign_path),
+            "Номер ИБ: СКП5799/26",
+            clinical_datetime=datetime(2026, 8, 3, 8),
+        ),
+    ]
+    episode = Episode(Path("/patient"))
+
+    _merge_identity(episode, records)
+
+    conflict = next(
+        issue
+        for issue in episode.issues
+        if issue.code == "identity_conflict_medical_record_number"
+    )
+    assert conflict.source == foreign_path
+    assert conflict.source != equivalent_path
+
+
+def test_scan_overrides_select_episode_before_materialization(tmp_path) -> None:
+    def write_source(
+        path: Path,
+        *,
+        record_number: str,
+        admission: str,
+        examined_at: str,
+        diagnosis: str,
+    ) -> None:
+        document = Document()
+        for value in (
+            "Первичный осмотр невролога",
+            f"Дата осмотра: {examined_at}",
+            "ФИО пациента: Тестов Тест Тестович",
+            f"Номер ИБ: {record_number}",
+            f"Дата и время поступления: {admission}",
+            f"Клинический диагноз: {diagnosis}",
+        ):
+            document.add_paragraph(value)
+        document.save(path)
+
+    selected_path = tmp_path / "невролог stay-a.docx"
+    excluded_path = tmp_path / "невролог stay-b.docx"
+    write_source(
+        selected_path,
+        record_number="СКП100/26",
+        admission="05.06.2026 12:00",
+        examined_at="05.06.2026 13:00",
+        diagnosis="диагноз выбранного эпизода",
+    )
+    write_source(
+        excluded_path,
+        record_number="СКП200/26",
+        admission="01.07.2026 09:00",
+        examined_at="01.07.2026 10:00",
+        diagnosis="диагноз другого эпизода",
+    )
+
+    episode = scan_patient_folder(
+        tmp_path,
+        medical_record_number_override="СКП 100 / 26",
+        admission_datetime_override=datetime(2026, 6, 5, 12, 34),
+    )
+
+    assert episode.identity.medical_record_number == "СКП 100 / 26"
+    assert episode.materialized_medical_record_number == "СКП 100 / 26"
+    assert episode.admission_datetime == datetime(2026, 6, 5, 12, 34)
+    assert episode.materialized_admission_datetime == datetime(2026, 6, 5, 12, 34)
+    assert episode.initial_meeting_at == datetime(2026, 6, 6, 8)
+    assert episode.initial_sections.clinical_diagnosis == "диагноз выбранного эпизода"
+    assert excluded_path.resolve() in episode.excluded_source_paths
+    record_conflict = next(
+        issue
+        for issue in episode.issues
+        if issue.code == "identity_conflict_medical_record_number"
+    )
+    assert record_conflict.source == excluded_path.resolve()
+    assert not any(
+        issue.code == "record_number_override_without_source"
+        for issue in episode.issues
+    )
+
+
+def test_unknown_record_number_override_is_blocking(tmp_path) -> None:
+    document = Document()
+    for value in (
+        "Первичный осмотр невролога",
+        "Дата осмотра: 05.06.2026 13:00",
+        "ФИО пациента: Тестов Тест Тестович",
+        "Номер ИБ: СКП100/26",
+        "Дата и время поступления: 05.06.2026 12:00",
+        "Клинический диагноз: тестовый диагноз",
+    ):
+        document.add_paragraph(value)
+    document.save(tmp_path / "невролог.docx")
+
+    episode = scan_patient_folder(
+        tmp_path,
+        medical_record_number_override="СКП999/26",
+    )
+
+    assert any(
+        issue.code == "record_number_override_without_source"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in episode.issues
+    )
+
+
+def test_different_medical_record_stays_visible_but_cannot_supply_episode_data() -> None:
+    physician_path = "/patient/rehab-primary.docx"
+    cardiology_path = "/patient/cardiology-discharge.docx"
+    records = [
+        _record(
+            physician_path,
+            "ФИО пациента: Тестов Тест Тестович\n"
+            "Номер ИБ: СКП5906/26\n"
+            "Дата и время поступления: 01.08.2026 09:11\n"
+            "Клинический диагноз: реабилитационный диагноз\n"
+            "Лабораторные исследования: анализы эпизода",
+            role=SpecialistRole.NEUROLOGIST,
+            document_type="initial",
+            clinical_datetime=datetime(2026, 8, 3, 8, 39),
+        ),
+        _record(
+            cardiology_path,
+            "ФИО пациента: Тестов Тест Тестович\n"
+            "Номер ИБ: СКП5799/26\n"
+            "Дата и время поступления: 28.07.2026 14:17\n"
+            "Дата и время выписки: 01.08.2026 12:00\n"
+            "Клинический диагноз: чужой кардиологический диагноз\n"
+            "Лабораторные исседования: чужие анализы",
+            role=SpecialistRole.OTHER,
+            document_type="final",
+            clinical_datetime=datetime(2026, 8, 1, 12),
+        ),
+    ]
+    episode = Episode(Path("/patient"))
+
+    _merge_identity(episode, records)
+    active = _records_for_selected_medical_record(episode, records)
+    _merge_dates(episode, active)
+    _latest_clinical_sections(episode, active)
+
+    assert episode.identity.medical_record_number == "СКП5906/26"
+    assert [item.document.source_path for item in active] == [Path(physician_path)]
+    assert episode.excluded_source_paths == {Path(cardiology_path)}
+    assert episode.admission_datetime == datetime(2026, 8, 1, 9, 11)
+    assert episode.discharge_datetime is None
+    assert episode.initial_meeting_at == datetime(2026, 8, 2, 8)
+    assert episode.initial_sections.clinical_diagnosis == "реабилитационный диагноз"
+    assert episode.initial_sections.laboratory_results == "анализы эпизода"
+    assert any(issue.code == "source_medical_record_mismatch" for issue in episode.issues)
+    boundary_issue = next(
+        issue for issue in episode.issues if issue.code == "physician_source_after_meeting"
+    )
+    assert boundary_issue.severity is ReviewSeverity.BLOCKING
+    assert boundary_issue.field == "initial_meeting_at"
+    assert boundary_issue.source == Path(physician_path)
+
+
+def test_future_physician_previews_missing_fields_even_when_older_physician_is_empty() -> None:
+    older_empty = _record(
+        "/patient/older.docx",
+        "Клинический диагноз:",
+        clinical_datetime=datetime(2026, 8, 1, 12),
+    )
+    future_primary = _record(
+        "/patient/primary.docx",
+        "Клинический диагноз: диагноз для проверки\n"
+        "Анамнез заболевания: анамнез для проверки",
+        clinical_datetime=datetime(2026, 8, 3, 8, 39),
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 8, 2, 8)
+    episode.final_meeting_at = datetime(2026, 8, 4, 8)
+
+    _latest_clinical_sections(episode, [older_empty, future_primary])
+
+    assert episode.initial_sections.clinical_diagnosis == "диагноз для проверки"
+    assert episode.initial_sections.disease_history == "анамнез для проверки"
+    assert any(
+        issue.code == "physician_source_after_meeting"
+        and issue.severity is ReviewSeverity.BLOCKING
+        and issue.field == "initial_meeting_at"
+        for issue in episode.issues
+    )
 
 
 def test_other_consilium_cannot_supply_latest_physician_sections() -> None:

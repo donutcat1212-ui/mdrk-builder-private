@@ -1,7 +1,8 @@
 import queue
 from datetime import datetime
 
-from mdrk_builder.domain import Episode, MdrkKind
+from mdrk_builder.application.validation import is_conflict_acknowledged
+from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity
 from mdrk_builder.ui import app as app_module
 from mdrk_builder.ui.app import MdrkBuilderApp
 
@@ -37,6 +38,14 @@ class _Tree:
 
     def delete(self, *_rows: str) -> None:
         self.rows.clear()
+
+
+class _SelectableTree:
+    def __init__(self, selected: str) -> None:
+        self.selected = selected
+
+    def selection(self) -> tuple[str, ...]:
+        return (self.selected,)
 
 
 class _Button:
@@ -159,6 +168,45 @@ def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
     assert errors and "Сканировать" in errors[0]
 
 
+def test_selected_source_conflict_acknowledges_value_after_form_apply(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    code = "identity_conflict_medical_record_number"
+    app = object.__new__(MdrkBuilderApp)
+    app.episode = Episode(folder=tmp_path)
+    app.episode.identity.medical_record_number = "автоматический"
+    app._current_kind = MdrkKind.INITIAL
+    app._issue_refs = {
+        "0": ReviewIssue(code, "Разные номера ИБ", ReviewSeverity.BLOCKING)
+    }
+    app.issue_tree = _SelectableTree("0")
+    app.status_var = _Variable()
+    applied: list[MdrkKind] = []
+    prompts: list[str] = []
+
+    def apply_form(kind: MdrkKind) -> bool:
+        applied.append(kind)
+        app.episode.identity.medical_record_number = "РУЧНОЙ 722/26"
+        return True
+
+    app._apply_form = apply_form
+    app._refresh_issues = lambda: None
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda _title, message: prompts.append(message) or True,
+    )
+
+    app._acknowledge_selected_conflict()
+
+    assert applied == [MdrkKind.INITIAL]
+    assert is_conflict_acknowledged(app.episode, code)
+    assert prompts and "РУЧНОЙ 722/26" in prompts[0]
+    assert "Остальные блокирующие проверки" in prompts[0]
+    assert "РУЧНОЙ 722/26" in app.status_var.get()
+
+
 def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
     monkeypatch,
     tmp_path,
@@ -202,6 +250,58 @@ def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
         "folder": tmp_path,
         "initial_meeting_at": datetime(2026, 8, 10, 8),
         "final_meeting_at": datetime(2026, 8, 19, 15, 30),
+    }
+
+
+def test_rescan_passes_changed_admission_and_recomputes_default_meetings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = object.__new__(MdrkBuilderApp)
+    app.episode = Episode(folder=tmp_path)
+    app.episode.identity.medical_record_number = "123/26"
+    app.episode.materialized_medical_record_number = "123/26"
+    app.episode.admission_datetime = datetime(2026, 8, 9, 12)
+    app.episode.materialized_admission_datetime = datetime(2026, 8, 9, 12)
+    app.episode.initial_meeting_at = datetime(2026, 8, 10, 8)
+    app.episode.final_meeting_at = datetime(2026, 8, 20, 11)
+    app._current_kind = MdrkKind.INITIAL
+    app._scanning = False
+    app._scan_results = queue.Queue()
+    app._scan_thread = None
+    app._scan_folder = None
+    app._entry_variables = {
+        "record_number": _Variable("123/26"),
+        "admission": _Variable("08.08.2026 12:00"),
+        "meeting": _Variable("10.08.2026 08:00"),
+    }
+    app.folder_var = _Variable(str(tmp_path))
+    app.status_var = _Variable()
+    app.root = _Root()
+    app._invalidate_episode = lambda: setattr(app, "episode", None)
+    app._set_folder_field = lambda value: app.folder_var.set(value)
+    app._set_scanning = lambda value: setattr(app, "_scanning", value)
+    captured: dict[str, object] = {}
+
+    def fake_scan(folder, **kwargs) -> Episode:
+        captured["folder"] = folder
+        captured.update(kwargs)
+        return Episode(folder=folder)
+
+    monkeypatch.setattr(app_module, "scan_patient_folder", fake_scan)
+    monkeypatch.setattr(app_module.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "askyesno",
+        lambda _title, _message: True,
+    )
+
+    app._start_scan()
+
+    assert captured == {
+        "folder": tmp_path,
+        "medical_record_number_override": "123/26",
+        "admission_datetime_override": datetime(2026, 8, 8, 12),
     }
 
 

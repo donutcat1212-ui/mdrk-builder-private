@@ -1,7 +1,14 @@
 from datetime import datetime
 from pathlib import Path
 
-from mdrk_builder.application.validation import can_generate, current_issues
+import pytest
+
+from mdrk_builder.application.validation import (
+    acknowledge_conflict,
+    can_generate,
+    current_issues,
+    is_conflict_acknowledged,
+)
 from mdrk_builder.domain import (
     Episode,
     IcfDomain,
@@ -40,6 +47,145 @@ def test_manual_fill_removes_stale_required_issue() -> None:
 
     assert can_generate(episode, MdrkKind.INITIAL)
     assert not any(issue.code.startswith("required_") for issue in current_issues(episode, MdrkKind.INITIAL))
+
+
+def test_source_conflicts_require_explicit_value_bound_acknowledgement() -> None:
+    episode = _valid_episode()
+    episode.identity.medical_record_number = "РУЧНОЙ 722/26"
+    episode.admission_datetime = datetime(2026, 6, 5, 12, 30)
+    episode.issues.extend(
+        (
+            ReviewIssue(
+                "identity_conflict_medical_record_number",
+                "В источниках разные номера ИБ",
+                ReviewSeverity.BLOCKING,
+                "identity.medical_record_number",
+                Path("/cardiology.docx"),
+            ),
+            ReviewIssue(
+                "mixed_hospitalizations_admission_date",
+                "В источниках разные даты поступления",
+                ReviewSeverity.BLOCKING,
+                "admission_datetime",
+                Path("/cardiology.docx"),
+            ),
+        )
+    )
+
+    assert not can_generate(episode, MdrkKind.INITIAL)
+
+    acknowledge_conflict(episode, "identity_conflict_medical_record_number")
+    acknowledge_conflict(episode, "mixed_hospitalizations_admission_date")
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+    acknowledged = [
+        issue
+        for issue in issues
+        if issue.code
+        in {
+            "identity_conflict_medical_record_number",
+            "mixed_hospitalizations_admission_date",
+        }
+    ]
+    assert all(issue.severity is ReviewSeverity.WARNING for issue in acknowledged)
+    assert all("Исходный конфликт сохранён" in issue.message for issue in acknowledged)
+    assert any("РУЧНОЙ 722/26" in issue.message for issue in acknowledged)
+    assert any("05.06.2026 12:30" in issue.message for issue in acknowledged)
+    assert can_generate(episode, MdrkKind.INITIAL)
+    assert all(
+        issue.severity is ReviewSeverity.BLOCKING for issue in episode.issues
+    )
+
+
+def test_edit_after_acknowledgement_restores_source_conflict_block() -> None:
+    episode = _valid_episode()
+    code = "identity_conflict_medical_record_number"
+    episode.issues.append(
+        ReviewIssue(code, "Разные номера ИБ", ReviewSeverity.BLOCKING)
+    )
+    acknowledge_conflict(episode, code)
+
+    assert is_conflict_acknowledged(episode, code)
+    assert can_generate(episode, MdrkKind.INITIAL)
+
+    episode.identity.medical_record_number = "другой номер"
+
+    assert not is_conflict_acknowledged(episode, code)
+    assert not can_generate(episode, MdrkKind.INITIAL)
+    assert any(
+        issue.code == code and issue.severity is ReviewSeverity.BLOCKING
+        for issue in current_issues(episode, MdrkKind.INITIAL)
+    )
+
+
+def test_equivalent_record_number_format_keeps_materialization_current() -> None:
+    episode = _valid_episode()
+    episode.identity.medical_record_number = "5906 / 26"
+    episode.materialized_medical_record_number = "СКП5906/26"
+    episode.issues.append(
+        ReviewIssue(
+            "identity_conflict_medical_record_number",
+            "Разные номера ИБ",
+            ReviewSeverity.BLOCKING,
+        )
+    )
+
+    acknowledge_conflict(episode, "identity_conflict_medical_record_number")
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert is_conflict_acknowledged(
+        episode, "identity_conflict_medical_record_number"
+    )
+    assert not any(
+        issue.code == "source_selection_stale_record_number" for issue in issues
+    )
+
+
+def test_changed_materialized_record_number_blocks_until_rescan() -> None:
+    episode = _valid_episode()
+    episode.materialized_medical_record_number = "123/26"
+    episode.identity.medical_record_number = "456/26"
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert any(
+        issue.code == "source_selection_stale_record_number"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in issues
+    )
+    assert not can_generate(episode, MdrkKind.INITIAL)
+
+
+def test_changed_materialized_admission_blocks_until_rescan() -> None:
+    episode = _valid_episode()
+    episode.materialized_admission_datetime = episode.admission_datetime
+    episode.admission_datetime = datetime(2026, 6, 7, 12)
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert any(
+        issue.code == "source_selection_stale_admission"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in issues
+    )
+    assert not can_generate(episode, MdrkKind.INITIAL)
+
+
+def test_non_whitelisted_blocker_cannot_be_acknowledged() -> None:
+    episode = _valid_episode()
+
+    with pytest.raises(ValueError, match="нельзя подтвердить"):
+        acknowledge_conflict(episode, "required_physician_source")
+
+    episode.sources.clear()
+    episode.acknowledged_conflicts["required_physician_source"] = "forced"
+
+    assert not can_generate(episode, MdrkKind.INITIAL)
+    assert any(
+        issue.code == "required_physician_source"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in current_issues(episode, MdrkKind.INITIAL)
+    )
 
 
 def test_missing_physician_source_is_blocking() -> None:
@@ -84,6 +230,46 @@ def test_meeting_before_admission_is_blocking() -> None:
         and issue.severity is ReviewSeverity.BLOCKING
         for issue in issues
     )
+
+
+def test_discharge_before_manual_admission_is_blocking() -> None:
+    episode = _valid_episode()
+    episode.admission_datetime = datetime(2026, 8, 20, 9)
+    episode.discharge_datetime = datetime(2026, 8, 19, 12)
+    episode.initial_meeting_at = datetime(2026, 8, 20, 10)
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert any(
+        issue.code == "discharge_before_admission"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in issues
+    )
+    assert not can_generate(episode, MdrkKind.INITIAL)
+
+
+def test_meeting_after_discharge_is_blocking() -> None:
+    episode = _valid_episode()
+    episode.discharge_datetime = datetime(2026, 6, 20, 10)
+    episode.initial_meeting_at = datetime(2026, 6, 20, 10, 1)
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert any(
+        issue.code == "meeting_after_discharge"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in issues
+    )
+
+
+def test_meeting_at_discharge_time_is_allowed() -> None:
+    episode = _valid_episode()
+    episode.discharge_datetime = datetime(2026, 6, 20, 10)
+    episode.initial_meeting_at = episode.discharge_datetime
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+
+    assert not any(issue.code == "meeting_after_discharge" for issue in issues)
 
 
 def test_final_meeting_must_be_after_initial_meeting() -> None:
