@@ -76,8 +76,8 @@ def test_canonical_resource_has_sanitized_page_and_style_contract() -> None:
         )
     assert "customXml" not in package_text
     assert "thumbnail.jpeg" not in package_text
-    assert "Астраханский" not in package_text
-    assert "Георгий Денисович" not in package_text
+    assert "ФИО пациента:" not in package_text
+    assert "/Users/" not in package_text
 
 
 def test_canonical_rebuild_is_structurally_stable(tmp_path) -> None:

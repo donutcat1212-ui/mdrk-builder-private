@@ -7,6 +7,7 @@ import sys
 import threading
 import tkinter as tk
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -38,7 +39,13 @@ from mdrk_builder.infrastructure.docx_writer import (
     canonical_template_path,
     write_mdrk_docx,
 )
-from mdrk_builder.ui.dialogs import FindingDialog, IcfDomainDialog, ProcedureDialog, ScaleDialog
+from mdrk_builder.ui.dialogs import (
+    FindingDialog,
+    IcfDomainDialog,
+    ProcedureDialog,
+    ScaleDialog,
+    install_edit_shortcuts,
+)
 from mdrk_builder.ui.episode_adapter import (
     EpisodeFormData,
     apply_episode_form_data,
@@ -103,6 +110,7 @@ class MdrkBuilderApp:
         self.status_var = tk.StringVar(value="Выберите папку эпизода")
 
         self._configure_window()
+        install_edit_shortcuts(self.root)
         self._build_menu()
         self._build_layout()
         self.folder_var.trace_add("write", self._on_folder_field_changed)
@@ -259,7 +267,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="МКФ")
         columns = ("code", "description", "role", "initial", "final", "dynamic", "note")
-        self.icf_tree = self._create_tree_with_scrollbars(tab, columns)
+        self.icf_tree = self._create_tree_with_scrollbars(tab, columns, selectmode="extended")
         headings = {
             "code": "Код",
             "description": "Описание",
@@ -274,6 +282,7 @@ class MdrkBuilderApp:
             self.icf_tree.heading(column, text=headings[column])
             self.icf_tree.column(column, width=widths[column], minwidth=40, anchor="w")
         self.icf_tree.bind("<Double-1>", lambda _event: self._edit_icf())
+        self._bind_tree_delete(self.icf_tree, self._delete_icf)
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
         ttk.Button(buttons, text="Добавить…", command=self._add_icf).pack(side="left")
@@ -307,7 +316,9 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Процедуры")
         columns = ("code", "name", "specialist", "count", "duration", "frequency")
-        self.procedure_tree = self._create_tree_with_scrollbars(tab, columns)
+        self.procedure_tree = self._create_tree_with_scrollbars(
+            tab, columns, selectmode="extended"
+        )
         headings = {
             "code": "Код",
             "name": "Процедура",
@@ -321,6 +332,7 @@ class MdrkBuilderApp:
             self.procedure_tree.heading(column, text=headings[column])
             self.procedure_tree.column(column, width=widths[column], minwidth=45, anchor="w")
         self.procedure_tree.bind("<Double-1>", lambda _event: self._edit_procedure())
+        self._bind_tree_delete(self.procedure_tree, self._delete_procedure)
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
         ttk.Button(buttons, text="Добавить…", command=self._add_procedure).pack(side="left")
@@ -331,7 +343,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Шкалы")
         columns = ("role", "date", "name", "value", "source")
-        self.scale_tree = self._create_tree_with_scrollbars(tab, columns)
+        self.scale_tree = self._create_tree_with_scrollbars(tab, columns, selectmode="extended")
         for column, heading, width in (
             ("role", "Специалист", 245),
             ("date", "Дата и время", 145),
@@ -342,6 +354,7 @@ class MdrkBuilderApp:
             self.scale_tree.heading(column, text=heading)
             self.scale_tree.column(column, width=width, minwidth=55, anchor="w")
         self.scale_tree.bind("<Double-1>", lambda _event: self._edit_scale())
+        self._bind_tree_delete(self.scale_tree, self._delete_scale)
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
         ttk.Button(buttons, text="Добавить…", command=self._add_scale).pack(side="left")
@@ -352,7 +365,9 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Заключения")
         columns = ("role", "date", "scales", "conclusion")
-        self.finding_tree = self._create_tree_with_scrollbars(tab, columns)
+        self.finding_tree = self._create_tree_with_scrollbars(
+            tab, columns, selectmode="extended"
+        )
         for column, heading, width in (
             ("role", "Специалист", 250),
             ("date", "Клиническая дата", 145),
@@ -362,6 +377,7 @@ class MdrkBuilderApp:
             self.finding_tree.heading(column, text=heading)
             self.finding_tree.column(column, width=width, minwidth=45, anchor="w")
         self.finding_tree.bind("<Double-1>", lambda _event: self._edit_finding())
+        self._bind_tree_delete(self.finding_tree, self._delete_finding)
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
         ttk.Button(buttons, text="Добавить…", command=self._add_finding).pack(side="left")
@@ -407,6 +423,8 @@ class MdrkBuilderApp:
     def _create_tree_with_scrollbars(
         parent: ttk.Frame,
         columns: tuple[str, ...],
+        *,
+        selectmode: str = "browse",
     ) -> ttk.Treeview:
         container = ttk.Frame(parent)
         container.pack(fill="both", expand=True)
@@ -414,7 +432,7 @@ class MdrkBuilderApp:
             container,
             columns=columns,
             show="headings",
-            selectmode="browse",
+            selectmode=selectmode,
         )
         vertical = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
         horizontal = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
@@ -425,6 +443,15 @@ class MdrkBuilderApp:
         container.rowconfigure(0, weight=1)
         container.columnconfigure(0, weight=1)
         return tree
+
+    @staticmethod
+    def _bind_tree_delete(tree: ttk.Treeview, command: Callable[[], None]) -> None:
+        def delete_selected(_event: tk.Event) -> str:
+            command()
+            return "break"
+
+        tree.bind("<Delete>", delete_selected)
+        tree.bind("<KP_Delete>", delete_selected)
 
     def _set_folder_field(self, value: str) -> None:
         self._setting_folder_field = True
@@ -1023,6 +1050,10 @@ class MdrkBuilderApp:
         selection = tree.selection()
         return int(selection[0]) if selection else None
 
+    @staticmethod
+    def _selected_indices(tree: ttk.Treeview) -> list[int]:
+        return sorted(int(item_id) for item_id in tree.selection())
+
     def _add_icf(self) -> None:
         if not self.episode:
             return
@@ -1042,10 +1073,16 @@ class MdrkBuilderApp:
             self._refresh_issues()
 
     def _delete_icf(self) -> None:
-        if not self.episode or (index := self._selected_index(self.icf_tree)) is None:
+        if not self.episode or not (indices := self._selected_indices(self.icf_tree)):
             return
-        if messagebox.askyesno("Удалить домен", "Удалить выбранный домен МКФ?"):
-            self.episode.icf_domains.pop(index)
+        noun = (
+            "выбранный домен МКФ"
+            if len(indices) == 1
+            else f"выбранные домены МКФ ({len(indices)})"
+        )
+        if messagebox.askyesno("Удалить домен", f"Удалить {noun}?"):
+            for index in reversed(indices):
+                self.episode.icf_domains.pop(index)
             self._refresh_icf()
             self._refresh_issues()
 
@@ -1086,11 +1123,20 @@ class MdrkBuilderApp:
         self._refresh_issues()
 
     def _delete_scale(self) -> None:
-        if not self.episode or (row_index := self._selected_index(self.scale_tree)) is None:
+        if not self.episode or not (row_indices := self._selected_indices(self.scale_tree)):
             return
-        finding_index, scale_index = self._scale_refs[row_index]
-        if messagebox.askyesno("Удалить измерение", "Удалить выбранное измерение шкалы?"):
-            self.episode.findings[finding_index].scales.pop(scale_index)
+        noun = (
+            "выбранное измерение шкалы"
+            if len(row_indices) == 1
+            else f"выбранные измерения шкал ({len(row_indices)})"
+        )
+        if messagebox.askyesno("Удалить измерение", f"Удалить {noun}?"):
+            references = sorted(
+                (self._scale_refs[row_index] for row_index in row_indices),
+                reverse=True,
+            )
+            for finding_index, scale_index in references:
+                self.episode.findings[finding_index].scales.pop(scale_index)
             self._refresh_scales()
             self._refresh_findings()
             self._refresh_issues()
@@ -1117,10 +1163,16 @@ class MdrkBuilderApp:
             self._refresh_issues()
 
     def _delete_procedure(self) -> None:
-        if not self.episode or (index := self._selected_index(self.procedure_tree)) is None:
+        if not self.episode or not (indices := self._selected_indices(self.procedure_tree)):
             return
-        if messagebox.askyesno("Удалить процедуру", "Удалить выбранную процедуру?"):
-            self.episode.procedures.pop(index)
+        noun = (
+            "выбранную процедуру"
+            if len(indices) == 1
+            else f"выбранные процедуры ({len(indices)})"
+        )
+        if messagebox.askyesno("Удалить процедуру", f"Удалить {noun}?"):
+            for index in reversed(indices):
+                self.episode.procedures.pop(index)
             self._refresh_procedures()
             self._refresh_issues()
 
@@ -1147,16 +1199,21 @@ class MdrkBuilderApp:
             self._refresh_issues()
 
     def _delete_finding(self) -> None:
-        if not self.episode or (index := self._selected_index(self.finding_tree)) is None:
+        if not self.episode or not (indices := self._selected_indices(self.finding_tree)):
             return
-        scale_count = len(self.episode.findings[index].scales)
-        question = "Удалить выбранное заключение специалиста?"
+        scale_count = sum(len(self.episode.findings[index].scales) for index in indices)
+        question = (
+            "Удалить выбранное заключение специалиста?"
+            if len(indices) == 1
+            else f"Удалить выбранные заключения специалистов ({len(indices)})?"
+        )
         if scale_count:
             question += (
                 f"\n\nВместе с ним будут удалены измерения шкал: {scale_count}."
             )
         if messagebox.askyesno("Удалить заключение", question):
-            self.episode.findings.pop(index)
+            for index in reversed(indices):
+                self.episode.findings.pop(index)
             self._refresh_findings()
             self._refresh_scales()
             self._refresh_issues()
@@ -1164,7 +1221,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.3\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.4\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 

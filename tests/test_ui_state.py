@@ -1,9 +1,21 @@
 import queue
-from datetime import datetime
+from datetime import date, datetime
+from types import SimpleNamespace
 
 from mdrk_builder.application.validation import is_conflict_acknowledged
-from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity
+from mdrk_builder.domain import (
+    Episode,
+    IcfDomain,
+    MdrkKind,
+    Procedure,
+    ReviewIssue,
+    ReviewSeverity,
+    ScaleMeasurement,
+    SpecialistFinding,
+    SpecialistRole,
+)
 from mdrk_builder.ui import app as app_module
+from mdrk_builder.ui import dialogs as dialogs_module
 from mdrk_builder.ui.app import MdrkBuilderApp
 
 
@@ -41,11 +53,63 @@ class _Tree:
 
 
 class _SelectableTree:
-    def __init__(self, selected: str) -> None:
+    def __init__(self, selected: str | tuple[str, ...]) -> None:
         self.selected = selected
 
     def selection(self) -> tuple[str, ...]:
-        return (self.selected,)
+        return self.selected if isinstance(self.selected, tuple) else (self.selected,)
+
+
+class _KeyboardWidget:
+    def __init__(self, widget_class: str = "TEntry") -> None:
+        self.widget_class = widget_class
+        self.generated_events: list[str] = []
+        self.selection_range_args: tuple[object, ...] | None = None
+        self.cursor: object | None = None
+
+    def winfo_class(self) -> str:
+        return self.widget_class
+
+    def event_generate(self, event: str) -> None:
+        self.generated_events.append(event)
+
+    def selection_range(self, *args: object) -> None:
+        self.selection_range_args = args
+
+    def icursor(self, index: object) -> None:
+        self.cursor = index
+
+
+class _KeyboardTree:
+    def __init__(self) -> None:
+        self.selected: tuple[str, ...] = ("1",)
+        self.clipboard = ""
+        self.rows = {
+            "0": ("a", "b"),
+            "1": ("в", "г"),
+        }
+
+    def winfo_class(self) -> str:
+        return "Treeview"
+
+    def selection(self) -> tuple[str, ...]:
+        return self.selected
+
+    def selection_set(self, rows: tuple[str, ...]) -> None:
+        self.selected = tuple(rows)
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(self.rows)
+
+    def item(self, item_id: str, option: str) -> tuple[str, ...]:
+        assert option == "values"
+        return self.rows[item_id]
+
+    def clipboard_clear(self) -> None:
+        self.clipboard = ""
+
+    def clipboard_append(self, value: str) -> None:
+        self.clipboard += value
 
 
 class _Button:
@@ -81,6 +145,37 @@ def _entry_values(meeting: str) -> dict[str, _Variable]:
         "stage": _Variable("2 этап"),
         "duration": _Variable("14"),
     }
+
+
+def test_procedure_edit_preserves_extracted_schedule_provenance(tmp_path) -> None:
+    previous = Procedure(
+        code="A19.23.001",
+        name="ЛФК",
+        specialist="Специалист",
+        actual_count=2,
+        duration_minutes=30,
+        frequency="ежедневно",
+        source=tmp_path / "назначения.docx",
+        count_needs_review=True,
+        performed_dates=(date(2026, 8, 4), date(2026, 8, 5)),
+    )
+    dialog = object.__new__(dialogs_module.ProcedureDialog)
+    dialog.procedure = previous
+    dialog._variables = {
+        "code": _Variable(previous.code),
+        "name": _Variable("ЛФК, уточнено"),
+        "specialist": _Variable(previous.specialist),
+        "count": _Variable("2"),
+        "duration": _Variable("45"),
+        "frequency": _Variable(previous.frequency),
+    }
+
+    dialog.apply()
+
+    assert dialog.result is not None
+    assert dialog.result.duration_minutes == 45
+    assert dialog.result.performed_dates == previous.performed_dates
+    assert dialog.result.count_needs_review is True
 
 
 def test_invalid_meeting_keeps_current_snapshot_and_text(monkeypatch, tmp_path) -> None:
@@ -187,7 +282,7 @@ def test_selected_source_conflict_acknowledges_value_after_form_apply(
 
     def apply_form(kind: MdrkKind) -> bool:
         applied.append(kind)
-        app.episode.identity.medical_record_number = "РУЧНОЙ 722/26"
+        app.episode.identity.medical_record_number = "РУЧНОЙ 9004/99"
         return True
 
     app._apply_form = apply_form
@@ -202,9 +297,9 @@ def test_selected_source_conflict_acknowledges_value_after_form_apply(
 
     assert applied == [MdrkKind.INITIAL]
     assert is_conflict_acknowledged(app.episode, code)
-    assert prompts and "РУЧНОЙ 722/26" in prompts[0]
+    assert prompts and "РУЧНОЙ 9004/99" in prompts[0]
     assert "Остальные блокирующие проверки" in prompts[0]
-    assert "РУЧНОЙ 722/26" in app.status_var.get()
+    assert "РУЧНОЙ 9004/99" in app.status_var.get()
 
 
 def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
@@ -335,3 +430,129 @@ def test_folder_edit_invalidates_loaded_episode(tmp_path) -> None:
     assert app._entry_variables["full_name"].get() == ""
     assert all(not tree.rows for tree in trees)
     assert "сканирование заново" in app.status_var.get()
+
+
+def test_russian_and_windows_layout_shortcuts_generate_native_virtual_events(
+    monkeypatch,
+) -> None:
+    widget = _KeyboardWidget()
+
+    result = dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=widget, keysym="Cyrillic_em", keycode=86)
+    )
+
+    assert result == "break"
+    assert widget.generated_events == ["<<Paste>>"]
+
+    widget.generated_events.clear()
+    monkeypatch.setattr(dialogs_module.sys, "platform", "win32")
+    result = dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=widget, keysym="??", keycode=88)
+    )
+
+    assert result == "break"
+    assert widget.generated_events == ["<<Cut>>"]
+
+
+def test_latin_clipboard_shortcut_is_left_to_native_tk_binding() -> None:
+    widget = _KeyboardWidget()
+
+    result = dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=widget, keysym="v", keycode=86)
+    )
+
+    assert result is None
+    assert widget.generated_events == []
+
+
+def test_select_all_handles_latin_and_russian_entry_shortcuts() -> None:
+    for keysym in ("a", "Cyrillic_ef", "ф"):
+        widget = _KeyboardWidget()
+
+        result = dialogs_module._dispatch_control_shortcut(
+            SimpleNamespace(widget=widget, keysym=keysym, keycode=65)
+        )
+
+        assert result == "break"
+        assert widget.selection_range_args == (0, "end")
+        assert widget.cursor == "end"
+
+
+def test_tree_shortcuts_copy_rows_and_select_all() -> None:
+    tree = _KeyboardTree()
+
+    assert dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=tree, keysym="c", keycode=67)
+    ) == "break"
+    assert tree.clipboard == "в\tг"
+
+    assert dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=tree, keysym="Cyrillic_ef", keycode=65)
+    ) == "break"
+    assert tree.selected == ("0", "1")
+
+
+def test_delete_key_binding_invokes_collection_delete() -> None:
+    callbacks: dict[str, object] = {}
+    calls: list[str] = []
+
+    class BindingTree:
+        def bind(self, sequence: str, callback) -> None:
+            callbacks[sequence] = callback
+
+    MdrkBuilderApp._bind_tree_delete(BindingTree(), lambda: calls.append("deleted"))
+
+    for sequence in ("<Delete>", "<KP_Delete>"):
+        assert callbacks[sequence](SimpleNamespace()) == "break"  # type: ignore[operator]
+    assert calls == ["deleted", "deleted"]
+
+
+def test_collection_deletes_remove_all_selected_rows_and_refresh(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = object.__new__(MdrkBuilderApp)
+    app.episode = Episode(folder=tmp_path)
+    app.episode.icf_domains = [
+        IcfDomain(f"d{index}", f"домен {index}", SpecialistRole.FRM)
+        for index in range(3)
+    ]
+    app.episode.procedures = [
+        Procedure(f"процедура {index}", "врач", index)
+        for index in range(3)
+    ]
+    first_scales = [
+        ScaleMeasurement("A", "1", None, SpecialistRole.LOGOPEDIST),
+        ScaleMeasurement("B", "2", None, SpecialistRole.LOGOPEDIST),
+    ]
+    second_scales = [
+        ScaleMeasurement("C", "3", None, SpecialistRole.NEUROPSYCHOLOGIST)
+    ]
+    app.episode.findings = [
+        SpecialistFinding(SpecialistRole.LOGOPEDIST, scales=first_scales),
+        SpecialistFinding(SpecialistRole.NEUROPSYCHOLOGIST, scales=second_scales),
+    ]
+    app.icf_tree = _SelectableTree(("0", "2"))
+    app.procedure_tree = _SelectableTree(("0", "2"))
+    app.scale_tree = _SelectableTree(("0", "2"))
+    app.finding_tree = _SelectableTree(("1",))
+    app._scale_refs = [(0, 0), (0, 1), (1, 0)]
+    refreshes: list[str] = []
+    app._refresh_icf = lambda: refreshes.append("icf")
+    app._refresh_procedures = lambda: refreshes.append("procedures")
+    app._refresh_scales = lambda: refreshes.append("scales")
+    app._refresh_findings = lambda: refreshes.append("findings")
+    app._refresh_issues = lambda: refreshes.append("issues")
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *_args: True)
+
+    app._delete_icf()
+    app._delete_procedure()
+    app._delete_scale()
+    app._delete_finding()
+
+    assert [domain.code for domain in app.episode.icf_domains] == ["d1"]
+    assert [procedure.name for procedure in app.episode.procedures] == ["процедура 1"]
+    assert [scale.name for scale in app.episode.findings[0].scales] == ["B"]
+    assert len(app.episode.findings) == 1
+    assert refreshes.count("issues") == 4
+    assert {"icf", "procedures", "scales", "findings"}.issubset(refreshes)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
+from pathlib import Path
 
 from mdrk_builder.application.snapshot import select_findings, select_scale_rows
 from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity, SpecialistRole
@@ -24,6 +26,8 @@ _RECOMPUTED_CODES = {
     "procedure_count_missing",
     "procedure_duration_missing",
     "procedure_frequency_missing",
+    "rehab_daily_minutes_below_minimum",
+    "rehab_daily_minutes_incomplete",
     "participant_latest_source_not_extracted",
     "participant_finding_missing",
     "participant_conclusion_missing",
@@ -459,6 +463,58 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                     source=procedure.source,
                 )
             )
+
+    daily_minutes: dict[date, int] = {}
+    dates_with_unknown_duration: set[date] = set()
+    source_by_date: dict[date, Path | None] = {}
+    for procedure in episode.procedures:
+        for performed_date in procedure.performed_dates:
+            source_by_date.setdefault(performed_date, procedure.source)
+            if procedure.duration_minutes is None:
+                dates_with_unknown_duration.add(performed_date)
+                continue
+            daily_minutes[performed_date] = (
+                daily_minutes.get(performed_date, 0) + procedure.duration_minutes
+            )
+    deficient = [
+        (performed_date, minutes)
+        for performed_date, minutes in sorted(daily_minutes.items())
+        if performed_date not in dates_with_unknown_duration and minutes < 180
+    ]
+    if deficient:
+        details = ", ".join(
+            f"{performed_date.strftime('%d.%m.%Y')} — {minutes} мин"
+            for performed_date, minutes in deficient
+        )
+        issues.append(
+            ReviewIssue(
+                code="rehab_daily_minutes_below_minimum",
+                message=(
+                    "Недобор реабилитационных занятий: минимум 180 минут "
+                    f"в день. {details}."
+                ),
+                severity=ReviewSeverity.BLOCKING,
+                field="procedures.daily_minutes",
+                source=source_by_date.get(deficient[0][0]),
+            )
+        )
+    if dates_with_unknown_duration:
+        details = ", ".join(
+            performed_date.strftime("%d.%m.%Y")
+            for performed_date in sorted(dates_with_unknown_duration)
+        )
+        issues.append(
+            ReviewIssue(
+                code="rehab_daily_minutes_incomplete",
+                message=(
+                    "Нельзя проверить минимум 180 минут: не указана "
+                    f"длительность процедур на {details}."
+                ),
+                severity=ReviewSeverity.WARNING,
+                field="procedures.daily_minutes",
+                source=source_by_date.get(next(iter(dates_with_unknown_duration))),
+            )
+        )
     return issues
 
 

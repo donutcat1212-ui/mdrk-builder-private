@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from mdrk_builder.application.extractors import (
@@ -73,16 +73,16 @@ def test_clinical_datetime_accepts_space_inside_numeric_date() -> None:
 
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:
     document = _document(
-        "Фамилия, имя, отчество: Астраханский Алексей Юрьевич\n"
-        "СКП: 4318 /26\nДата рождения: 20.02.1968\nПол: муж"
+        "Фамилия, имя, отчество: Тестов Тест Тестович\n"
+        "СКП: 9001 /99\nДата рождения: 01.01.1970\nПол: муж"
     )
 
     identity = extract_patient_identity(document)
 
-    assert identity.full_name == "Астраханский Алексей Юрьевич"
-    assert identity.medical_record_number == "СКП4318/26"
+    assert identity.full_name == "Тестов Тест Тестович"
+    assert identity.medical_record_number == "СКП9001/99"
     assert identity.sex == "мужской"
-    assert identity.birth_date and identity.birth_date.isoformat() == "1968-02-20"
+    assert identity.birth_date and identity.birth_date.isoformat() == "1970-01-01"
 
 
 def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
@@ -137,6 +137,22 @@ def test_sections_split_completed_interventions_and_prefixed_movement_regimen() 
     assert sections["laboratory_results"].startswith("Клинический анализ крови")
     assert "Консультация" not in sections["instrumental_results"]
     assert sections["instrumental_results"].startswith("Рентгенография")
+    assert sections["movement_regimen"] == "свободный"
+
+
+def test_completed_interventions_split_inline_instrumental_marker() -> None:
+    document = _document(
+        "Выполненные медицинские вмешательства "
+        "Клинический анализ крови от 01.08.2026: норма. "
+        "Рентгенография ОГК от 01.08.2026: без особенностей. "
+        "План лечения: Двигательный режим: свободный"
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["laboratory_results"].startswith("Клинический анализ крови")
+    assert sections["instrumental_results"].startswith("Рентгенография")
+    assert "План лечения" not in sections["instrumental_results"]
     assert sections["movement_regimen"] == "свободный"
 
 
@@ -195,6 +211,15 @@ def test_conclusion_accepts_topical_neuropsych_heading_and_stops_at_recommendati
         "1. Снижение нейродинамических показателей. "
         "2. Нарушение произвольной регуляции."
     )
+
+
+def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:
+    document = _document(
+        "Нейропсихологический статус и топический диагноз: лобная дисфункция\n"
+        "Рекомендовано: занятия"
+    )
+
+    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == "лобная дисфункция"
 
 
 def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
@@ -281,9 +306,69 @@ def test_procedure_count_is_number_of_plus_marks_and_zero_is_not_missing() -> No
     procedures = extract_procedures(_document(tables=[table]))
 
     assert [item.actual_count for item in procedures] == [2, 0]
-    assert [item.frequency for item in procedures] == ["", ""]
+    assert [item.frequency for item in procedures] == ["периодически", ""]
     assert [item.duration_minutes for item in procedures] == [30, 20]
     assert procedures[0].count_needs_review
+
+
+def test_assignment_dates_infer_frequency_and_include_sis_without_code() -> None:
+    header = {
+        0: "Назначения",
+        1: "время",
+        2: "кабинет",
+        **{column + 3: str(day) for column, day in enumerate(range(4, 18))},
+        17: "время на процедуру",
+    }
+    daily_marks = {column + 3: "+" for column, day in enumerate(range(4, 18)) if day < 8 or 10 <= day <= 14 or day == 17}
+    sis_marks = {column + 3: "+" for column, day in enumerate(range(4, 18)) if day in {7, 10, 11, 12, 13, 14}}
+    irregular_marks = {column + 3: "+" for column, day in enumerate(range(4, 18)) if day in {4, 6, 7, 11, 14}}
+    table = ParsedTable(
+        (
+            _row(header, 18),
+            _row(
+                {
+                    0: "A19.23.002.014 Индивидуальное занятие ЛФК",
+                    1: "11:00",
+                    2: "7042",
+                    **daily_marks,
+                    17: "30 мин",
+                },
+                18,
+            ),
+            _row(
+                {0: "SiS терапия", 1: "15:50", 2: "238к", **sis_marks, 17: "30мин"},
+                18,
+            ),
+            _row(
+                {
+                    0: "A13.23.011. Нейропсихологическая коррекция",
+                    **irregular_marks,
+                    17: "30 мин",
+                },
+                18,
+            ),
+        )
+    )
+
+    procedures = extract_procedures(
+        _document(tables=[table]),
+        reference_date=date(2026, 8, 1),
+    )
+
+    assert [item.name for item in procedures] == [
+        "Индивидуальное занятие ЛФК",
+        "SiS терапия",
+        "Нейропсихологическая коррекция",
+    ]
+    assert [item.actual_count for item in procedures] == [10, 6, 5]
+    assert [item.frequency for item in procedures] == [
+        "ежедневно",
+        "ежедневно",
+        "периодически",
+    ]
+    assert procedures[1].code == ""
+    assert procedures[1].specialist == "Медицинская сестра по физиотерапии"
+    assert procedures[1].performed_dates[0] == date(2026, 8, 7)
 
 
 def test_scale_short_date_headers_use_document_year_and_role() -> None:
@@ -384,6 +469,27 @@ def test_neuropsych_generic_total_is_named_from_document_context() -> None:
     assert values[0].value == "30"
 
 
+def test_neuropsych_characteristic_table_without_date_becomes_scale_rows() -> None:
+    table = ParsedTable(
+        (
+            _row({0: "Характеристика", 1: "Балл"}, 2),
+            _row({0: "Критичность", 1: "2"}, 2),
+            _row({0: "Понимание смысла рассказов", 1: "3"}, 2),
+        )
+    )
+
+    values = extract_scale_measurements(
+        _document(tables=[table]),
+        SpecialistRole.NEUROPSYCHOLOGIST,
+        datetime(2026, 8, 3, 16),
+    )
+
+    assert [(item.name, item.value) for item in values] == [
+        ("Критичность", "2"),
+        ("Понимание смысла рассказов", "3"),
+    ]
+
+
 def test_scheduled_mdrk_rows_prefer_explicit_execution_time() -> None:
     table = ParsedTable(
         (
@@ -432,6 +538,7 @@ def test_physician_scales_are_extracted_from_bounded_narrative_lines() -> None:
                 "NRS-2002: низкий риск",
                 "Индекс мобильности Ривермид: 8",
                 "Шкала Бартел: 75",
+                "Дополнительные сведения: ШРМ 4",
             )
         )
     )
@@ -447,13 +554,14 @@ def test_physician_scales_are_extracted_from_bounded_narrative_lines() -> None:
         ("NRS 2002", "низкий риск"),
         ("Индекс мобильности Ривермид", "8"),
         ("Шкала Бартел", "75"),
+        ("Шкала реабилитационной маршрутизации (ШРМ)", "4"),
     ]
 
 
 def test_conclusion_stops_before_specialist_signature_line() -> None:
     document = _document(
         "Заключение: Отмечается положительная динамика.\n"
-        "Никитин П.П., специалист по физической реабилитации /_______________/"
+        "Примеров П.П., специалист по физической реабилитации /_______________/"
     )
 
     value = extract_conclusion(document, SpecialistRole.PHYSICAL_THERAPIST)

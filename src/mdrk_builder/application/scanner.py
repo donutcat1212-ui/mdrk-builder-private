@@ -56,8 +56,19 @@ def discover_source_files(folder: Path) -> list[Path]:
     )
 
 
-def _next_calendar_day(value: date) -> date:
-    return value + timedelta(days=1)
+def _initial_mdrk_day(value: date) -> date:
+    """Return the clinic's MDRK-1 day for the admission weekday."""
+
+    days_ahead = {
+        0: 1,  # Monday -> Tuesday
+        1: 1,
+        2: 1,
+        3: 1,  # Thursday -> Friday
+        4: 3,  # Friday -> Monday
+        5: 3,  # Saturday -> Tuesday
+        6: 2,  # Sunday -> Tuesday
+    }[value.weekday()]
+    return value + timedelta(days=days_ahead)
 
 
 def _most_common_datetime(values: Iterable[datetime | None]) -> tuple[datetime | None, set[datetime]]:
@@ -276,7 +287,7 @@ def _merge_dates(
     episode.discharge_datetime = max(discharge_present) if discharge_present else None
     if episode.admission_datetime:
         episode.initial_meeting_at = datetime.combine(
-            _next_calendar_day(episode.admission_datetime.date()), time(8, 0)
+            _initial_mdrk_day(episode.admission_datetime.date()), time(8, 0)
         )
     scheduled_final_candidates = [
         meeting
@@ -309,7 +320,9 @@ def _merge_dates(
     elif latest_source:
         episode.final_meeting_at = latest_source
     elif episode.discharge_datetime:
-        episode.final_meeting_at = datetime.combine(episode.discharge_datetime.date(), time(11, 0))
+        discharge_meeting = datetime.combine(episode.discharge_datetime.date(), time(11, 0))
+        if episode.initial_meeting_at is None or discharge_meeting > episode.initial_meeting_at:
+            episode.final_meeting_at = discharge_meeting
     if episode.admission_datetime and episode.discharge_datetime:
         duration_days = (
             episode.discharge_datetime.date() - episode.admission_datetime.date()
@@ -431,6 +444,10 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         episode.final_meeting_at,
         "final_meeting_at",
     )
+    if not episode.initial_sections.rehabilitation_potential.strip():
+        episode.initial_sections.rehabilitation_potential = "средний"
+    if not episode.sections.rehabilitation_potential.strip():
+        episode.sections.rehabilitation_potential = "средний"
 
 
 def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
@@ -651,7 +668,15 @@ def _collect_procedures(episode: Episode, records: list[ScannedRecord]) -> None:
     assignment_records = [item for item in records if item.classification.document_type == "assignment_sheet"]
     assignment_records.sort(key=lambda item: item.clinical_datetime or datetime.min)
     if assignment_records:
-        episode.procedures = extract_procedures(assignment_records[-1].document)
+        reference_date = (
+            episode.admission_datetime.date()
+            if episode.admission_datetime is not None
+            else None
+        )
+        episode.procedures = extract_procedures(
+            assignment_records[-1].document,
+            reference_date=reference_date,
+        )
     if not episode.procedures:
         episode.issues.append(
             ReviewIssue(

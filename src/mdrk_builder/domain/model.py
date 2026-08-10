@@ -145,6 +145,7 @@ class Procedure:
     planned_count: int | None = None
     source: Path | None = None
     count_needs_review: bool = False
+    performed_dates: tuple[date, ...] = ()
 
 
 @dataclass(slots=True)

@@ -46,6 +46,14 @@ SHORT_DATE_RE = re.compile(r"(?<!\d)([0-3]?\d)[./]([01]?\d)(?![./]\d)")
 ICF_CODE_RE = re.compile(r"^(?:[bsdeе]\d[\w.]*|pf\d*)$", re.IGNORECASE)
 QUALIFIER_RE = re.compile(r"^([0-4])\s*(\+)?$")
 PROCEDURE_CODE_RE = re.compile(r"(?=(?:^|\s)([AАBВ]\d{2}(?:\.\d+){2,5}))")
+INSTRUMENTAL_START_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"рентген\w*|флюорограф\w*|УЗАС|УЗИ|ЭКГ|Эхо[-–— ]?КГ|ЭЭГ|"
+    r"МСКТ|КТ|МРТ|СМАД|холтер\w*|дуплекс\w*|"
+    r"компьютерн\w*\s+томограф\w*|"
+    r"магнитно[-–— ]?резонанс\w*\s+томограф\w*)\b",
+    re.IGNORECASE,
+)
 PHYSICIAN_SCALE_TOKENS = (
     "ривермид",
     "рэнкин",
@@ -55,6 +63,10 @@ PHYSICIAN_SCALE_TOKENS = (
     "реабилитационной маршрутизации",
 )
 PHYSICIAN_NARRATIVE_SCALES = (
+    (
+        "Шкала реабилитационной маршрутизации (ШРМ)",
+        r"^.*?\bШРМ\s*[:–—-]?\s*([0-6](?:\s*балл\w*)?)\b.*$",
+    ),
     (
         "Индекс мобильности Ривермид",
         r"^Индекс\s+мобильности\s+Ривермид\s*[:–—-]\s*(.+)$",
@@ -390,36 +402,39 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
                 flags=re.IGNORECASE,
             ).strip()
             diagnostic_lines = [line for line in diagnostic_lines if line]
-            instrumental_start = next(
-                (
-                    index
-                    for index, line in enumerate(diagnostic_lines)
-                    if re.match(
-                        numbered_prefix
-                        + r"(?:УЗАС|УЗИ|ЭКГ|Эхо[- ]?КГ|ЭЭГ|Рентген\w*|КТ|МРТ)\b",
-                        line,
-                        re.IGNORECASE,
-                    )
-                ),
-                len(diagnostic_lines),
+            diagnostic_text = clean_text(" ".join(diagnostic_lines))
+            inline_stop = re.search(
+                r"\b(?:консультация|план\s+обследования|план\s+лечения|назначения)\b",
+                diagnostic_text,
+                re.IGNORECASE,
             )
+            if inline_stop is not None:
+                diagnostic_text = clean_text(diagnostic_text[: inline_stop.start()])
+            instrumental_match = INSTRUMENTAL_START_RE.search(diagnostic_text)
+            instrumental_start = (
+                instrumental_match.start() if instrumental_match is not None else len(diagnostic_text)
+            )
+            if instrumental_match is not None:
+                numbered_match = re.search(
+                    r"(?:^|\s)(?:\d+[.)]|\d+\.\d+[.)]?)\s*$",
+                    diagnostic_text[:instrumental_start],
+                )
+                if numbered_match is not None:
+                    instrumental_start = numbered_match.start()
             if not result["laboratory_results"]:
-                result["laboratory_results"] = clean_text(
-                    " ".join(diagnostic_lines[:instrumental_start])
-                )
+                result["laboratory_results"] = clean_text(diagnostic_text[:instrumental_start])
             if not result["instrumental_results"]:
-                result["instrumental_results"] = clean_text(
-                    " ".join(diagnostic_lines[instrumental_start:])
-                )
+                result["instrumental_results"] = clean_text(diagnostic_text[instrumental_start:])
             if result["laboratory_results"] and result["instrumental_results"]:
                 break
     if not result["movement_regimen"]:
         for line in _document_lines(document):
-            match = re.match(
-                r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
+            match = re.search(
+                r"(?:^|\b)(?:\d+(?:\.\d+)*[.)]?\s*)?"
                 r"(?:(свободный|общий|палатный|постельный)\s+двигательный\s+режим|"
-                r"назначения\s+режим\s+(свободный|общий|палатный|постельный)|"
-                r"(?:план\s+лечения\s+)?двигательн\w*\s+режим\s+"
+                r"назначения\s+режим\s*[:–—.-]?\s*(свободный|общий|палатный|постельный)|"
+                r"(?:план\s+лечения\s*[:–—.-]?\s*)?"
+                r"двигательн\w*\s+режим\s*[:–—.-]?\s*"
                 r"(свободный|общий|палатный|постельный))\b",
                 line,
                 re.IGNORECASE,
@@ -476,9 +491,11 @@ def extract_conclusion(
             else r"^логопедический статус(?: при выписке)?\s*:"
         )
         for index, line in enumerate(lines):
-            if not re.match(heading, line, re.IGNORECASE):
+            heading_match = re.match(heading, line, re.IGNORECASE)
+            if not heading_match:
                 continue
-            values: list[str] = []
+            same_line = line[heading_match.end() :].strip()
+            values: list[str] = [same_line] if same_line else []
             for following in lines[index + 1 :]:
                 if re.match(
                     r"^(?:исследование анамнеза|на основании данных|рекомендовано|медицинский психолог|медицинский логопед)\b",
@@ -693,6 +710,35 @@ def extract_scale_measurements(
                                 document.source_path,
                             )
                         )
+            continue
+
+        # Some neuropsychology forms contain an ordinary two-column
+        # "characteristic / score" table without a date in its header.  Keep
+        # those rows as scales so they reach the common MDRK scale table.
+        if role is SpecialistRole.NEUROPSYCHOLOGIST and any(
+            token in table.text.casefold()
+            for token in (
+                "критичность",
+                "понимание смысл",
+                "серийный счет",
+                "нейродинамич",
+                "психическая устойчивость",
+            )
+        ):
+            for row in rows:
+                populated = [clean_text(value) for value in row if clean_text(value)]
+                if len(populated) < 2:
+                    continue
+                name, value = populated[0], populated[-1]
+                if name == value or not re.fullmatch(
+                    r"-?\d+(?:[.,]\d+)?(?:\s*(?:балл\w*|%))?",
+                    value,
+                    re.IGNORECASE,
+                ):
+                    continue
+                measurements.append(
+                    ScaleMeasurement(name, value, document_datetime, role, document.source_path)
+                )
 
     if role is SpecialistRole.LOGOPEDIST:
         narrative_patterns = (
@@ -753,26 +799,152 @@ def _split_procedure_name(raw: str) -> tuple[str, str]:
     match = re.match(r"\s*([AАBВ]\d{2}(?:\.\d+){2,5})\s*(.*)", raw)
     if not match:
         return "", clean_text(raw)
-    return match.group(1), clean_text(match.group(2))
+    return match.group(1), clean_text(match.group(2)).lstrip(" .:–—-")
 
 
-def extract_procedures(document: ParsedDocument) -> list[Procedure]:
+def _is_procedure_row_name(value: str) -> bool:
+    return bool(PROCEDURE_CODE_RE.search(value) or re.search(r"\bSiS\s*терап", value, re.IGNORECASE))
+
+
+def _shift_month(year: int, month: int, offset: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + offset
+    return divmod(index, 12)[0], divmod(index, 12)[1] + 1
+
+
+def _resolve_procedure_header_dates(
+    headers: list[str],
+    reference_date: date | None,
+) -> dict[int, date]:
+    if reference_date is None:
+        return {}
+    result: dict[int, date] = {}
+    previous: date | None = None
+    for column, raw in enumerate(headers):
+        value = clean_text(raw)
+        day_match = re.fullmatch(r"([0-3]?\d)", value)
+        short_match = re.fullmatch(r"([0-3]?\d)[./]([01]?\d)", value)
+        if day_match is None and short_match is None:
+            continue
+        day = int((short_match or day_match).group(1))
+        if not 1 <= day <= 31:
+            continue
+        if short_match is not None:
+            month = int(short_match.group(2))
+            years = (reference_date.year - 1, reference_date.year, reference_date.year + 1)
+            candidates: list[date] = []
+            for year in years:
+                try:
+                    candidates.append(date(year, month, day))
+                except ValueError:
+                    pass
+            if previous is not None:
+                forward = [candidate for candidate in candidates if candidate >= previous]
+                candidate = min(forward, default=None)
+            else:
+                candidate = min(
+                    candidates,
+                    key=lambda item: abs((item - reference_date).days),
+                    default=None,
+                )
+        elif previous is None:
+            candidates = []
+            for offset in (-1, 0, 1):
+                year, month = _shift_month(reference_date.year, reference_date.month, offset)
+                try:
+                    candidates.append(date(year, month, day))
+                except ValueError:
+                    pass
+            candidate = min(
+                candidates,
+                key=lambda item: abs((item - reference_date).days),
+                default=None,
+            )
+        else:
+            year, month = previous.year, previous.month
+            if day < previous.day:
+                year, month = _shift_month(year, month, 1)
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                candidate = None
+        if candidate is None:
+            continue
+        result[column] = candidate
+        previous = candidate
+    return result
+
+
+def _infer_procedure_frequency(
+    performed_dates: tuple[date, ...],
+    actual_count: int,
+) -> str:
+    if actual_count <= 0:
+        return ""
+    if actual_count == 1:
+        return "однократно"
+    dates = tuple(sorted(set(performed_dates)))
+    if len(dates) != actual_count:
+        return "периодически"
+
+    expected: set[date] = set()
+    current = dates[0]
+    while current <= dates[-1]:
+        if current.weekday() < 5:
+            expected.add(current)
+        current = date.fromordinal(current.toordinal() + 1)
+    if expected and expected.issubset(dates):
+        return "ежедневно"
+
+    gaps = [(right - left).days for left, right in zip(dates, dates[1:])]
+    if gaps and all(gap == 2 for gap in gaps):
+        return "через день"
+
+    weekly_counts: dict[tuple[int, int], int] = {}
+    for value in dates:
+        year, week, _ = value.isocalendar()
+        weekly_counts[(year, week)] = weekly_counts.get((year, week), 0) + 1
+    counts = list(weekly_counts.values())
+    if len(counts) >= 2 and len(set(counts)) == 1 and counts[0] in {1, 2, 3}:
+        count = counts[0]
+        return f"{count} {'раз' if count == 1 else 'раза'} в неделю"
+    return "периодически"
+
+
+def extract_procedures(
+    document: ParsedDocument,
+    reference_date: date | None = None,
+) -> list[Procedure]:
     procedures: list[Procedure] = []
     for table in document.tables:
         low = table.text.casefold()
         if "назначения" not in low and "реабилитационные процедуры" not in low:
             continue
+        if not table.rows:
+            continue
+        headers = table.rows[0].as_list()
+        date_columns = _resolve_procedure_header_dates(headers, reference_date)
+        raw_date_columns = {
+            index
+            for index, value in enumerate(headers)
+            if re.fullmatch(r"[0-3]?\d(?:[./][01]?\d)?", clean_text(value))
+        }
         for row in table.rows[1:]:
             values = row.as_list()
             if not values:
                 continue
             raw_name = clean_text(values[0])
-            if not raw_name or not PROCEDURE_CODE_RE.search(raw_name):
+            if not raw_name or not _is_procedure_row_name(raw_name):
                 continue
             code, name = _split_procedure_name(raw_name)
-            plus_cells = [value for value in values[3:] if "+" in value]
+            marker_columns = raw_date_columns or set(range(3, len(values)))
+            plus_cells = [values[index] for index in marker_columns if index < len(values) and "+" in values[index]]
             plus_count = len(plus_cells)
             count_needs_review = any(value.count("+") > 1 for value in plus_cells)
+            performed_dates = tuple(
+                date_columns[index]
+                for index in sorted(date_columns)
+                if index < len(values) and "+" in values[index]
+            )
             duration = None
             for value in reversed(values):
                 match = re.search(r"(?<!\d)(\d{1,3})\s*мин", value, re.IGNORECASE)
@@ -785,10 +957,11 @@ def extract_procedures(document: ParsedDocument) -> list[Procedure]:
                     specialist=_procedure_specialist(raw_name),
                     actual_count=plus_count,
                     duration_minutes=duration,
-                    frequency="",
+                    frequency=_infer_procedure_frequency(performed_dates, plus_count),
                     code=code,
                     source=document.source_path,
                     count_needs_review=count_needs_review,
+                    performed_dates=performed_dates,
                 )
             )
     if procedures:
@@ -811,7 +984,7 @@ def extract_procedures(document: ParsedDocument) -> list[Procedure]:
                 specialist=_procedure_specialist(name),
                 actual_count=plus_count,
                 duration_minutes=duration,
-                frequency="",
+                frequency=_infer_procedure_frequency((), plus_count),
                 code=code,
                 source=document.source_path,
                 count_needs_review=True,

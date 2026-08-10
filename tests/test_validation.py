@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ from mdrk_builder.domain import (
     IcfDomain,
     IcfQualifier,
     MdrkKind,
+    Procedure,
     ReviewIssue,
     ReviewSeverity,
     ScaleMeasurement,
@@ -49,9 +50,54 @@ def test_manual_fill_removes_stale_required_issue() -> None:
     assert not any(issue.code.startswith("required_") for issue in current_issues(episode, MdrkKind.INITIAL))
 
 
+def test_daily_rehabilitation_minutes_below_180_are_blocking() -> None:
+    episode = _valid_episode()
+    first_day = date(2026, 8, 4)
+    second_day = date(2026, 8, 5)
+    episode.procedures.extend(
+        (
+            Procedure(
+                "ЛФК",
+                "ФТ",
+                2,
+                120,
+                "ежедневно",
+                source=Path("/assignment.docx"),
+                performed_dates=(first_day, second_day),
+            ),
+            Procedure(
+                "Тренажёр",
+                "ФТ",
+                2,
+                60,
+                "ежедневно",
+                source=Path("/assignment.docx"),
+                performed_dates=(first_day,),
+            ),
+            Procedure(
+                "Психокоррекция",
+                "Нейропсихолог",
+                1,
+                30,
+                "однократно",
+                source=Path("/assignment.docx"),
+                performed_dates=(second_day,),
+            ),
+        )
+    )
+
+    issues = current_issues(episode, MdrkKind.INITIAL)
+    issue = next(item for item in issues if item.code == "rehab_daily_minutes_below_minimum")
+
+    assert issue.severity is ReviewSeverity.BLOCKING
+    assert "05.08.2026 — 150 мин" in issue.message
+    assert "04.08.2026" not in issue.message
+    assert not can_generate(episode, MdrkKind.INITIAL)
+
+
 def test_source_conflicts_require_explicit_value_bound_acknowledgement() -> None:
     episode = _valid_episode()
-    episode.identity.medical_record_number = "РУЧНОЙ 722/26"
+    episode.identity.medical_record_number = "РУЧНОЙ 9004/99"
     episode.admission_datetime = datetime(2026, 6, 5, 12, 30)
     episode.issues.extend(
         (
@@ -89,7 +135,7 @@ def test_source_conflicts_require_explicit_value_bound_acknowledgement() -> None
     ]
     assert all(issue.severity is ReviewSeverity.WARNING for issue in acknowledged)
     assert all("Исходный конфликт сохранён" in issue.message for issue in acknowledged)
-    assert any("РУЧНОЙ 722/26" in issue.message for issue in acknowledged)
+    assert any("РУЧНОЙ 9004/99" in issue.message for issue in acknowledged)
     assert any("05.06.2026 12:30" in issue.message for issue in acknowledged)
     assert can_generate(episode, MdrkKind.INITIAL)
     assert all(
@@ -120,8 +166,8 @@ def test_edit_after_acknowledgement_restores_source_conflict_block() -> None:
 
 def test_equivalent_record_number_format_keeps_materialization_current() -> None:
     episode = _valid_episode()
-    episode.identity.medical_record_number = "5906 / 26"
-    episode.materialized_medical_record_number = "СКП5906/26"
+    episode.identity.medical_record_number = "9002 / 99"
+    episode.materialized_medical_record_number = "СКП9002/99"
     episode.issues.append(
         ReviewIssue(
             "identity_conflict_medical_record_number",

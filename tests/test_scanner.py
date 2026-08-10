@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from docx import Document
 
 from mdrk_builder.application.scanner import (
     ScannedRecord,
+    _initial_mdrk_day,
     _latest_clinical_sections,
     _merge_dates,
     _merge_icf,
@@ -65,7 +66,21 @@ def _icf_table(*rows: ParsedRow) -> ParsedTable:
     return ParsedTable((_row({0: "МКФ", 13: "Ответственный специалист"}), *rows))
 
 
-def test_meeting_dates_use_next_calendar_day_and_actual_course_length() -> None:
+def test_initial_mdrk_day_rule_for_each_admission_weekday() -> None:
+    cases = {
+        date(2026, 8, 3): date(2026, 8, 4),   # Monday -> next day
+        date(2026, 8, 4): date(2026, 8, 5),
+        date(2026, 8, 5): date(2026, 8, 6),
+        date(2026, 8, 6): date(2026, 8, 7),
+        date(2026, 8, 7): date(2026, 8, 10),  # Friday -> Monday
+        date(2026, 8, 8): date(2026, 8, 11),  # weekend -> Tuesday
+        date(2026, 8, 9): date(2026, 8, 11),
+    }
+
+    assert {value: _initial_mdrk_day(value) for value in cases} == cases
+
+
+def test_meeting_dates_use_clinic_weekend_rule_and_actual_course_length() -> None:
     record = _record(
         "/patient/source.docx",
         "Дата и время поступления: 05.06.2026 12:12\n"
@@ -79,7 +94,7 @@ def test_meeting_dates_use_next_calendar_day_and_actual_course_length() -> None:
     _merge_dates(episode, [record])
 
     assert episode.admission_datetime == datetime(2026, 6, 5, 12, 12)
-    assert episode.initial_meeting_at == datetime(2026, 6, 6, 8, 0)
+    assert episode.initial_meeting_at == datetime(2026, 6, 8, 8, 0)
     assert episode.final_meeting_at == datetime(2026, 6, 19, 11, 30)
     assert episode.course_duration_days == 16
 
@@ -111,7 +126,7 @@ def test_explicit_final_mdrk_schedule_overrides_latest_specialist_time() -> None
 
     _merge_dates(episode, [clinical, schedule])
 
-    assert episode.initial_meeting_at == datetime(2026, 6, 6, 8)
+    assert episode.initial_meeting_at == datetime(2026, 6, 8, 8)
     assert episode.final_meeting_at == datetime(2026, 6, 19, 15, 30)
 
 
@@ -205,12 +220,12 @@ def test_equivalent_record_number_formats_do_not_create_false_conflict() -> None
     records = [
         _record(
             "/patient/a.docx",
-            "Номер ИБ: СКП5906/26",
+            "Номер ИБ: СКП9002/99",
             clinical_datetime=datetime(2026, 8, 3, 9),
         ),
         _record(
             "/patient/b.docx",
-            "Номер ИБ: 5906 / 26",
+            "Номер ИБ: 9002 / 99",
             clinical_datetime=datetime(2026, 8, 3, 8),
         ),
     ]
@@ -230,17 +245,17 @@ def test_record_number_conflict_points_to_genuinely_different_source() -> None:
     records = [
         _record(
             "/patient/chosen.docx",
-            "Номер ИБ: СКП5906/26",
+            "Номер ИБ: СКП9002/99",
             clinical_datetime=datetime(2026, 8, 3, 10),
         ),
         _record(
             str(equivalent_path),
-            "Номер ИБ: 5906 / 26",
+            "Номер ИБ: 9002 / 99",
             clinical_datetime=datetime(2026, 8, 3, 9),
         ),
         _record(
             str(foreign_path),
-            "Номер ИБ: СКП5799/26",
+            "Номер ИБ: СКП9003/99",
             clinical_datetime=datetime(2026, 8, 3, 8),
         ),
     ]
@@ -305,7 +320,7 @@ def test_scan_overrides_select_episode_before_materialization(tmp_path) -> None:
     assert episode.materialized_medical_record_number == "СКП 100 / 26"
     assert episode.admission_datetime == datetime(2026, 6, 5, 12, 34)
     assert episode.materialized_admission_datetime == datetime(2026, 6, 5, 12, 34)
-    assert episode.initial_meeting_at == datetime(2026, 6, 6, 8)
+    assert episode.initial_meeting_at == datetime(2026, 6, 8, 8)
     assert episode.initial_sections.clinical_diagnosis == "диагноз выбранного эпизода"
     assert excluded_path.resolve() in episode.excluded_source_paths
     record_conflict = next(
@@ -352,7 +367,7 @@ def test_different_medical_record_stays_visible_but_cannot_supply_episode_data()
         _record(
             physician_path,
             "ФИО пациента: Тестов Тест Тестович\n"
-            "Номер ИБ: СКП5906/26\n"
+            "Номер ИБ: СКП9002/99\n"
             "Дата и время поступления: 01.08.2026 09:11\n"
             "Клинический диагноз: реабилитационный диагноз\n"
             "Лабораторные исследования: анализы эпизода",
@@ -363,7 +378,7 @@ def test_different_medical_record_stays_visible_but_cannot_supply_episode_data()
         _record(
             cardiology_path,
             "ФИО пациента: Тестов Тест Тестович\n"
-            "Номер ИБ: СКП5799/26\n"
+            "Номер ИБ: СКП9003/99\n"
             "Дата и время поступления: 28.07.2026 14:17\n"
             "Дата и время выписки: 01.08.2026 12:00\n"
             "Клинический диагноз: чужой кардиологический диагноз\n"
@@ -380,21 +395,20 @@ def test_different_medical_record_stays_visible_but_cannot_supply_episode_data()
     _merge_dates(episode, active)
     _latest_clinical_sections(episode, active)
 
-    assert episode.identity.medical_record_number == "СКП5906/26"
+    assert episode.identity.medical_record_number == "СКП9002/99"
     assert [item.document.source_path for item in active] == [Path(physician_path)]
     assert episode.excluded_source_paths == {Path(cardiology_path)}
     assert episode.admission_datetime == datetime(2026, 8, 1, 9, 11)
     assert episode.discharge_datetime is None
-    assert episode.initial_meeting_at == datetime(2026, 8, 2, 8)
+    assert episode.initial_meeting_at == datetime(2026, 8, 4, 8)
     assert episode.initial_sections.clinical_diagnosis == "реабилитационный диагноз"
     assert episode.initial_sections.laboratory_results == "анализы эпизода"
     assert any(issue.code == "source_medical_record_mismatch" for issue in episode.issues)
-    boundary_issue = next(
-        issue for issue in episode.issues if issue.code == "physician_source_after_meeting"
+    assert not any(
+        issue.code == "physician_source_after_meeting" for issue in episode.issues
     )
-    assert boundary_issue.severity is ReviewSeverity.BLOCKING
-    assert boundary_issue.field == "initial_meeting_at"
-    assert boundary_issue.source == Path(physician_path)
+    assert episode.initial_sections.rehabilitation_potential == "средний"
+    assert episode.sections.rehabilitation_potential == "средний"
 
 
 def test_future_physician_previews_missing_fields_even_when_older_physician_is_empty() -> None:

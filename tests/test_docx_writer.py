@@ -36,7 +36,7 @@ def _representative_episode(folder: Path) -> Episode:
     episode.identity.full_name = "Тестов Алексей Юрьевич"
     episode.identity.birth_date = date(1968, 2, 20)
     episode.identity.sex = "муж"
-    episode.identity.medical_record_number = "СКП4318/26"
+    episode.identity.medical_record_number = "СКП9001/99"
     episode.admission_datetime = datetime(2026, 6, 4, 12, 15)
     episode.discharge_datetime = datetime(2026, 6, 20, 10)
     episode.initial_meeting_at = initial_at
