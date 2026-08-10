@@ -96,6 +96,53 @@ class SignatoryRow:
         return self.role.display_name if isinstance(self.role, SpecialistRole) else self.role
 
 
+SIGNATORY_ROSTER: tuple[SignatoryRow, ...] = (
+    SignatoryRow(SpecialistRole.FRM),
+    SignatoryRow(SpecialistRole.PHYSICAL_THERAPIST),
+    SignatoryRow(SpecialistRole.NEUROPSYCHOLOGIST),
+    SignatoryRow(SpecialistRole.PATHOPSYCHOLOGIST),
+    SignatoryRow(SpecialistRole.LOGOPEDIST),
+    SignatoryRow(SpecialistRole.OCCUPATIONAL_THERAPIST),
+    SignatoryRow("Консультанты"),
+    SignatoryRow("Заведующий отделением"),
+)
+
+
+def _signatory_role_key(row: SignatoryRow) -> str:
+    if isinstance(row.role, SpecialistRole):
+        return {
+            SpecialistRole.FRM: "frm",
+            SpecialistRole.NEUROLOGIST: "frm",
+            SpecialistRole.PHYSICAL_THERAPIST: "physical_therapist",
+            SpecialistRole.OCCUPATIONAL_THERAPIST: "occupational_therapist",
+            SpecialistRole.LOGOPEDIST: "logopedist",
+            SpecialistRole.NEUROPSYCHOLOGIST: "neuropsychologist",
+            SpecialistRole.PATHOPSYCHOLOGIST: "pathopsychologist",
+            SpecialistRole.OTHER: "consultants",
+        }[row.role]
+
+    normalized = " ".join(re.sub(r"[^0-9a-zа-яё]+", " ", row.display_role.casefold()).split())
+    if "заведующ" in normalized:
+        return "department_head"
+    if "консульт" in normalized:
+        return "consultants"
+    if "патопсих" in normalized:
+        return "pathopsychologist"
+    if "нейропсих" in normalized:
+        return "neuropsychologist"
+    if "эрго" in normalized:
+        return "occupational_therapist"
+    if "логоп" in normalized:
+        return "logopedist"
+    if "фрм" in normalized or "невролог" in normalized or (
+        "врач" in normalized and "реабилитац" in normalized
+    ):
+        return "frm"
+    if any(token in normalized for token in ("физическ", "физический терапевт", "лфк")):
+        return "physical_therapist"
+    return normalized
+
+
 def write_mdrk_docx(
     episode: Episode,
     kind: MdrkKind,
@@ -531,39 +578,33 @@ class _DocumentRenderer:
                 )
 
     def _render_signature_table(self) -> None:
-        rows = self.signatories or self._default_signatories()
-        if not any(
-            row.display_role.strip().casefold() == "заведующий отделением"
-            for row in rows
-        ):
-            rows = (*rows, SignatoryRow("Заведующий отделением"))
-        table = self.document.add_table(rows=max(1, len(rows)) + 1, cols=len(SIGNATURE_WIDTHS))
+        rows = self._resolved_signatories()
+        table = self.document.add_table(rows=len(rows) + 1, cols=len(SIGNATURE_WIDTHS))
         configure_table(table, SIGNATURE_WIDTHS)
         for cell, value in zip(table.rows[0].cells, ("Специалист МДРК", "ФИО", "Подпись"), strict=True):
             set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
         mark_header_row(table.rows[0])
-
-        if not rows:
-            empty = table.rows[1].cells[0].merge(table.rows[1].cells[-1])
-            set_cell_text(empty, "Состав команды не указан", style=STYLE_WARNING, alignment=WD_ALIGN_PARAGRAPH.LEFT)
-            return
 
         for table_row, signatory in zip(table.rows[1:], rows, strict=True):
             set_cell_text(table_row.cells[0], signatory.display_role, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
             set_cell_text(table_row.cells[1], signatory.full_name, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
             set_cell_text(table_row.cells[2], "", style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.CENTER)
 
-    def _default_signatories(self) -> tuple[SignatoryRow, ...]:
-        roles: list[SpecialistRole] = []
-        for finding in self.snapshot.findings:
-            if finding.role not in roles:
-                roles.append(finding.role)
-        for scale in self.snapshot.scale_rows:
-            if scale.role not in roles:
-                roles.append(scale.role)
-        rows = [SignatoryRow(role) for role in roles]
-        rows.append(SignatoryRow("Заведующий отделением"))
-        return tuple(rows)
+    def _resolved_signatories(self) -> tuple[SignatoryRow, ...]:
+        rows = list(SIGNATORY_ROSTER)
+        positions = {_signatory_role_key(row): index for index, row in enumerate(rows)}
+        extras: list[SignatoryRow] = []
+        for supplied in self.signatories:
+            key = _signatory_role_key(supplied)
+            if key not in positions:
+                extras.append(supplied)
+                continue
+            if supplied.full_name.strip():
+                index = positions[key]
+                rows[index] = SignatoryRow(rows[index].role, supplied.full_name.strip())
+
+        consultant_index = positions["consultants"]
+        return tuple((*rows[:consultant_index], *extras, *rows[consultant_index:]))
 
     def _add_section_heading(self, number: int, title: str) -> None:
         self.document.add_paragraph(f"{number}. {title}", style=STYLE_SECTION)

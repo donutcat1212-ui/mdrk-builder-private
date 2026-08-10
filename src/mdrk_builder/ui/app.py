@@ -33,11 +33,7 @@ from mdrk_builder.domain import (
     SpecialistFinding,
     SpecialistRole,
 )
-from mdrk_builder.infrastructure.docx_writer import (
-    SignatoryRow,
-    canonical_template_path,
-    write_mdrk_docx,
-)
+from mdrk_builder.infrastructure.docx_writer import canonical_template_path, write_mdrk_docx
 from mdrk_builder.ui.dialogs import (
     FindingDialog,
     IcfDomainDialog,
@@ -48,7 +44,6 @@ from mdrk_builder.ui.dialogs import (
 from mdrk_builder.ui.episode_adapter import (
     EpisodeFormData,
     apply_episode_form_data,
-    episode_signatory_roles,
     format_date,
     format_datetime,
     parse_episode_folder,
@@ -767,12 +762,8 @@ class MdrkBuilderApp:
         )
         if not output:
             return
-        signatories = [
-            SignatoryRow(role=role.display_name)
-            for role in episode_signatory_roles(self.episode, kind)
-        ]
         try:
-            created = write_mdrk_docx(self.episode, kind, Path(output), signatories=signatories)
+            created = write_mdrk_docx(self.episode, kind, Path(output))
         except Exception as exc:
             messagebox.showerror("Не удалось создать DOCX", str(exc))
             self.status_var.set("Ошибка генерации DOCX")
@@ -1211,7 +1202,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.6\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.7\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 

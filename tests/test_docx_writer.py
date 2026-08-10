@@ -291,7 +291,6 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         episode,
         MdrkKind.FINAL,
         tmp_path / "МДРК2.docx",
-        signatories=signatories,
     )
 
     initial = Document(initial_path)
@@ -375,9 +374,23 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     assert procedures.rows[1].cells[2].text == "5"
     assert procedures.rows[2].cells[2].text == "6"
     signatures = _find_table(initial, "Специалист МДРК")
+    final_signatures = _find_table(final, "Специалист МДРК")
+    expected_roles = [
+        "Врач ФРМ",
+        "Специалист по физической реабилитации",
+        "Медицинский психолог/нейропсихолог",
+        "Медицинский психолог/патопсихолог",
+        "Медицинский логопед",
+        "Специалист по эргореабилитации",
+        "Консультанты",
+        "Заведующий отделением",
+    ]
+    assert [row.cells[0].text for row in signatures.rows[1:]] == expected_roles
+    assert [row.cells[0].text for row in final_signatures.rows[1:]] == expected_roles
     assert signatures.rows[1].cells[1].text == "Иванов И.И."
+    assert signatures.rows[2].cells[1].text == "Петров П.П."
     assert signatures.rows[1].cells[2].text == ""
-    assert signatures.rows[-1].cells[0].text == "Заведующий отделением"
+    assert all(row.cells[1].text == "" for row in final_signatures.rows[1:])
     _assert_signature_table_page_separator(initial)
     _assert_signature_table_page_separator(final)
     conclusion_labels = [
