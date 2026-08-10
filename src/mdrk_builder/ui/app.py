@@ -9,7 +9,7 @@ import tkinter as tk
 import traceback
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from docx import Document
@@ -233,7 +233,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="МКФ")
         columns = ("code", "description", "role", "initial", "final", "dynamic", "note")
-        self.icf_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.icf_tree = self._create_tree_with_scrollbars(tab, columns)
         headings = {
             "code": "Код",
             "description": "Описание",
@@ -247,7 +247,6 @@ class MdrkBuilderApp:
         for column in columns:
             self.icf_tree.heading(column, text=headings[column])
             self.icf_tree.column(column, width=widths[column], minwidth=40, anchor="w")
-        self._pack_tree_with_scrollbars(tab, self.icf_tree)
         self.icf_tree.bind("<Double-1>", lambda _event: self._edit_icf())
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
@@ -259,7 +258,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Источники")
         columns = ("role", "clinical_datetime", "document_type", "path")
-        self.source_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.source_tree = self._create_tree_with_scrollbars(tab, columns)
         for column, heading, width in (
             ("role", "Роль", 250),
             ("clinical_datetime", "Клиническая дата", 155),
@@ -269,7 +268,6 @@ class MdrkBuilderApp:
             self.source_tree.heading(column, text=heading)
             self.source_tree.column(column, width=width, minwidth=65, anchor="w")
         self.source_tree.tag_configure("used", background="#e3f3df")
-        self._pack_tree_with_scrollbars(tab, self.source_tree)
         ttk.Label(
             tab,
             text=(
@@ -282,7 +280,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Процедуры")
         columns = ("code", "name", "specialist", "count", "duration", "frequency")
-        self.procedure_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.procedure_tree = self._create_tree_with_scrollbars(tab, columns)
         headings = {
             "code": "Код",
             "name": "Процедура",
@@ -295,7 +293,6 @@ class MdrkBuilderApp:
         for column in columns:
             self.procedure_tree.heading(column, text=headings[column])
             self.procedure_tree.column(column, width=widths[column], minwidth=45, anchor="w")
-        self._pack_tree_with_scrollbars(tab, self.procedure_tree)
         self.procedure_tree.bind("<Double-1>", lambda _event: self._edit_procedure())
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
@@ -307,7 +304,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Шкалы")
         columns = ("role", "date", "name", "value", "source")
-        self.scale_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.scale_tree = self._create_tree_with_scrollbars(tab, columns)
         for column, heading, width in (
             ("role", "Специалист", 245),
             ("date", "Дата и время", 145),
@@ -317,7 +314,6 @@ class MdrkBuilderApp:
         ):
             self.scale_tree.heading(column, text=heading)
             self.scale_tree.column(column, width=width, minwidth=55, anchor="w")
-        self._pack_tree_with_scrollbars(tab, self.scale_tree)
         self.scale_tree.bind("<Double-1>", lambda _event: self._edit_scale())
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
@@ -329,7 +325,7 @@ class MdrkBuilderApp:
         tab = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(tab, text="Заключения")
         columns = ("role", "date", "scales", "conclusion")
-        self.finding_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.finding_tree = self._create_tree_with_scrollbars(tab, columns)
         for column, heading, width in (
             ("role", "Специалист", 250),
             ("date", "Клиническая дата", 145),
@@ -338,7 +334,6 @@ class MdrkBuilderApp:
         ):
             self.finding_tree.heading(column, text=heading)
             self.finding_tree.column(column, width=width, minwidth=45, anchor="w")
-        self._pack_tree_with_scrollbars(tab, self.finding_tree)
         self.finding_tree.bind("<Double-1>", lambda _event: self._edit_finding())
         buttons = ttk.Frame(tab)
         buttons.pack(fill="x", pady=(6, 0))
@@ -348,9 +343,10 @@ class MdrkBuilderApp:
 
     def _build_issues_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=7)
+        self.issues_tab = tab
         self.notebook.add(tab, text="Предупреждения")
         columns = ("severity", "message", "field", "source")
-        self.issue_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        self.issue_tree = self._create_tree_with_scrollbars(tab, columns)
         for column, heading, width in (
             ("severity", "Уровень", 130),
             ("message", "Сообщение", 580),
@@ -362,15 +358,23 @@ class MdrkBuilderApp:
         self.issue_tree.tag_configure("blocking", background="#ffd6d6")
         self.issue_tree.tag_configure("warning", background="#fff4c2")
         self.issue_tree.tag_configure("info", background="#e6f1ff")
-        self._pack_tree_with_scrollbars(tab, self.issue_tree)
         ttk.Button(tab, text="Обновить после правок", command=self._refresh_issues).pack(
             anchor="w", pady=(6, 0)
         )
 
     @staticmethod
-    def _pack_tree_with_scrollbars(parent: ttk.Frame, tree: ttk.Treeview) -> None:
+    def _create_tree_with_scrollbars(
+        parent: ttk.Frame,
+        columns: tuple[str, ...],
+    ) -> ttk.Treeview:
         container = ttk.Frame(parent)
         container.pack(fill="both", expand=True)
+        tree = ttk.Treeview(
+            container,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
         vertical = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
         horizontal = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -379,6 +383,7 @@ class MdrkBuilderApp:
         horizontal.grid(row=1, column=0, sticky="ew")
         container.rowconfigure(0, weight=1)
         container.columnconfigure(0, weight=1)
+        return tree
 
     def _set_folder_field(self, value: str) -> None:
         self._setting_folder_field = True
@@ -634,7 +639,7 @@ class MdrkBuilderApp:
         kind = self._current_kind
         self._refresh_issues()
         if not can_generate(self.episode, kind):
-            self.notebook.select(self.issue_tree.master.master)
+            self.notebook.select(self.issues_tab)
             messagebox.showerror(
                 "Документ не создан",
                 "Остались блокирующие проблемы. Исправьте обязательные поля на вкладке "
@@ -997,7 +1002,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.1\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.2\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 
@@ -1052,10 +1057,24 @@ def smoke_test(*, include_ui: bool = False) -> int:
         try:
             root.withdraw()
             MdrkBuilderApp(root)
+            _write_smoke_report("phase=app_constructed")
+            _assert_consistent_geometry_managers(root)
             root.update_idletasks()
+            root.update()
+            _write_smoke_report("phase=idle_updated")
         finally:
             root.destroy()
+            _write_smoke_report("phase=ui_destroyed")
     return 0
+
+
+def _assert_consistent_geometry_managers(widget: tk.Misc) -> None:
+    if widget.pack_slaves() and widget.grid_slaves():
+        raise RuntimeError(
+            f"В одном контейнере смешаны pack и grid: {widget.winfo_pathname(widget.winfo_id())}"
+        )
+    for child in widget.winfo_children():
+        _assert_consistent_geometry_managers(child)
 
 
 def _write_smoke_report(message: str, *, reset: bool = False) -> None:
@@ -1063,8 +1082,11 @@ def _write_smoke_report(message: str, *, reset: bool = False) -> None:
     if not report_path:
         return
     mode = "w" if reset else "a"
-    with Path(report_path).open(mode, encoding="utf-8") as report:
-        report.write(f"{message}\n")
+    try:
+        with Path(report_path).open(mode, encoding="utf-8") as report:
+            report.write(f"{message}\n")
+    except OSError:
+        return
 
 
 def _run_smoke(*, include_ui: bool) -> int:
@@ -1081,16 +1103,48 @@ def _run_smoke(*, include_ui: bool) -> int:
         return 1
 
 
+def _write_crash_report(error_text: str) -> Path | None:
+    base = Path(os.environ.get("LOCALAPPDATA", gettempdir()))
+    report = base / "MDRK Builder" / "logs" / "startup-error.log"
+    try:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(error_text, encoding="utf-8")
+    except OSError:
+        return None
+    return report
+
+
+def _run_gui() -> int:
+    root: tk.Tk | None = None
+    try:
+        root = tk.Tk()
+        MdrkBuilderApp(root)
+        root.mainloop()
+        return 0
+    except Exception:
+        report = _write_crash_report(traceback.format_exc())
+        message = "Программа не смогла запуститься."
+        if report is not None:
+            message += f"\n\nТехнический отчёт сохранён:\n{report}"
+        if root is not None:
+            try:
+                messagebox.showerror("Ошибка запуска МДРК Builder", message, parent=root)
+            except Exception:
+                pass
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--smoke-test-ui" in arguments:
         return _run_smoke(include_ui=True)
     if "--smoke-test" in arguments:
         return _run_smoke(include_ui=False)
-    root = tk.Tk()
-    MdrkBuilderApp(root)
-    root.mainloop()
-    return 0
+    return _run_gui()
 
 
 if __name__ == "__main__":

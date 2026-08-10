@@ -73,7 +73,7 @@ jobs:
           $env:MDRK_BUILDER_SMOKE_REPORT = "$PWD\dist\smoke-report.txt"
           $process = Start-Process `
             -FilePath "$PWD\dist\MDRK_Builder.exe" `
-            -ArgumentList "--smoke-test" `
+            -ArgumentList "--smoke-test-ui" `
             -PassThru
 
           if (-not $process.WaitForExit(60000)) {
@@ -134,7 +134,7 @@ jobs:
           - SHA-256 контрольные суммы.
 
           GitHub-сборка проверила тесты, упаковку, встроенный шаблон,
-          генерацию DOCX и загрузку UI-модуля. Конвертацию DOC/RTF через
+          генерацию DOCX и реальную инициализацию интерфейса. Конвертацию DOC/RTF через
           Microsoft Word COM необходимо отдельно проверить на рабочем
           Windows-компьютере с установленным Word до использования на реальных
           документах.
