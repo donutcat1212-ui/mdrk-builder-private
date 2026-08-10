@@ -70,6 +70,7 @@ jobs:
       - name: Smoke-test packaged application
         shell: pwsh
         run: |
+          $env:MDRK_BUILDER_SMOKE_REPORT = "$PWD\dist\smoke-report.txt"
           $process = Start-Process `
             -FilePath "$PWD\dist\MDRK_Builder.exe" `
             -ArgumentList "--smoke-test" `
@@ -77,11 +78,17 @@ jobs:
 
           if (-not $process.WaitForExit(60000)) {
             taskkill /PID $process.Id /T /F
+            if (Test-Path $env:MDRK_BUILDER_SMOKE_REPORT) {
+              Get-Content $env:MDRK_BUILDER_SMOKE_REPORT
+            }
             throw "Packaged smoke test timed out after 60 seconds"
           }
 
           $process.Refresh()
           if ($process.ExitCode -ne 0) {
+            if (Test-Path $env:MDRK_BUILDER_SMOKE_REPORT) {
+              Get-Content $env:MDRK_BUILDER_SMOKE_REPORT
+            }
             throw "Packaged smoke test failed: exit code $($process.ExitCode)"
           }
 
@@ -127,7 +134,7 @@ jobs:
           - SHA-256 контрольные суммы.
 
           GitHub-сборка проверила тесты, упаковку, встроенный шаблон,
-          генерацию DOCX и запуск интерфейса. Конвертацию DOC/RTF через
+          генерацию DOCX и загрузку UI-модуля. Конвертацию DOC/RTF через
           Microsoft Word COM необходимо отдельно проверить на рабочем
           Windows-компьютере с установленным Word до использования на реальных
           документах.

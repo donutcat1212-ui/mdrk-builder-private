@@ -38,7 +38,10 @@ echo [6/7] Building MDRK_Builder.exe...
 python -m PyInstaller --noconfirm --clean mdrk_builder.spec || goto :error
 
 echo [7/7] Running packaged UI smoke test...
-"dist\MDRK_Builder.exe" --smoke-test || goto :error
+set "MDRK_BUILDER_SMOKE_REPORT=%CD%\dist\smoke-report.txt"
+if exist "%MDRK_BUILDER_SMOKE_REPORT%" del "%MDRK_BUILDER_SMOKE_REPORT%"
+"dist\MDRK_Builder.exe" --smoke-test-ui || goto :smoke_error
+set "MDRK_BUILDER_SMOKE_REPORT="
 
 echo.
 echo SUCCESS: %CD%\dist\MDRK_Builder.exe
@@ -60,3 +63,10 @@ echo.
 echo BUILD FAILED: .venv-win has an unsupported Python version or architecture.
 echo Remove .venv-win manually, then run this script again.
 exit /b 1
+
+:smoke_error
+set "MDRK_SMOKE_EXIT=%ERRORLEVEL%"
+if exist "%MDRK_BUILDER_SMOKE_REPORT%" type "%MDRK_BUILDER_SMOKE_REPORT%"
+echo.
+echo PACKAGED UI SMOKE FAILED with exit code %MDRK_SMOKE_EXIT%.
+exit /b %MDRK_SMOKE_EXIT%

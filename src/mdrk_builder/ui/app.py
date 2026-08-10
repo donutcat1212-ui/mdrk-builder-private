@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
 import queue
 import re
 import sys
 import threading
 import tkinter as tk
+import traceback
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+from docx import Document
 
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.validation import can_generate, current_issues
@@ -993,7 +997,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.1\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 
@@ -1008,6 +1012,7 @@ class MdrkBuilderApp:
 
 
 def _generate_smoke_document(directory: Path) -> Path:
+    _write_smoke_report("phase=template")
     template = canonical_template_path()
     if not template.is_file():
         raise FileNotFoundError(f"Канонический шаблон не найден: {template}")
@@ -1022,6 +1027,7 @@ def _generate_smoke_document(directory: Path) -> Path:
     episode.sources.append(
         SourceDocument(directory / "smoke-source.docx", role=SpecialistRole.NEUROLOGIST)
     )
+    _write_smoke_report("phase=write_docx")
     output = write_mdrk_docx(
         episode,
         MdrkKind.INITIAL,
@@ -1029,27 +1035,58 @@ def _generate_smoke_document(directory: Path) -> Path:
     )
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("Тестовый DOCX не был создан")
+    _write_smoke_report("phase=reopen_docx")
+    reopened = Document(output)
+    if not reopened.paragraphs:
+        raise RuntimeError("Тестовый DOCX не содержит ожидаемых абзацев")
     return output
 
 
-def smoke_test() -> int:
+def smoke_test(*, include_ui: bool = False) -> int:
     with TemporaryDirectory(prefix="mdrk-builder-smoke-") as temporary:
         _generate_smoke_document(Path(temporary))
 
-    root = tk.Tk()
-    try:
-        root.withdraw()
-        MdrkBuilderApp(root)
-        root.update_idletasks()
-    finally:
-        root.destroy()
+    if include_ui:
+        _write_smoke_report("phase=tk_init")
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            MdrkBuilderApp(root)
+            root.update_idletasks()
+        finally:
+            root.destroy()
     return 0
+
+
+def _write_smoke_report(message: str, *, reset: bool = False) -> None:
+    report_path = os.environ.get("MDRK_BUILDER_SMOKE_REPORT")
+    if not report_path:
+        return
+    mode = "w" if reset else "a"
+    with Path(report_path).open(mode, encoding="utf-8") as report:
+        report.write(f"{message}\n")
+
+
+def _run_smoke(*, include_ui: bool) -> int:
+    _write_smoke_report("phase=start", reset=True)
+    try:
+        result = smoke_test(include_ui=include_ui)
+        _write_smoke_report("status=ok")
+        return result
+    except Exception:
+        try:
+            _write_smoke_report(traceback.format_exc())
+        except OSError:
+            pass
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--smoke-test-ui" in arguments:
+        return _run_smoke(include_ui=True)
     if "--smoke-test" in arguments:
-        return smoke_test()
+        return _run_smoke(include_ui=False)
     root = tk.Tk()
     MdrkBuilderApp(root)
     root.mainloop()
