@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from docx import Document
 
 from mdrk_builder.application.scanner import scan_patient_folder
+from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.application.validation import (
     acknowledge_issue,
     can_generate,
@@ -791,9 +792,28 @@ class MdrkBuilderApp:
 
     def _refresh_icf(self) -> None:
         self._clear_tree(self.icf_tree)
+        display_columns = ("code", "description", "role", "initial", "note")
+        if self._current_kind is MdrkKind.FINAL:
+            display_columns = (
+                "code",
+                "description",
+                "role",
+                "initial",
+                "final",
+                "dynamic",
+                "note",
+            )
+        self.icf_tree.configure(displaycolumns=display_columns)
         if not self.episode:
             return
+        visible_domains = build_snapshot(self.episode, self._current_kind).icf_domains
+        visible_keys = {
+            (domain.key, domain.initial_source)
+            for domain in visible_domains
+        }
         for index, domain in enumerate(self.episode.icf_domains):
+            if (domain.key, domain.initial_source) not in visible_keys:
+                continue
             self.icf_tree.insert(
                 "",
                 "end",
@@ -807,8 +827,17 @@ class MdrkBuilderApp:
                         else domain.specialist.display_name
                     ),
                     domain.initial.display() if domain.initial else "",
-                    domain.final.display() if domain.final else "",
-                    domain.dynamic_marker if domain.dynamic_marker is not None else "?",
+                    (
+                        domain.final.display()
+                        if self._current_kind is MdrkKind.FINAL and domain.final
+                        else ""
+                    ),
+                    (
+                        domain.dynamic_marker
+                        if self._current_kind is MdrkKind.FINAL
+                        and domain.dynamic_marker is not None
+                        else ""
+                    ),
                     domain.note,
                 ),
             )
@@ -872,8 +901,33 @@ class MdrkBuilderApp:
         self._scale_refs = []
         if not self.episode:
             return
+        selected_rows = build_snapshot(self.episode, self._current_kind).scale_rows
+        selected_keys = {
+            (
+                measurement.specialist,
+                " ".join(measurement.name.casefold().split()),
+                measurement.value,
+                measurement.measured_at,
+                measurement.source,
+            )
+            for row in selected_rows
+            for measurement in (row.initial, row.current)
+            if measurement is not None
+        }
+        rendered_keys: set[tuple[object, ...]] = set()
         for finding_index, finding in enumerate(self.episode.findings):
             for scale_index, measurement in enumerate(finding.scales):
+                effective_at = measurement.measured_at or finding.source_datetime
+                key = (
+                    measurement.specialist,
+                    " ".join(measurement.name.casefold().split()),
+                    measurement.value,
+                    effective_at,
+                    measurement.source,
+                )
+                if key not in selected_keys or key in rendered_keys:
+                    continue
+                rendered_keys.add(key)
                 row_index = len(self._scale_refs)
                 self._scale_refs.append((finding_index, scale_index))
                 self.scale_tree.insert(
@@ -882,7 +936,7 @@ class MdrkBuilderApp:
                     iid=str(row_index),
                     values=(
                         measurement.specialist.display_name,
-                        format_datetime(measurement.measured_at),
+                        format_datetime(effective_at),
                         measurement.name,
                         measurement.value,
                         str(measurement.source) if measurement.source else "",
@@ -893,7 +947,13 @@ class MdrkBuilderApp:
         self._clear_tree(self.finding_tree)
         if not self.episode:
             return
+        selected_ids = {
+            id(finding)
+            for finding in build_snapshot(self.episode, self._current_kind).findings
+        }
         for index, finding in enumerate(self.episode.findings):
+            if id(finding) not in selected_ids:
+                continue
             conclusion = " ".join(finding.conclusion.split())
             self.finding_tree.insert(
                 "",
@@ -1042,7 +1102,7 @@ class MdrkBuilderApp:
     def _add_icf(self) -> None:
         if not self.episode:
             return
-        dialog = IcfDomainDialog(self.root)
+        dialog = IcfDomainDialog(self.root, kind=self._current_kind)
         if dialog.result:
             self.episode.icf_domains.append(dialog.result)
             self._refresh_icf()
@@ -1051,7 +1111,11 @@ class MdrkBuilderApp:
     def _edit_icf(self) -> None:
         if not self.episode or (index := self._selected_index(self.icf_tree)) is None:
             return
-        dialog = IcfDomainDialog(self.root, self.episode.icf_domains[index])
+        dialog = IcfDomainDialog(
+            self.root,
+            self.episode.icf_domains[index],
+            kind=self._current_kind,
+        )
         if dialog.result:
             self.episode.icf_domains[index] = dialog.result
             self._refresh_icf()
@@ -1206,7 +1270,7 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.9\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
+            "МДРК Builder 0.1.10\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
             "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
         )
 

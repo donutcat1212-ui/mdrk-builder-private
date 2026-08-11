@@ -3,9 +3,16 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields
 from datetime import date, datetime, time, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable
 
+from mdrk_builder.application.clinical_text import (
+    DIAGNOSTIC_DUPLICATE_THRESHOLD,
+    ClinicalTextObservation,
+    compose_clinical_timeline,
+    is_empty_clinical_update,
+)
 from mdrk_builder.application.extractors import (
     IcfObservation,
     extract_admission_datetime,
@@ -14,7 +21,9 @@ from mdrk_builder.application.extractors import (
     extract_conclusion,
     extract_discharge_datetime,
     extract_icf_observations,
+    extract_mdrk_document_datetime,
     extract_mdrk_meeting_datetimes,
+    extract_mdrk_scale_measurements,
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
@@ -319,10 +328,6 @@ def _merge_dates(
         episode.final_meeting_at = max(scheduled_final_candidates)
     elif latest_source:
         episode.final_meeting_at = latest_source
-    elif episode.discharge_datetime:
-        discharge_meeting = datetime.combine(episode.discharge_datetime.date(), time(11, 0))
-        if episode.initial_meeting_at is None or discharge_meeting > episode.initial_meeting_at:
-            episode.final_meeting_at = discharge_meeting
     if episode.admission_datetime and episode.discharge_datetime:
         duration_days = (
             episode.discharge_datetime.date() - episode.admission_datetime.date()
@@ -362,13 +367,21 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
             and (boundary is None or item.clinical_datetime <= boundary)
         ]
         eligible = dated or [item for item in values if item.clinical_datetime is None]
-        return sorted(eligible, key=lambda item: item.clinical_datetime or datetime.min)
+        return sorted(
+            eligible,
+            key=lambda item: (
+                item.clinical_datetime or datetime.min,
+                str(item.document.source_path).casefold(),
+            ),
+        )
 
     def fill_as_of(
         target,
         provenance: dict[str, Path],
         boundary: datetime | None,
         meeting_field: str,
+        *,
+        include_updates: bool,
     ) -> None:
         physician_eligible = eligible_as_of(physician_records, boundary)
         future_physician_records = (
@@ -378,6 +391,7 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                     for item in physician_records
                     if item.clinical_datetime is not None
                     and item.clinical_datetime > boundary
+                    and item.classification.document_type != "final"
                 ),
                 key=lambda item: item.clinical_datetime or datetime.max,
             )
@@ -386,18 +400,27 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         )
         all_eligible = eligible_as_of(clinical_records, boundary)
         specialist_fallback_fields = {"laboratory_results", "instrumental_results"}
+        timeline_fields = {
+            "clinical_diagnosis",
+            "disease_history",
+            "life_history",
+            "laboratory_results",
+            "instrumental_results",
+        }
         for field_info in fields(target):
             field_name = field_info.name
             candidates = [
                 (record, extracted[id(record)][field_name])
                 for record in physician_eligible
                 if extracted[id(record)][field_name]
+                and not is_empty_clinical_update(extracted[id(record)][field_name])
             ]
             if not candidates and future_physician_records:
                 future_candidates = [
                     (record, extracted[id(record)][field_name])
                     for record in future_physician_records
                     if extracted[id(record)][field_name]
+                    and not is_empty_clinical_update(extracted[id(record)][field_name])
                 ]
                 if future_candidates:
                     candidates = [future_candidates[0]]
@@ -425,10 +448,44 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                     (record, extracted[id(record)][field_name])
                     for record in all_eligible
                     if extracted[id(record)][field_name]
+                    and not is_empty_clinical_update(extracted[id(record)][field_name])
                 ]
             if not candidates:
                 continue
-            record, value = candidates[-1]
+            if field_name in timeline_fields:
+                composed = compose_clinical_timeline(
+                    [
+                        ClinicalTextObservation(
+                            text=value,
+                            occurred_at=record.clinical_datetime,
+                            document_type=record.classification.document_type,
+                            source=record.document.source_path,
+                        )
+                        for record, value in candidates
+                    ],
+                    include_updates=include_updates,
+                    duplicate_threshold=(
+                        DIAGNOSTIC_DUPLICATE_THRESHOLD
+                        if field_name in {"laboratory_results", "instrumental_results"}
+                        else None
+                    ),
+                )
+                if not composed.text or composed.source is None:
+                    continue
+                setattr(target, field_name, composed.text)
+                provenance[f"sections.{field_name}"] = composed.source
+                continue
+
+            # Plans and compact current-state fields are values, not narratives:
+            # keep the primary/first substantive value for MDRK-1 and the last
+            # substantive value for MDRK-2 without turning them into a diary.
+            if include_updates:
+                record, value = candidates[-1]
+            else:
+                primary = [
+                    item for item in candidates if item[0].classification.document_type == "initial"
+                ]
+                record, value = (primary or candidates)[0]
             setattr(target, field_name, value)
             provenance[f"sections.{field_name}"] = record.document.source_path
 
@@ -437,12 +494,14 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         episode.initial_field_sources,
         episode.initial_meeting_at,
         "initial_meeting_at",
+        include_updates=False,
     )
     fill_as_of(
         episode.sections,
         episode.field_sources,
         episode.final_meeting_at,
         "final_meeting_at",
+        include_updates=True,
     )
     if not episode.initial_sections.rehabilitation_potential.strip():
         episode.initial_sections.rehabilitation_potential = "средний"
@@ -478,11 +537,68 @@ def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
             )
 
 
-def _observation_map(observations: list[IcfObservation]) -> dict[tuple[str, str], IcfObservation]:
+ICF_DESCRIPTION_DUPLICATE_THRESHOLD = 0.94
+
+
+def _normalized_icf_description(value: str) -> str:
+    return " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in value.casefold().replace("ё", "е")
+        ).split()
+    )
+
+
+def _observation_map(
+    observations: list[IcfObservation],
+) -> dict[tuple[str, str], IcfObservation]:
+    """Keep distinct same-code domains; wording is part of ICF identity."""
+
     return {
-        (item.code.casefold().replace(" ", ""), " ".join(item.description.casefold().split())): item
+        (
+            _normalized_icf_code(item.code),
+            _normalized_icf_description(item.description),
+        ): item
         for item in observations
     }
+
+
+def _description_markers(value: str) -> frozenset[str]:
+    prefixes = {
+        "left": "лев",
+        "right": "прав",
+        "arm": "рук",
+        "leg": "ног",
+        "upper": "верх",
+        "lower": "ниж",
+    }
+    markers = {
+        marker
+        for token in value.split()
+        for marker, prefix in prefixes.items()
+        if token.startswith(prefix)
+    }
+    return frozenset(markers)
+
+
+def _near_duplicate_icf_description(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if not left or not right:
+        return False
+    left_markers = _description_markers(left)
+    right_markers = _description_markers(right)
+    for mutually_exclusive in ({"left", "right"}, {"arm", "leg"}, {"upper", "lower"}):
+        if (
+            left_markers & mutually_exclusive
+            and right_markers & mutually_exclusive
+            and left_markers & mutually_exclusive != right_markers & mutually_exclusive
+        ):
+            return False
+    return (
+        SequenceMatcher(None, left, right).ratio()
+        >= ICF_DESCRIPTION_DUPLICATE_THRESHOLD
+    )
 
 
 _PERSONAL_FACTOR_ROLE_PRIORITY = {
@@ -578,6 +694,14 @@ def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> N
                 note=selected_observation.note,
                 initial_source=initial_source,
                 final_source=final_source,
+                initial_measured_at=(
+                    initial[0].clinical_datetime if initial is not None else None
+                ),
+                final_measured_at=(
+                    final_record.clinical_datetime
+                    if final_source is not None
+                    else None
+                ),
             )
         )
 
@@ -610,11 +734,11 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
     grouped: dict[SpecialistRole, list[tuple[ScannedRecord, list[IcfObservation]]]] = defaultdict(list)
     for record in records:
         observations = extract_icf_observations(record.document)
-        role = record.classification.role
-        if role is SpecialistRole.OTHER:
+        source_role = record.classification.role
+        if source_role is SpecialistRole.OTHER:
             continue
         physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
-        filtered: list[IcfObservation] = []
+        by_owner: dict[SpecialistRole, list[IcfObservation]] = defaultdict(list)
         for observation in observations:
             is_personal_factor = observation.code.casefold().startswith("pf")
             if is_personal_factor:
@@ -622,80 +746,116 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
                 # across roles to avoid duplicate rows.
                 continue
             owner = observation.specialist
-            compatible_owner = owner is role or (
-                role in physician_roles and owner in physician_roles
+            compatible_owner = owner is source_role or (
+                source_role in physician_roles and owner in physician_roles
             )
             if owner is not None and not compatible_owner:
                 continue
-            filtered.append(observation)
-        observations = filtered
-        if observations:
-            grouped[role].append((record, observations))
+            effective_owner = owner or (
+                SpecialistRole.OTHER
+                if source_role in physician_roles
+                else source_role
+            )
+            by_owner[effective_owner].append(observation)
+        for owner, owned_observations in by_owner.items():
+            if owned_observations:
+                grouped[owner].append((record, owned_observations))
     for values in grouped.values():
-        values.sort(key=lambda pair: pair[0].clinical_datetime or datetime.min)
+        values.sort(
+            key=lambda pair: (
+                pair[0].clinical_datetime or datetime.min,
+                str(pair[0].document.source_path).casefold(),
+            )
+        )
     return grouped
+
+
+def _eligible_icf_occurrences(
+    occurrences: list[tuple[ScannedRecord, IcfObservation]],
+    boundary: datetime | None,
+) -> list[tuple[ScannedRecord, IcfObservation]]:
+    dated = [
+        item
+        for item in occurrences
+        if item[0].clinical_datetime is not None
+        and (boundary is None or item[0].clinical_datetime <= boundary)
+    ]
+    eligible = dated or [
+        item for item in occurrences if item[0].clinical_datetime is None
+    ]
+    eligible.sort(
+        key=lambda item: (
+            item[0].clinical_datetime or datetime.min,
+            str(item[0].document.source_path).casefold(),
+        )
+    )
+
+    # The same table can be embedded more than once in a diary or copied into
+    # several files.  All rows for one clinical timestamp are one temporal
+    # point even when their description differs slightly.  Equal ratings keep
+    # the earliest provenance; conflicting ratings at that timestamp use the
+    # deterministic last source as a correction, not as a fake repeat.
+    by_datetime: dict[
+        datetime | None, list[tuple[ScannedRecord, IcfObservation]]
+    ] = defaultdict(list)
+    for item in eligible:
+        by_datetime[item[0].clinical_datetime].append(item)
+    unique: list[tuple[ScannedRecord, IcfObservation]] = []
+    for values in by_datetime.values():
+        rating_sets = {
+            tuple(qualifier.display() for qualifier in observation.ratings)
+            for _, observation in values
+        }
+        unique.append(values[0] if len(rating_sets) == 1 else values[-1])
+    return unique
 
 
 def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
     _merge_personal_factors(episode, records)
     for role, profiles in _profile_records(records).items():
         profile_maps = [(record, _observation_map(values)) for record, values in profiles]
-        all_keys = list(dict.fromkeys(key for _, values in profile_maps for key in values))
-        for key in all_keys:
-            occurrences = [(record, values[key]) for record, values in profile_maps if key in values]
+        clusters: dict[
+            tuple[str, str], list[tuple[ScannedRecord, IcfObservation]]
+        ] = {}
+        representatives_by_code: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for record, observations in profile_maps:
+            for (code, description), observation in observations.items():
+                representative = next(
+                    (
+                        candidate
+                        for candidate in representatives_by_code[code]
+                        if _near_duplicate_icf_description(
+                            candidate[1], description
+                        )
+                    ),
+                    None,
+                )
+                if representative is None:
+                    representative = (code, description)
+                    representatives_by_code[code].append(representative)
+                    clusters[representative] = []
+                clusters[representative].append((record, observation))
 
-            def as_of(boundary: datetime | None):
-                dated = [
-                    (record, observation)
-                    for record, observation in occurrences
-                    if record.clinical_datetime is not None
-                    and (boundary is None or record.clinical_datetime <= boundary)
-                ]
-                return dated or [
-                    (record, observation)
-                    for record, observation in occurrences
-                    if record.clinical_datetime is None
-                ]
-
-            initial_occurrences = as_of(episode.initial_meeting_at)
-            final_occurrences = as_of(episode.final_meeting_at)
-            if not final_occurrences:
+        for occurrences in clusters.values():
+            temporal_points = _eligible_icf_occurrences(
+                occurrences, episode.final_meeting_at
+            )
+            if not temporal_points:
                 # A source written after MDRK-2 cannot introduce or update a row.
                 continue
 
-            initial_record = None
-            initial_obs = None
-            initial = None
-            if initial_occurrences:
-                initial_record, initial_obs = initial_occurrences[-1]
-                initial = initial_obs.ratings[0] if initial_obs.ratings else None
-
-            final_record, final_obs = final_occurrences[-1]
-            explicit_repeat = (
-                len(final_obs.ratings) >= 2
-                or final_record.classification.document_type in {"final", "follow_up"}
-                or (
-                    final_record.clinical_datetime is not None
-                    and episode.initial_meeting_at is not None
-                    and final_record.clinical_datetime > episode.initial_meeting_at
-                )
+            initial_record, initial_obs = temporal_points[0]
+            final_record, final_obs = temporal_points[-1]
+            initial = initial_obs.ratings[0] if initial_obs.ratings else None
+            has_distinct_repeat = (
+                len(temporal_points) > 1 or len(final_obs.ratings) >= 2
             )
-            final = final_obs.current if explicit_repeat else None
-            sample = final_obs if final_obs is not None else initial_obs
-            if sample is None:
-                continue
-            is_personal_factor = sample.code.casefold().startswith("pf")
-            has_distinct_final_source = (
-                final_record is not initial_record
-                or final_record.clinical_datetime is not None
-                and episode.initial_meeting_at is not None
-                and final_record.clinical_datetime > episode.initial_meeting_at
-            )
-            specialist = sample.specialist or (
-                SpecialistRole.OTHER
-                if role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
-                else role
-            )
+            final = final_obs.current if has_distinct_repeat else None
+            # Code/wording/note belong to the baseline definition.  Only the
+            # qualifier is updated from the last point, preventing later diary
+            # wording from leaking into MDRK-1.
+            sample = initial_obs
+            specialist = sample.specialist or role
             domain = IcfDomain(
                 code=sample.code,
                 description=sample.description,
@@ -704,14 +864,14 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
                 final=final,
                 note=sample.note,
                 initial_source=(
-                    initial_record.document.source_path
-                    if initial_record is not None and (initial is not None or is_personal_factor)
-                    else None
+                    initial_record.document.source_path if initial is not None else None
                 ),
                 final_source=(
-                    final_record.document.source_path
-                    if final is not None or is_personal_factor and has_distinct_final_source
-                    else None
+                    final_record.document.source_path if final is not None else None
+                ),
+                initial_measured_at=initial_record.clinical_datetime,
+                final_measured_at=(
+                    final_record.clinical_datetime if final is not None else None
                 ),
             )
             episode.icf_domains.append(domain)
@@ -738,6 +898,10 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
         existing = matching[0] if matching else None
         initial_medication_source = episode.initial_field_sources.get("sections.medication")
         final_medication_source = episode.field_sources.get("sections.medication")
+        source_datetimes = {
+            record.document.source_path: record.clinical_datetime
+            for record in records
+        }
         medication_source = final_medication_source or initial_medication_source
         owner = next(
             (
@@ -758,8 +922,16 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
             existing.note = existing.note or "препараты"
             if initial_medication:
                 existing.initial_source = initial_medication_source or existing.initial_source
+                existing.initial_measured_at = (
+                    source_datetimes.get(initial_medication_source)
+                    or existing.initial_measured_at
+                )
             if final_medication:
                 existing.final_source = final_medication_source or existing.final_source
+                existing.final_measured_at = (
+                    source_datetimes.get(final_medication_source)
+                    or existing.final_measured_at
+                )
             episode.icf_domains = [
                 item for item in episode.icf_domains if item is existing or item not in matching
             ]
@@ -774,6 +946,16 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
                     note="препараты",
                     initial_source=initial_medication_source if initial_medication else None,
                     final_source=final_medication_source if final_medication else None,
+                    initial_measured_at=(
+                        source_datetimes.get(initial_medication_source)
+                        if initial_medication
+                        else None
+                    ),
+                    final_measured_at=(
+                        source_datetimes.get(final_medication_source)
+                        if final_medication
+                        else None
+                    ),
                 )
             )
 
@@ -785,6 +967,223 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
             item.description.casefold(),
         )
     )
+
+
+def _scale_names_match(left: str, right: str) -> bool:
+    left_normalized = _normalized_icf_description(left)
+    right_normalized = _normalized_icf_description(right)
+    if left_normalized == right_normalized:
+        return True
+    left_tokens = left_normalized.split()
+    right_tokens = right_normalized.split()
+    if not left_tokens or not right_tokens:
+        return False
+    shared = len(set(left_tokens) & set(right_tokens))
+    return (
+        shared / max(len(set(left_tokens)), len(set(right_tokens))) >= 0.75
+        and SequenceMatcher(None, left_normalized, right_normalized).ratio() >= 0.94
+    )
+
+
+def _same_scale_role(left: SpecialistRole, right: SpecialistRole) -> bool:
+    physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
+    return left is right or left in physician_roles and right in physician_roles
+
+
+def _source_datetime(episode: Episode, source: Path | None) -> datetime | None:
+    if source is None:
+        return None
+    return next(
+        (
+            item.clinical_datetime
+            for item in episode.sources
+            if item.path == source and episode.source_is_active(item)
+        ),
+        None,
+    )
+
+
+def _domain_matches_fallback(domain: IcfDomain, observation: IcfObservation) -> bool:
+    return (
+        _normalized_icf_code(domain.code) == _normalized_icf_code(observation.code)
+        and _near_duplicate_icf_description(
+            _normalized_icf_description(domain.description),
+            _normalized_icf_description(observation.description),
+        )
+    )
+
+
+def _merge_mdrk1_baseline(
+    episode: Episode,
+    records: list[ScannedRecord],
+) -> None:
+    """Fill absent baseline ICF/scales from a reliably identified MDRK-1.
+
+    Specialist sources remain authoritative.  MDRK-1 is used only when the
+    corresponding point is absent before that meeting; its narrative sections
+    and conclusions never enter the episode.
+    """
+
+    eligible: list[ScannedRecord] = []
+    for record in records:
+        measured_at = record.clinical_datetime
+        if measured_at is None:
+            continue
+        if (
+            episode.initial_meeting_at is not None
+            and measured_at.date() != episode.initial_meeting_at.date()
+        ):
+            # This protects against an MDRK-2 with accidentally empty repeat
+            # columns being mistaken for MDRK-1.
+            continue
+        if episode.final_meeting_at is not None and measured_at > episode.final_meeting_at:
+            continue
+        eligible.append(record)
+    eligible.sort(
+        key=lambda item: (
+            item.clinical_datetime or datetime.min,
+            str(item.document.source_path).casefold(),
+        ),
+        reverse=True,
+    )
+    if not eligible:
+        return
+
+    fallback_used = False
+    fallback_sources = {item.document.source_path for item in eligible}
+    selected_fallback_scales = []
+    for record in eligible:
+        fallback_at = record.clinical_datetime
+        if fallback_at is None:
+            continue
+
+        for observation in extract_icf_observations(record.document):
+            if len(observation.ratings) > 1 or not observation.description.strip():
+                continue
+            existing = next(
+                (
+                    domain
+                    for domain in episode.icf_domains
+                    if _domain_matches_fallback(domain, observation)
+                ),
+                None,
+            )
+            fallback_value = observation.ratings[0] if observation.ratings else None
+            if existing is None:
+                episode.icf_domains.append(
+                    IcfDomain(
+                        code=observation.code,
+                        description=observation.description,
+                        specialist=observation.specialist or SpecialistRole.OTHER,
+                        initial=fallback_value,
+                        note=observation.note,
+                        initial_source=record.document.source_path,
+                        initial_measured_at=fallback_at,
+                    )
+                )
+                fallback_used = True
+                continue
+
+            if existing.initial_source in fallback_sources:
+                continue
+
+            existing_at = existing.initial_measured_at or _source_datetime(
+                episode, existing.initial_source
+            )
+            primary_baseline_present = (
+                existing.initial is not None
+                or existing.initial_source is not None
+            ) and (existing_at is None or existing_at <= fallback_at)
+            if primary_baseline_present:
+                continue
+            if existing.initial is not None and existing.final is None:
+                existing.final = existing.initial
+                existing.final_source = existing.initial_source
+                existing.final_measured_at = existing_at
+            existing.initial = fallback_value
+            existing.initial_source = record.document.source_path
+            existing.initial_measured_at = fallback_at
+            fallback_used = True
+
+        fallback_scales = extract_mdrk_scale_measurements(
+            record.document,
+            fallback_at,
+        )
+        for measurement in fallback_scales:
+            measured_at = measurement.measured_at or fallback_at
+            if measured_at > fallback_at:
+                continue
+            if episode.final_meeting_at is not None and measured_at > episode.final_meeting_at:
+                continue
+            matching_course_scale = next(
+                (
+                    existing
+                    for finding in episode.findings
+                    for existing in finding.scales
+                    if _same_scale_role(measurement.specialist, existing.specialist)
+                    and _scale_names_match(measurement.name, existing.name)
+                ),
+                None,
+            )
+            if matching_course_scale is not None:
+                # FRM and neurologist are one physician block in MDRK.  Reuse
+                # the specialist source's role so its later point joins the
+                # same temporal scale row instead of creating a duplicate.
+                measurement.specialist = matching_course_scale.specialist
+            if any(
+                _same_scale_role(measurement.specialist, selected.specialist)
+                and _scale_names_match(measurement.name, selected.name)
+                for selected in selected_fallback_scales
+            ):
+                continue
+            authoritative = any(
+                _same_scale_role(measurement.specialist, existing.specialist)
+                and _scale_names_match(measurement.name, existing.name)
+                and (
+                    finding.source_datetime is None
+                    or finding.source_datetime <= fallback_at
+                )
+                and (
+                    existing.measured_at is None
+                    or existing.measured_at <= fallback_at
+                )
+                for finding in episode.findings
+                for existing in finding.scales
+                if finding.source not in fallback_sources
+            )
+            if authoritative:
+                continue
+            episode.findings.append(
+                SpecialistFinding(
+                    role=measurement.specialist,
+                    source_datetime=fallback_at,
+                    source=record.document.source_path,
+                    scales=[measurement],
+                )
+            )
+            selected_fallback_scales.append(measurement)
+            fallback_used = True
+
+    episode.icf_domains.sort(
+        key=lambda item: (
+            {"b": 0, "s": 1, "d": 2, "e": 3, "p": 4}.get(
+                item.code[:1].casefold(), 9
+            ),
+            item.specialist.value,
+            item.code.casefold(),
+            item.description.casefold(),
+        )
+    )
+    if fallback_used:
+        episode.issues.append(
+            ReviewIssue(
+                "mdrk1_baseline_fallback",
+                "Недостающие исходные МКФ/шкалы восстановлены из МДРК-1.",
+                ReviewSeverity.INFO,
+                "sources",
+                eligible[0].document.source_path,
+            )
+        )
 
 
 def _collect_procedures(episode: Episode, records: list[ScannedRecord]) -> None:
@@ -919,6 +1318,7 @@ def scan_patient_folder(
     owns_normalizer = normalizer is None
     normalizer = normalizer or DocumentNormalizer()
     records: list[ScannedRecord] = []
+    mdrk1_records: list[ScannedRecord] = []
     failures = 0
     try:
         for source_path in source_files:
@@ -927,6 +1327,25 @@ def scan_patient_folder(
                 document = read_docx(normalized, source_path=source_path)
                 classification = classify_document(document)
                 if classification.is_mdrk:
+                    if classification.mdrk_kind == "initial":
+                        mdrk_datetime = extract_mdrk_document_datetime(document)
+                        episode.sources.append(
+                            SourceDocument(
+                                path=source_path,
+                                role=SpecialistRole.OTHER,
+                                clinical_datetime=mdrk_datetime,
+                                document_type="mdrk_initial",
+                                extraction_method=(
+                                    "docx"
+                                    if source_path.suffix.casefold() == ".docx"
+                                    else "converted"
+                                ),
+                                sha256=document.sha256,
+                            )
+                        )
+                        mdrk1_records.append(
+                            ScannedRecord(document, classification, mdrk_datetime)
+                        )
                     continue
                 clinical_datetime = (
                     None
@@ -1010,6 +1429,11 @@ def scan_patient_folder(
         _latest_clinical_sections(episode, episode_records)
         _collect_findings(episode, episode_records)
         _merge_icf(episode, episode_records)
+        active_mdrk1_records = _records_for_selected_medical_record(
+            episode,
+            mdrk1_records,
+        )
+        _merge_mdrk1_baseline(episode, active_mdrk1_records)
         _collect_procedures(episode, episode_records)
     _minimum_field_issues(episode)
     return episode

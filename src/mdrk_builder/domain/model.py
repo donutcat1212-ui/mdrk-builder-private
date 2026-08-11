@@ -99,6 +99,8 @@ class IcfDomain:
     note: str = ""
     initial_source: Path | None = None
     final_source: Path | None = None
+    initial_measured_at: datetime | None = None
+    final_measured_at: datetime | None = None
 
     @property
     def key(self) -> tuple[str, str, SpecialistRole]:

@@ -57,6 +57,32 @@ class _Tree:
         self.rows.clear()
 
 
+class _DataTree:
+    def __init__(self) -> None:
+        self.rows: dict[str, tuple[object, ...]] = {}
+        self.displaycolumns: tuple[str, ...] = ()
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(self.rows)
+
+    def delete(self, *rows: str) -> None:
+        for row in rows:
+            self.rows.pop(row, None)
+
+    def configure(self, *, displaycolumns: tuple[str, ...]) -> None:
+        self.displaycolumns = displaycolumns
+
+    def insert(
+        self,
+        _parent: str,
+        _position: str,
+        *,
+        iid: str,
+        values: tuple[object, ...],
+    ) -> None:
+        self.rows[iid] = values
+
+
 class _SelectableTree:
     def __init__(self, selected: str | tuple[str, ...]) -> None:
         self.selected = selected
@@ -190,6 +216,7 @@ def test_icf_domain_can_keep_responsible_specialist_blank(tmp_path) -> None:
         specialist=SpecialistRole.FRM,
         initial=IcfQualifier(4, facilitator=True),
         initial_source=tmp_path / "невролог.docx",
+        initial_measured_at=datetime(2026, 8, 3, 8, 30),
     )
     dialog = object.__new__(dialogs_module.IcfDomainDialog)
     dialog.domain = previous
@@ -208,6 +235,114 @@ def test_icf_domain_can_keep_responsible_specialist_blank(tmp_path) -> None:
     assert dialog.result is not None
     assert dialog.result.specialist is SpecialistRole.OTHER
     assert dialog.result.initial_source == previous.initial_source
+    assert dialog.result.initial_measured_at == previous.initial_measured_at
+
+
+def test_initial_icf_editor_preserves_hidden_repeat_point(tmp_path) -> None:
+    previous = IcfDomain(
+        code="d450",
+        description="Ходьба",
+        specialist=SpecialistRole.PHYSICAL_THERAPIST,
+        initial=IcfQualifier(3),
+        final=IcfQualifier(1),
+        initial_source=tmp_path / "ft-primary.docx",
+        final_source=tmp_path / "ft-final.docx",
+        initial_measured_at=datetime(2026, 8, 3, 10),
+        final_measured_at=datetime(2026, 8, 14, 10),
+    )
+    dialog = object.__new__(dialogs_module.IcfDomainDialog)
+    dialog.domain = previous
+    dialog.kind = MdrkKind.INITIAL
+    dialog._variables = {
+        "code": _Variable(previous.code),
+        "description": _Variable(previous.description),
+        "role": _Variable(previous.specialist.display_name),
+        "initial": _Variable("3"),
+        "note": _Variable(""),
+    }
+
+    assert dialog.validate()
+    dialog.apply()
+
+    assert dialog.result is not None
+    assert dialog.result.final == IcfQualifier(1)
+    assert dialog.result.final_source == previous.final_source
+    assert dialog.result.final_measured_at == previous.final_measured_at
+
+
+def test_initial_ui_hides_repeat_icf_and_intermediate_scale_and_finding_rows(
+    tmp_path,
+) -> None:
+    app = object.__new__(MdrkBuilderApp)
+    app._current_kind = MdrkKind.INITIAL
+    app.episode = Episode(folder=tmp_path)
+    app.episode.initial_meeting_at = datetime(2026, 8, 4, 8)
+    app.episode.final_meeting_at = datetime(2026, 8, 15, 8)
+    app.episode.icf_domains = [
+        IcfDomain(
+            "d450",
+            "Ходьба",
+            SpecialistRole.PHYSICAL_THERAPIST,
+            initial=IcfQualifier(3),
+            final=IcfQualifier(1),
+            initial_source=tmp_path / "ft-primary.docx",
+            final_source=tmp_path / "ft-final.docx",
+            initial_measured_at=datetime(2026, 8, 3, 10),
+            final_measured_at=datetime(2026, 8, 14, 10),
+        ),
+        IcfDomain(
+            "d640",
+            "Домашняя работа",
+            SpecialistRole.OCCUPATIONAL_THERAPIST,
+            initial=IcfQualifier(2),
+            initial_source=tmp_path / "ot-follow-up.docx",
+            initial_measured_at=datetime(2026, 8, 10, 10),
+        ),
+    ]
+    role = SpecialistRole.PHYSICAL_THERAPIST
+    first = ScaleMeasurement(
+        "Berg", "20", datetime(2026, 8, 3, 10), role, tmp_path / "ft-primary.docx"
+    )
+    middle = ScaleMeasurement(
+        "Berg", "30", datetime(2026, 8, 8, 10), role, tmp_path / "ft-diary.docx"
+    )
+    last = ScaleMeasurement(
+        "Berg", "40", datetime(2026, 8, 14, 10), role, tmp_path / "ft-final.docx"
+    )
+    app.episode.findings = [
+        SpecialistFinding(role, "первичное", first.measured_at, first.source, [first]),
+        SpecialistFinding(role, "дневник", middle.measured_at, middle.source, [middle]),
+        SpecialistFinding(role, "итоговое", last.measured_at, last.source, [last]),
+    ]
+    app.icf_tree = _DataTree()
+    app.scale_tree = _DataTree()
+    app.finding_tree = _DataTree()
+    app._scale_refs = []
+
+    app._refresh_icf()
+    app._refresh_scales()
+    app._refresh_findings()
+
+    assert app.icf_tree.displaycolumns == (
+        "code",
+        "description",
+        "role",
+        "initial",
+        "note",
+    )
+    assert list(app.icf_tree.rows) == ["0"]
+    assert [row[2] for row in app.scale_tree.rows.values()] == ["Berg"]
+    assert [row[3] for row in app.finding_tree.rows.values()] == ["первичное"]
+
+    app._current_kind = MdrkKind.FINAL
+    app._refresh_icf()
+    app._refresh_scales()
+    app._refresh_findings()
+
+    assert "final" in app.icf_tree.displaycolumns
+    assert list(app.icf_tree.rows) == ["0", "1"]
+    assert [row[3] for row in app.scale_tree.rows.values()] == ["20", "40"]
+    assert [row[3] for row in app.finding_tree.rows.values()] == ["итоговое"]
 
 
 def test_invalid_meeting_keeps_current_snapshot_and_text(monkeypatch, tmp_path) -> None:

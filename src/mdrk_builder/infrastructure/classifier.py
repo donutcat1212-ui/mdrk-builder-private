@@ -13,12 +13,70 @@ class DocumentClassification:
     document_type: str
     is_mdrk: bool = False
     confidence: float = 0.5
+    mdrk_kind: str = ""
 
 
 def _haystack(document: ParsedDocument) -> tuple[str, str]:
     path_text = clean_text(str(document.source_path)).casefold()
     content = clean_text(document.text[:30000]).casefold()
     return path_text, content
+
+
+_ICF_CODE_RE = re.compile(r"^(?:[bsdeе]\d[\w.]*|pf\d*)$", re.IGNORECASE)
+_QUALIFIER_RE = re.compile(r"^[0-4]\s*\+?$", re.IGNORECASE)
+
+
+def _classify_mdrk_kind(document: ParsedDocument) -> str:
+    """Distinguish MDRK-1 from MDRK-2 using the document's own table state.
+
+    Filenames are intentionally ignored: anonymized folders often contain
+    damaged names.  A populated repeat column is definitive MDRK-2 evidence;
+    an ICF/scale table containing only its initial point is MDRK-1 evidence.
+    """
+
+    content = clean_text(document.text).casefold()
+    if any(
+        token in content
+        for token in (
+            "достигнута в полном объёме",
+            "достигнута в полном объеме",
+            "выполнены в полном объёме",
+            "выполнены в полном объеме",
+        )
+    ):
+        return "final"
+
+    initial_evidence = False
+    for table in document.tables:
+        if not table.rows:
+            continue
+        rows = [row.as_map() for row in table.rows]
+        table_low = table.text.casefold()
+        if "мкф" in table_low:
+            initial_rows = 0
+            repeat_rows = 0
+            for values in rows:
+                code = clean_text(values.get(0, ""))
+                if not _ICF_CODE_RE.fullmatch(code):
+                    continue
+                initial = clean_text(values.get(11, ""))
+                repeat = clean_text(values.get(12, ""))
+                if _QUALIFIER_RE.fullmatch(initial):
+                    initial_rows += 1
+                if _QUALIFIER_RE.fullmatch(repeat):
+                    repeat_rows += 1
+            if repeat_rows:
+                return "final"
+            if initial_rows:
+                initial_evidence = True
+
+        header = " ".join(clean_text(value) for value in table.rows[0].as_list()).casefold()
+        if "повторно" in header:
+            return "final"
+        if "шкала/опросник" in header and "исходно" in header:
+            initial_evidence = True
+
+    return "initial" if initial_evidence else ""
 
 
 def classify_document(document: ParsedDocument) -> DocumentClassification:
@@ -32,7 +90,13 @@ def classify_document(document: ParsedDocument) -> DocumentClassification:
     leading_content = clean_text(" ".join(leading_lines[:8])).casefold()[:1600]
     heading_content = clean_text(" ".join(leading_lines)).casefold()[:4000]
     if "консилиум мультидисциплинарной реабилитационной команды" in content:
-        return DocumentClassification(SpecialistRole.OTHER, "mdrk", is_mdrk=True, confidence=1.0)
+        return DocumentClassification(
+            SpecialistRole.OTHER,
+            "mdrk",
+            is_mdrk=True,
+            confidence=1.0,
+            mdrk_kind=_classify_mdrk_kind(document),
+        )
 
     if "консилиум" in content and any(
         token in f"{path_text} {content[:3000]}" for token in ("гастростом", "пэг", "peg")

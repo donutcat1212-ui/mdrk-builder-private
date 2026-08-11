@@ -7,6 +7,7 @@ from typing import Any
 
 from mdrk_builder.domain import (
     IcfDomain,
+    MdrkKind,
     Procedure,
     ScaleMeasurement,
     SpecialistFinding,
@@ -149,8 +150,14 @@ def _select_all_text(widget: Any) -> str | None:
 
 
 class IcfDomainDialog(simpledialog.Dialog):
-    def __init__(self, parent: tk.Misc, domain: IcfDomain | None = None) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        domain: IcfDomain | None = None,
+        kind: MdrkKind = MdrkKind.FINAL,
+    ) -> None:
         self.domain = domain
+        self.kind = kind
         self.result: IcfDomain | None = None
         self._variables: dict[str, tk.StringVar] = {}
         super().__init__(parent, "Домен МКФ")
@@ -168,14 +175,15 @@ class IcfDomainDialog(simpledialog.Dialog):
             "final": format_qualifier(self.domain.final) if self.domain else "",
             "note": self.domain.note if self.domain else "",
         }
-        labels = (
+        labels = [
             ("code", "Код"),
             ("description", "Описание"),
             ("role", "Ответственный специалист"),
             ("initial", "Исходная оценка"),
-            ("final", "Повторная оценка"),
             ("note", "Уточнение"),
-        )
+        ]
+        if self.kind is MdrkKind.FINAL:
+            labels.insert(4, ("final", "Повторная оценка"))
         first: tk.Widget | None = None
         for row, (key, label) in enumerate(labels):
             ttk.Label(master, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=4)
@@ -213,7 +221,8 @@ class IcfDomainDialog(simpledialog.Dialog):
             if role_value:
                 role_from_name(role_value)
             parse_qualifier(self._variables["initial"].get())
-            parse_qualifier(self._variables["final"].get())
+            if "final" in self._variables:
+                parse_qualifier(self._variables["final"].get())
         except ValueError as exc:
             messagebox.showerror("Проверьте данные", str(exc), parent=self)
             return False
@@ -230,10 +239,16 @@ class IcfDomainDialog(simpledialog.Dialog):
                 else SpecialistRole.OTHER
             ),
             initial=parse_qualifier(self._variables["initial"].get()),
-            final=parse_qualifier(self._variables["final"].get()),
+            final=(
+                parse_qualifier(self._variables["final"].get())
+                if "final" in self._variables
+                else (previous.final if previous else None)
+            ),
             note=self._variables["note"].get().strip(),
             initial_source=previous.initial_source if previous else None,
             final_source=previous.final_source if previous else None,
+            initial_measured_at=previous.initial_measured_at if previous else None,
+            final_measured_at=previous.final_measured_at if previous else None,
         )
 
 

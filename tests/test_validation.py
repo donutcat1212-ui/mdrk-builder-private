@@ -609,7 +609,7 @@ def test_scale_only_participant_warns_about_missing_conclusion() -> None:
     )
 
 
-def test_final_only_scale_value_produces_visible_initial_warning() -> None:
+def test_first_scale_seen_after_mdrk1_is_baseline_and_needs_repeat_warning() -> None:
     episode = _valid_episode()
     role = SpecialistRole.LOGOPEDIST
     source = Path("/logopedist-final.docx")
@@ -640,8 +640,12 @@ def test_final_only_scale_value_produces_visible_initial_warning() -> None:
 
     issues = current_issues(episode, MdrkKind.FINAL)
 
-    assert any(
+    assert not any(
         issue.code == "scale_initial_missing" and "MASA" in issue.message
+        for issue in issues
+    )
+    assert any(
+        issue.code == "scale_final_missing" and "MASA" in issue.message
         for issue in issues
     )
 
@@ -672,6 +676,26 @@ def test_single_baseline_scale_produces_visible_final_warning() -> None:
     )
 
 
+def test_scale_without_datetime_warns_because_table_requires_date_and_time() -> None:
+    episode = _valid_episode()
+    role = SpecialistRole.NEUROPSYCHOLOGIST
+    source = Path("/neuropsych-undated.docx")
+    episode.findings.append(
+        SpecialistFinding(
+            role=role,
+            source=source,
+            scales=[ScaleMeasurement("MoCA", "24", None, role, source)],
+        )
+    )
+
+    issues = current_issues(episode, MdrkKind.FINAL)
+
+    warning = next(issue for issue in issues if issue.code == "scale_datetime_missing")
+    assert warning.field.endswith(".initial_datetime")
+    assert warning.source == source
+    assert "дата и время" in warning.message
+
+
 def test_follow_up_only_icf_domain_is_hidden_from_initial_review() -> None:
     episode = _valid_episode()
     episode.icf_domains.append(
@@ -690,5 +714,28 @@ def test_follow_up_only_icf_domain_is_hidden_from_initial_review() -> None:
     assert not any(issue.field.startswith("icf.") for issue in initial_issues)
     assert any(
         issue.code == "icf_initial_missing" and "b999" in issue.message
+        for issue in final_issues
+    )
+
+
+def test_new_icf_baseline_after_mdrk1_is_hidden_initial_and_needs_final_point() -> None:
+    episode = _valid_episode()
+    episode.icf_domains.append(
+        IcfDomain(
+            code="d640",
+            description="Ведение домашнего хозяйства",
+            specialist=SpecialistRole.OCCUPATIONAL_THERAPIST,
+            initial=IcfQualifier(2),
+            initial_source=Path("/ot-follow-up.docx"),
+            initial_measured_at=datetime(2026, 6, 12, 14),
+        )
+    )
+
+    initial_issues = current_issues(episode, MdrkKind.INITIAL)
+    final_issues = current_issues(episode, MdrkKind.FINAL)
+
+    assert not any(issue.field.startswith("icf.") for issue in initial_issues)
+    assert any(
+        issue.code == "icf_final_missing" and "d640" in issue.message
         for issue in final_issues
     )

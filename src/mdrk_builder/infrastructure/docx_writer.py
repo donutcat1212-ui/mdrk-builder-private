@@ -525,7 +525,13 @@ class _DocumentRenderer:
         set_cell_text(header.cells[11], "", style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
         set_cell_text(header.cells[12], "", style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
         set_cell_text(header.cells[13], "", style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
-        set_cell_text(header.cells[14], "+/-", style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
+        set_cell_text(
+            header.cells[14],
+            "+/-" if self.snapshot.kind is MdrkKind.FINAL else "",
+            style=STYLE_TABLE_HEADER,
+            alignment=WD_ALIGN_PARAGRAPH.CENTER,
+            keep_with_next=True,
+        )
         for cell in header.cells[11:13]:
             _compact_header_cell(cell)
 
@@ -664,7 +670,7 @@ class _DocumentRenderer:
         )
         set_cell_text(
             header_cells[14],
-            "+/-",
+            "+/-" if self.snapshot.kind is MdrkKind.FINAL else "",
             style=STYLE_TABLE_HEADER,
             alignment=WD_ALIGN_PARAGRAPH.CENTER,
             keep_with_next=True,

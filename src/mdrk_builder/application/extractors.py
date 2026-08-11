@@ -12,7 +12,12 @@ from mdrk_builder.domain import (
     ScaleMeasurement,
     SpecialistRole,
 )
-from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, ParsedRow, clean_text
+from mdrk_builder.infrastructure.ooxml_reader import (
+    BodyItem,
+    ParsedDocument,
+    ParsedRow,
+    clean_text,
+)
 
 
 RUSSIAN_MONTHS = {
@@ -200,6 +205,30 @@ def extract_clinical_datetime(document: ParsedDocument) -> datetime | None:
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
+def extract_mdrk_document_datetime(document: ParsedDocument) -> datetime | None:
+    """Read the meeting timestamp adjacent to the MDRK title.
+
+    The narrow adjacency rule avoids mistaking a birth/admission date elsewhere
+    in the assembled document for the meeting timestamp.
+    """
+
+    ordered: list[str] = []
+    for item in document.body_items:
+        if item.kind == "paragraph":
+            ordered.append(document.paragraphs[item.index])
+        elif item.kind == "table":
+            ordered.append(document.tables[item.index].text)
+    title = "консилиум мультидисциплинарной реабилитационной команды"
+    for index, value in enumerate(ordered):
+        if title not in clean_text(value).casefold():
+            continue
+        for candidate in ordered[index : index + 3]:
+            if parsed := parse_first_datetime(clean_text(candidate)):
+                return parsed
+        return None
+    return None
+
+
 def _labeled_datetime(text: str, labels: tuple[str, ...]) -> datetime | None:
     for label in labels:
         match = re.search(label, text, re.IGNORECASE | re.DOTALL)
@@ -325,6 +354,7 @@ SECTION_STOP = re.compile(
     r"^(?:\d+(?:\.\d+)?[.)]?\s*)?(?:клинический диагноз|реабилитационный диагноз|сведения о реабилитации|"
     r"анамнез заболевания|анамнез жизни|результаты диагностических|лабораторные исследования|"
     r"инструментальные исследования|результаты осмотров|реабилитационный потенциал|факторы,? ограничивающие|"
+    r"дата\s+(?:и\s+время\s+)?выписки|"
     r"факторы риска|диагноз клинический|цель на этап|цель,? поставленная на этап|"
     r"задачи медицинской|индивидуальный план|двигательный режим|диета|"
     r"медикаментозная (?:терапия|лечение)|немедикаментозн\w* (?:лечение|терапия)|"
@@ -690,9 +720,8 @@ def extract_scale_measurements(
             continue
         first = [clean_text(value) for value in rows[0]]
         first_low = [value.casefold() for value in first]
-        if any("шкала/опросник" in value for value in first_low) or (
-            any("дата" in value for value in first_low)
-            and any("результат" in value for value in first_low)
+        if any("шкала/опросник" in value for value in first_low) and any(
+            "результат" in value for value in first_low
         ):
             for row in rows[1:]:
                 values = [clean_text(value) for value in row]
@@ -796,6 +825,67 @@ def extract_scale_measurements(
     unique: dict[tuple[str, str, datetime | None], ScaleMeasurement] = {}
     for item in measurements:
         unique[(item.name.casefold(), item.value, item.measured_at)] = item
+    return list(unique.values())
+
+
+def extract_mdrk_scale_measurements(
+    document: ParsedDocument,
+    document_datetime: datetime | None,
+) -> list[ScaleMeasurement]:
+    """Extract scale tables from MDRK while retaining their specialist owner.
+
+    An MDRK document contains several specialists' tables.  Passing the whole
+    document through the ordinary extractor under one role would relabel all of
+    them, so each table is parsed only under its immediately preceding
+    ``Результат осмотра ...`` heading.
+    """
+
+    measurements: list[ScaleMeasurement] = []
+    role: SpecialistRole | None = None
+    role_datetime = document_datetime
+    for item in document.body_items:
+        if item.kind == "paragraph":
+            paragraph = clean_text(document.paragraphs[item.index])
+            if re.match(r"^результат\s+осмотра\b", paragraph, re.IGNORECASE):
+                role = _specialist_from_text(paragraph)
+                if role is None and re.match(
+                    r"^результат\s+осмотра\s+врача\b",
+                    paragraph,
+                    re.IGNORECASE,
+                ):
+                    role = SpecialistRole.FRM
+                role_datetime = parse_first_datetime(paragraph) or document_datetime
+            elif re.match(r"^7(?:\.|\s)", paragraph):
+                role = None
+            continue
+        if item.kind != "table" or role is None:
+            continue
+        table = document.tables[item.index]
+        if not table.rows:
+            continue
+        header = " ".join(clean_text(value) for value in table.rows[0].as_list()).casefold()
+        if "шкала/опросник" not in header:
+            continue
+        table_document = ParsedDocument(
+            source_path=document.source_path,
+            normalized_path=document.normalized_path,
+            tables=[table],
+            body_items=[BodyItem("table", 0)],
+            sha256=document.sha256,
+        )
+        measurements.extend(
+            extract_scale_measurements(table_document, role, role_datetime)
+        )
+
+    unique: dict[tuple[SpecialistRole, str, str, datetime | None], ScaleMeasurement] = {}
+    for measurement in measurements:
+        key = (
+            measurement.specialist,
+            measurement.name.casefold(),
+            measurement.value,
+            measurement.measured_at,
+        )
+        unique[key] = measurement
     return list(unique.values())
 
 

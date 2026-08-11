@@ -343,6 +343,8 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     initial_mcf = _find_table(initial, "МКФ категориальный профиль")
     final_mcf = _find_table(final, "МКФ категориальный профиль")
     assert len(initial_mcf.columns) == len(final_mcf.columns) == 15
+    assert initial_mcf.rows[1].cells[14].text == ""
+    assert final_mcf.rows[1].cells[14].text == "+/-"
 
     initial_b730 = _find_domain_row(initial_mcf, "b730")
     final_b730 = _find_domain_row(final_mcf, "b730")
@@ -404,10 +406,17 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         if row.cells[2].text == "Позитивные\nфакторы"
     )
     assert environment_header.cells[7].text == "Барьеры"
+    assert environment_header.cells[14].text == ""
     environment_scale = initial_mcf.rows[environment_index + 1]
     assert [environment_scale.cells[index].text for index in range(2, 11)] == [
         "4+", "3+", "2+", "1+", "0", "1", "2", "3", "4"
     ]
+    final_environment_header = next(
+        row
+        for row in final_mcf.rows
+        if row.cells[2].text == "Позитивные\nфакторы"
+    )
+    assert final_environment_header.cells[14].text == "+/-"
 
     initial_scale = _find_table(initial, "Шкала/опросник")
     final_scale = next(
@@ -417,6 +426,9 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert len(initial_scale.columns) == 2
     assert len(final_scale.columns) == 3
+    assert "05.06.2026 16:00" in initial_scale.rows[0].cells[1].text
+    assert "05.06.2026 16:00" in final_scale.rows[0].cells[1].text
+    assert "19.06.2026 13:00" in final_scale.rows[0].cells[2].text
     assert initial_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[2].text == "24 балла"

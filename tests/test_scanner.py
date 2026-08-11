@@ -10,11 +10,20 @@ from mdrk_builder.application.scanner import (
     _merge_dates,
     _merge_icf,
     _merge_identity,
+    _merge_mdrk1_baseline,
     _records_for_selected_medical_record,
     scan_patient_folder,
 )
 from mdrk_builder.application.snapshot import build_snapshot
-from mdrk_builder.domain import Episode, MdrkKind, ReviewSeverity, SpecialistRole
+from mdrk_builder.domain import (
+    Episode,
+    MdrkKind,
+    ReviewSeverity,
+    ScaleMeasurement,
+    SourceDocument,
+    SpecialistFinding,
+    SpecialistRole,
+)
 from mdrk_builder.infrastructure.classifier import DocumentClassification
 from mdrk_builder.infrastructure.ooxml_reader import (
     BodyItem,
@@ -129,6 +138,23 @@ def test_explicit_final_mdrk_schedule_overrides_latest_specialist_time() -> None
 
     assert episode.initial_meeting_at == datetime(2026, 6, 8, 8)
     assert episode.final_meeting_at == datetime(2026, 6, 19, 15, 30)
+
+
+def test_discharge_date_does_not_create_final_mdrk_meeting() -> None:
+    record = _record(
+        "/patient/source.docx",
+        "Дата и время поступления: 05.06.2026 12:12\n"
+        "Дата и время выписки: 21.06.2026 12:00",
+        document_type="final",
+        clinical_datetime=None,
+    )
+    episode = Episode(Path("/patient"))
+
+    _merge_dates(episode, [record])
+
+    assert episode.discharge_datetime == datetime(2026, 6, 21, 12)
+    assert episode.course_duration_days == 16
+    assert episode.final_meeting_at is None
 
 
 def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
@@ -486,13 +512,61 @@ def test_clinical_sections_are_selected_per_field_as_of_each_meeting() -> None:
 
     assert episode.initial_sections.clinical_diagnosis == "исходный"
     assert episode.initial_sections.disease_history == "первичный анамнез"
-    assert episode.sections.clinical_diagnosis == "уточнённый"
+    assert episode.sections.clinical_diagnosis == (
+        "исходный\n"
+        "(Дополнение от 15.06.2026 09:00): уточнённый"
+    )
     assert episode.sections.disease_history == "первичный анамнез"
     assert episode.initial_field_sources["sections.clinical_diagnosis"] == Path(
         "/patient/initial.docx"
     )
     assert episode.field_sources["sections.clinical_diagnosis"] == Path(
         "/patient/follow-up.docx"
+    )
+    assert not any(
+        issue.code == "physician_source_after_meeting"
+        and issue.source == Path("/patient/discharge.docx")
+        for issue in episode.issues
+    )
+
+
+def test_mdrk2_sections_ignore_empty_diaries_and_deduplicate_copied_diagnostics() -> None:
+    initial = _record(
+        "/patient/initial.docx",
+        "Анамнез заболевания: Острое начало.\n"
+        "Лабораторные исследования: Анализ крови Hb 120 г/л. "
+        "Анализ мочи без патологии.",
+        clinical_datetime=datetime(2026, 8, 3, 8, 20),
+    )
+    empty_diary = _record(
+        "/patient/diary-empty.docx",
+        "Анамнез заболевания: Без изменений.\n"
+        "Лабораторные исследования: По ИПМР.",
+        document_type="follow_up",
+        clinical_datetime=datetime(2026, 8, 5, 9),
+    )
+    copied_with_addition = _record(
+        "/patient/diary-update.docx",
+        "Анамнез заболевания: Острое начало. Самочувствие улучшилось.\n"
+        "Лабораторные исследования: Анализ крови - Hb 120 г/л. "
+        "Анализ мочи без патологии. СРБ 12 мг/л.",
+        document_type="follow_up",
+        clinical_datetime=datetime(2026, 8, 7, 10, 15),
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 8, 4, 8)
+    episode.final_meeting_at = datetime(2026, 8, 10, 8)
+
+    _latest_clinical_sections(episode, [initial, empty_diary, copied_with_addition])
+
+    assert episode.initial_sections.disease_history == "Острое начало."
+    assert episode.sections.disease_history == (
+        "Острое начало.\n"
+        "(Дополнение от 07.08.2026 10:15): Самочувствие улучшилось."
+    )
+    assert episode.sections.laboratory_results == (
+        "Анализ крови Hb 120 г/л. Анализ мочи без патологии.\n"
+        "(Дополнение от 07.08.2026 10:15): СРБ 12 мг/л."
     )
 
 
@@ -763,7 +837,7 @@ def test_pf_first_seen_after_mdrk1_does_not_leak_into_initial_snapshot() -> None
     assert any(item.code == "Pf" for item in build_snapshot(episode, MdrkKind.FINAL).icf_domains)
 
 
-def test_follow_up_only_domain_does_not_backfill_initial_point() -> None:
+def test_follow_up_only_domain_uses_first_and_last_points_but_stays_out_of_mdrk1() -> None:
     follow_up = _record(
         "/patient/ft-follow-up.docx",
         "",
@@ -783,6 +857,307 @@ def test_follow_up_only_domain_does_not_backfill_initial_point() -> None:
     _merge_icf(episode, [follow_up])
 
     domain = next(item for item in episode.icf_domains if item.code == "b999")
-    assert domain.initial is None
-    assert domain.initial_source is None
+    assert domain.initial and domain.initial.value == 2
     assert domain.final and domain.final.value == 1
+    assert domain.initial_source == Path("/patient/ft-follow-up.docx")
+    assert domain.final_source == Path("/patient/ft-follow-up.docx")
+    assert domain.initial_measured_at == datetime(2026, 6, 11, 13)
+    assert domain.final_measured_at == datetime(2026, 6, 11, 13)
+    assert not any(
+        item.code == "b999"
+        for item in build_snapshot(episode, MdrkKind.INITIAL).icf_domains
+    )
+
+
+def test_icf_fuzzy_merges_near_duplicate_description_and_keeps_first_last_only() -> None:
+    role = SpecialistRole.PHYSICAL_THERAPIST
+    records = [
+        _record(
+            "/patient/ft-initial.docx",
+            "",
+            role=role,
+            document_type="initial",
+            clinical_datetime=datetime(2026, 6, 5, 10),
+            tables=[
+                _icf_table(
+                    _row({0: "d450", 1: "Ходьба пациента", 11: "3"})
+                )
+            ],
+        ),
+        _record(
+            "/patient/ft-diary-1.docx",
+            "",
+            role=role,
+            document_type="follow_up",
+            clinical_datetime=datetime(2026, 6, 10, 10),
+            tables=[_icf_table(_row({0: "d450", 1: "Ходьба пациета", 11: "2"}))],
+        ),
+        _record(
+            "/patient/ft-diary-2.docx",
+            "",
+            role=role,
+            document_type="follow_up",
+            clinical_datetime=datetime(2026, 6, 18, 10),
+            tables=[_icf_table(_row({0: "d450", 1: "Ходьба пациента.", 11: "1"}))],
+        ),
+        _record(
+            "/patient/ft-too-late.docx",
+            "",
+            role=role,
+            document_type="final",
+            clinical_datetime=datetime(2026, 6, 21, 10),
+            tables=[_icf_table(_row({0: "d450", 1: "Ходьба пациента", 11: "0"}))],
+        ),
+    ]
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 6, 8)
+    episode.final_meeting_at = datetime(2026, 6, 20, 11)
+
+    _merge_icf(episode, records)
+
+    domains = [item for item in episode.icf_domains if item.code == "d450"]
+    assert len(domains) == 1
+    domain = domains[0]
+    assert domain.description == "Ходьба пациента"
+    assert domain.initial and domain.initial.value == 3
+    assert domain.final and domain.final.value == 1
+    assert domain.initial_source == Path("/patient/ft-initial.docx")
+    assert domain.final_source == Path("/patient/ft-diary-2.docx")
+    assert domain.initial_measured_at == datetime(2026, 6, 5, 10)
+    assert domain.final_measured_at == datetime(2026, 6, 18, 10)
+
+
+def test_single_new_icf_point_becomes_final_snapshot_baseline_without_fake_repeat() -> None:
+    role = SpecialistRole.OCCUPATIONAL_THERAPIST
+    follow_up = _record(
+        "/patient/ot-new-domain.docx",
+        "",
+        role=role,
+        document_type="follow_up",
+        clinical_datetime=datetime(2026, 6, 12, 14),
+        tables=[_icf_table(_row({0: "d640", 1: "Домашняя работа", 11: "2"}))],
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 6, 8)
+    episode.final_meeting_at = datetime(2026, 6, 20, 11)
+
+    _merge_icf(episode, [follow_up])
+
+    domain = next(item for item in episode.icf_domains if item.code == "d640")
+    assert domain.initial and domain.initial.value == 2
+    assert domain.final is None
+    assert build_snapshot(episode, MdrkKind.INITIAL).icf_domains == ()
+    assert [item.code for item in build_snapshot(episode, MdrkKind.FINAL).icf_domains] == [
+        "d640"
+    ]
+
+
+def test_icf_copies_at_same_timestamp_are_one_point_despite_wording_variant() -> None:
+    role = SpecialistRole.PHYSICAL_THERAPIST
+    occurred_at = datetime(2026, 6, 5, 10)
+    records = [
+        _record(
+            "/patient/ft-copy-a.docx",
+            "",
+            role=role,
+            clinical_datetime=occurred_at,
+            tables=[_icf_table(_row({0: "d450", 1: "Ходьба пациента", 11: "3"}))],
+        ),
+        _record(
+            "/patient/ft-copy-b.docx",
+            "",
+            role=role,
+            clinical_datetime=occurred_at,
+            tables=[
+                _icf_table(
+                    _row({0: "d450", 1: "Ходьба пациета", 11: "3"})
+                )
+            ],
+        ),
+    ]
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 6, 8)
+    episode.final_meeting_at = datetime(2026, 6, 20, 11)
+
+    _merge_icf(episode, records)
+
+    domain = next(item for item in episode.icf_domains if item.code == "d450")
+    assert domain.initial and domain.initial.value == 3
+    assert domain.final is None
+    assert domain.initial_source == Path("/patient/ft-copy-a.docx")
+
+
+def test_same_icf_code_for_left_and_right_limb_remains_two_domains() -> None:
+    role = SpecialistRole.PHYSICAL_THERAPIST
+    record = _record(
+        "/patient/ft-limbs.docx",
+        "",
+        role=role,
+        clinical_datetime=datetime(2026, 6, 5, 10),
+        tables=[
+            _icf_table(
+                _row({0: "b7301", 1: "Сила мышц левой руки", 11: "3"}),
+                _row({0: "b7301", 1: "Сила мышц правой руки", 11: "1"}),
+            )
+        ],
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 6, 8)
+    episode.final_meeting_at = datetime(2026, 6, 20, 11)
+
+    _merge_icf(episode, [record])
+
+    domains = [item for item in episode.icf_domains if item.code == "b7301"]
+    assert len(domains) == 2
+    assert {item.description for item in domains} == {
+        "Сила мышц левой руки",
+        "Сила мышц правой руки",
+    }
+
+
+def test_mdrk1_fills_only_missing_baseline_icf_and_scales() -> None:
+    physical_role = SpecialistRole.PHYSICAL_THERAPIST
+    primary_at = datetime(2026, 6, 7, 10)
+    mdrk1_at = datetime(2026, 6, 8, 8)
+    repeat_at = datetime(2026, 6, 18, 10)
+    primary = _record(
+        "/patient/ft-primary.docx",
+        "",
+        role=physical_role,
+        clinical_datetime=primary_at,
+        tables=[_icf_table(_row({0: "b730", 1: "Сила мышц", 11: "2", 13: "ФТ"}))],
+    )
+    repeat = _record(
+        "/patient/ft-repeat.docx",
+        "",
+        role=physical_role,
+        document_type="follow_up",
+        clinical_datetime=repeat_at,
+        tables=[_icf_table(_row({0: "d450", 1: "Ходьба", 11: "1", 13: "ФТ"}))],
+    )
+    mdrk_icf = _icf_table(
+        _row({0: "b730", 1: "Сила мышц", 11: "4", 13: "ФТ"}),
+        _row({0: "d450", 1: "Ходьба", 11: "3", 13: "ФТ"}),
+        _row({0: "e310", 1: "Поддержка семьи", 11: "4+"}),
+        _row({0: "Pf", 1: "Мужчина трудоспособного возраста"}),
+    )
+    mdrk_scales = ParsedTable(
+        (
+            _row({0: "Шкала/опросник", 1: "Исходно 08.06.2026 07:45"}, 2),
+            _row({0: "Шкала баланса Берга", 1: "99"}, 2),
+            _row({0: "Шкала Тинетти", 1: "10"}, 2),
+        )
+    )
+    paragraphs = [
+        "Консилиум мультидисциплинарной реабилитационной команды",
+        '"08" июня 2026 г. время: 08 час. 00 мин.',
+        "1. Клинический диагноз: текст МДРК не должен использоваться",
+        "Результат осмотра специалиста по физической реабилитации:",
+    ]
+    mdrk_document = ParsedDocument(
+        source_path=Path("/patient/mdrk-1.docx"),
+        normalized_path=Path("/patient/mdrk-1.docx"),
+        paragraphs=paragraphs,
+        tables=[mdrk_icf, mdrk_scales],
+        body_items=[
+            BodyItem("paragraph", 0),
+            BodyItem("paragraph", 1),
+            BodyItem("paragraph", 2),
+            BodyItem("table", 0),
+            BodyItem("paragraph", 3),
+            BodyItem("table", 1),
+        ],
+    )
+    mdrk_record = ScannedRecord(
+        mdrk_document,
+        DocumentClassification(
+            SpecialistRole.OTHER,
+            "mdrk",
+            is_mdrk=True,
+            confidence=1.0,
+            mdrk_kind="initial",
+        ),
+        mdrk1_at,
+    )
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = mdrk1_at
+    episode.final_meeting_at = datetime(2026, 6, 19, 15, 30)
+    episode.sources.extend(
+        (
+            SourceDocument(primary.document.source_path, physical_role, primary_at),
+            SourceDocument(repeat.document.source_path, physical_role, repeat_at),
+            SourceDocument(mdrk_document.source_path, SpecialistRole.OTHER, mdrk1_at, "mdrk_initial"),
+        )
+    )
+    episode.findings.extend(
+        (
+            SpecialistFinding(
+                physical_role,
+                source_datetime=primary_at,
+                source=primary.document.source_path,
+                scales=[
+                    ScaleMeasurement(
+                        "Шкала баланса Берга",
+                        "30",
+                        primary_at,
+                        physical_role,
+                        primary.document.source_path,
+                    )
+                ],
+            ),
+            SpecialistFinding(
+                physical_role,
+                source_datetime=repeat_at,
+                source=repeat.document.source_path,
+                scales=[
+                    ScaleMeasurement(
+                        "Шкала Тинетти",
+                        "20",
+                        repeat_at,
+                        physical_role,
+                        repeat.document.source_path,
+                    )
+                ],
+            ),
+        )
+    )
+
+    _merge_icf(episode, [primary, repeat])
+    _merge_mdrk1_baseline(episode, [mdrk_record])
+
+    by_code = {item.code: item for item in episode.icf_domains}
+    assert by_code["b730"].initial and by_code["b730"].initial.value == 2
+    assert by_code["b730"].initial_source == primary.document.source_path
+    assert by_code["d450"].initial and by_code["d450"].initial.value == 3
+    assert by_code["d450"].final and by_code["d450"].final.value == 1
+    assert by_code["d450"].initial_source == mdrk_document.source_path
+    assert by_code["d450"].final_source == repeat.document.source_path
+    assert by_code["e310"].initial and by_code["e310"].initial.display() == "4+"
+    assert by_code["Pf"].initial_source == mdrk_document.source_path
+    assert episode.sections.clinical_diagnosis == ""
+
+    rows = {row.name: row for row in build_snapshot(episode, MdrkKind.FINAL).scale_rows}
+    assert rows["Шкала баланса Берга"].initial.value == "30"
+    assert rows["Шкала баланса Берга"].current is None
+    assert rows["Шкала Тинетти"].initial.value == "10"
+    assert rows["Шкала Тинетти"].current.value == "20"
+    assert any(issue.code == "mdrk1_baseline_fallback" for issue in episode.issues)
+
+
+def test_mdrk1_fallback_rejects_document_from_non_initial_meeting_day() -> None:
+    episode = Episode(Path("/patient"))
+    episode.initial_meeting_at = datetime(2026, 6, 8, 8)
+    episode.final_meeting_at = datetime(2026, 6, 19, 15, 30)
+    wrong_day = _record(
+        "/patient/not-really-mdrk1.docx",
+        "",
+        role=SpecialistRole.OTHER,
+        document_type="mdrk",
+        clinical_datetime=datetime(2026, 6, 18, 8),
+        tables=[_icf_table(_row({0: "d450", 1: "Ходьба", 11: "3"}))],
+    )
+
+    _merge_mdrk1_baseline(episode, [wrong_day])
+
+    assert episode.icf_domains == []
+    assert episode.findings == []

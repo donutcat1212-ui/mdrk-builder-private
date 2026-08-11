@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -24,10 +26,51 @@ class WindowsWordConverter:
 
     WD_FORMAT_DOCX = 16
     WD_DO_NOT_SAVE_CHANGES = 0
+    WORD_QUIT_TIMEOUT_SECONDS = 5.0
+    WORD_KILL_TIMEOUT_SECONDS = 5.0
 
     def __init__(self) -> None:
         self._pythoncom = None
         self._word = None
+        self._word_pid: int | None = None
+
+    @staticmethod
+    def _process_id_for_word(word) -> int | None:
+        """Return the PID for this exact Word application window, when available."""
+        try:
+            window_handle = int(word.Hwnd)
+            process_id = ctypes.c_ulong()
+            result = ctypes.windll.user32.GetWindowThreadProcessId(  # type: ignore[attr-defined]
+                window_handle,
+                ctypes.byref(process_id),
+            )
+            value = int(process_id.value)
+            if not result or value <= 0 or value == os.getpid():
+                return None
+            return value
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+
+    def _force_kill_word_process(self, process_id: int) -> None:
+        """Terminate only the Word process created by DispatchEx."""
+        if process_id <= 0 or process_id == os.getpid():
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/F"],
+                capture_output=True,
+                text=True,
+                timeout=self.WORD_KILL_TIMEOUT_SECONDS,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            # Cleanup must never turn an otherwise completed scan into a failure.
+            return
+
+    def _watch_for_hung_word(self, finished: threading.Event, process_id: int) -> None:
+        if not finished.wait(self.WORD_QUIT_TIMEOUT_SECONDS):
+            self._force_kill_word_process(process_id)
 
     def _start(self):
         if self._word is not None:
@@ -39,10 +82,22 @@ class WindowsWordConverter:
             raise ConversionError("Для чтения DOC/RTF требуется pywin32 и Microsoft Word") from exc
         pythoncom.CoInitialize()
         self._pythoncom = pythoncom
-        word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = False
-        word.DisplayAlerts = 0
+        try:
+            word = win32com.client.DispatchEx("Word.Application")
+        except Exception as exc:
+            self.close()
+            raise ConversionError(f"Word не удалось запустить: {exc}") from exc
         self._word = word
+        self._word_pid = self._process_id_for_word(word)
+        try:
+            word.Visible = False
+            word.DisplayAlerts = 0
+            # This suppresses Word's own "not the default app" prompt. It does not
+            # change Windows file associations or make Word the default application.
+            word.Options.AlertIfNotDefault = False
+        except Exception as exc:
+            self.close()
+            raise ConversionError(f"Word не удалось подготовить: {exc}") from exc
         return word
 
     def convert(self, source: Path, destination: Path) -> Path:
@@ -68,20 +123,50 @@ class WindowsWordConverter:
             raise ConversionError(f"Word не смог преобразовать {source.name}: {exc}") from exc
         finally:
             if document is not None:
-                document.Close(SaveChanges=self.WD_DO_NOT_SAVE_CHANGES)
-        if not destination.exists():
+                try:
+                    document.Close(SaveChanges=self.WD_DO_NOT_SAVE_CHANGES)
+                except Exception:
+                    # SaveAs2 is the meaningful operation. A COM cleanup error
+                    # must not mask a successfully written output document.
+                    pass
+        if not destination.is_file() or destination.stat().st_size == 0:
             raise ConversionError(f"Word не создал DOCX для {source.name}")
         return destination
 
     def close(self) -> None:
+        word = self._word
+        process_id = self._word_pid
+        pythoncom = self._pythoncom
+        self._word = None
+        self._word_pid = None
+        self._pythoncom = None
+
+        finished = threading.Event()
+        watchdog: threading.Thread | None = None
         try:
-            if self._word is not None:
-                self._word.Quit(SaveChanges=self.WD_DO_NOT_SAVE_CHANGES)
+            if word is not None:
+                if process_id is not None:
+                    watchdog = threading.Thread(
+                        target=self._watch_for_hung_word,
+                        args=(finished, process_id),
+                        name="mdrk-word-quit-watchdog",
+                        daemon=True,
+                    )
+                    watchdog.start()
+                try:
+                    word.Quit(SaveChanges=self.WD_DO_NOT_SAVE_CHANGES)
+                except Exception:
+                    if process_id is not None:
+                        self._force_kill_word_process(process_id)
         finally:
-            self._word = None
-            if self._pythoncom is not None:
-                self._pythoncom.CoUninitialize()
-                self._pythoncom = None
+            finished.set()
+            if watchdog is not None:
+                watchdog.join(timeout=0.2)
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
 
 class LibreOfficeConverter:
@@ -160,9 +245,16 @@ class DocumentNormalizer:
     def close(self) -> None:
         try:
             if self.converter is not None:
-                self.converter.close()
+                try:
+                    self.converter.close()
+                except Exception:
+                    # Cleanup errors must not discard an already assembled scan.
+                    pass
         finally:
-            self._temporary.cleanup()
+            try:
+                self._temporary.cleanup()
+            except OSError:
+                pass
 
     def __enter__(self) -> "DocumentNormalizer":
         return self

@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mdrk_builder.application.snapshot import select_findings, select_scale_rows
+from mdrk_builder.application.snapshot import (
+    select_findings,
+    select_icf_domains,
+    select_scale_rows,
+)
 from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity, SpecialistRole
 
 
@@ -37,6 +41,7 @@ _RECOMPUTED_CODES = {
     "participant_conclusion_missing",
     "scale_initial_missing",
     "scale_final_missing",
+    "scale_datetime_missing",
     "source_selection_stale_record_number",
     "source_selection_stale_admission",
 }
@@ -532,15 +537,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             )
         )
 
-    visible_icf_domains = (
-        [
-            domain
-            for domain in episode.icf_domains
-            if domain.initial is not None or domain.initial_source is not None
-        ]
-        if kind is MdrkKind.INITIAL
-        else episode.icf_domains
-    )
+    visible_icf_domains = select_icf_domains(episode, kind)
     for index, domain in enumerate(visible_icf_domains):
         # Personal factors are descriptive rows (for example age/motivation),
         # not numeric ICF qualifier pairs.
@@ -586,6 +583,25 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                     severity=ReviewSeverity.WARNING,
                     field=f"scales.{index}.final",
                     source=row.initial.source if row.initial else None,
+                )
+            )
+        for point_name, measurement in (
+            ("initial", row.initial),
+            ("final", row.current if kind is MdrkKind.FINAL else None),
+        ):
+            if measurement is None or measurement.measured_at is not None:
+                continue
+            point_label = "исходной" if point_name == "initial" else "повторной"
+            issues.append(
+                ReviewIssue(
+                    code="scale_datetime_missing",
+                    message=(
+                        f"У {point_label} оценки по шкале «{row.name}» "
+                        "не определены дата и время"
+                    ),
+                    severity=ReviewSeverity.WARNING,
+                    field=f"scales.{index}.{point_name}_datetime",
+                    source=measurement.source,
                 )
             )
     for index, procedure in enumerate(episode.procedures):

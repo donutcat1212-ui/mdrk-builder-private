@@ -6,7 +6,9 @@ from mdrk_builder.application.extractors import (
     extract_clinical_sections,
     extract_conclusion,
     extract_icf_observations,
+    extract_mdrk_document_datetime,
     extract_mdrk_meeting_datetimes,
+    extract_mdrk_scale_measurements,
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
@@ -116,6 +118,19 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
     assert sections["diet"] == "ОВД"
     assert "Клинический анализ" in sections["laboratory_results"]
     assert sections["instrumental_results"].startswith("ЭКГ")
+
+
+def test_section_does_not_absorb_discharge_metadata() -> None:
+    document = _document(
+        "Анамнез заболевания: Острое начало.\n"
+        "Дата и время выписки: 20.08.2026 12:00\n"
+        "Клинический диагноз: I69.3"
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["disease_history"] == "Острое начало."
+    assert "выписк" not in sections["disease_history"].casefold()
 
 
 def test_sections_split_completed_interventions_and_prefixed_movement_regimen() -> None:
@@ -526,6 +541,57 @@ def test_scheduled_mdrk_rows_prefer_explicit_execution_time() -> None:
     values = extract_mdrk_meeting_datetimes(_document(tables=[table]))
 
     assert values[-1] == datetime(2026, 6, 19, 15, 30)
+
+
+def test_mdrk_datetime_and_scale_roles_are_read_from_local_headings() -> None:
+    physician = ParsedTable(
+        (
+            _row(
+                {
+                    0: "Дата и время расчета шкалы",
+                    1: "Шкала/опросник",
+                    2: "Результат расчета",
+                },
+                3,
+            ),
+            _row({0: "08.06.2026 07:30", 1: "Шкала Бартел", 2: "75"}, 3),
+        )
+    )
+    physical = ParsedTable(
+        (
+            _row({0: "Шкала/опросник", 1: "Исходно 08.06.2026 07:45"}, 2),
+            _row({0: "Шкала баланса Берга", 1: "32"}, 2),
+        )
+    )
+    paragraphs = [
+        "Консилиум мультидисциплинарной реабилитационной команды",
+        '"08" июня 2026 г. время: 08 час. 00 мин.',
+        "Результат осмотра врача физической и реабилитационной медицины:",
+        "Результат осмотра специалиста по физической реабилитации:",
+    ]
+    document = ParsedDocument(
+        source_path=Path("/patient/mdrk.docx"),
+        normalized_path=Path("/patient/mdrk.docx"),
+        paragraphs=paragraphs,
+        tables=[physician, physical],
+        body_items=[
+            BodyItem("paragraph", 0),
+            BodyItem("paragraph", 1),
+            BodyItem("paragraph", 2),
+            BodyItem("table", 0),
+            BodyItem("paragraph", 3),
+            BodyItem("table", 1),
+        ],
+    )
+
+    meeting_at = extract_mdrk_document_datetime(document)
+    scales = extract_mdrk_scale_measurements(document, meeting_at)
+
+    assert meeting_at == datetime(2026, 6, 8, 8)
+    assert [(item.specialist, item.name, item.value) for item in scales] == [
+        (SpecialistRole.FRM, "Шкала Бартел", "75"),
+        (SpecialistRole.PHYSICAL_THERAPIST, "Шкала баланса Берга", "32"),
+    ]
 
 
 def test_physician_scale_extraction_rejects_copied_specialist_tables() -> None:

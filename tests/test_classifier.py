@@ -2,15 +2,37 @@ from pathlib import Path
 
 from mdrk_builder.domain import SpecialistRole
 from mdrk_builder.infrastructure.classifier import classify_document
-from mdrk_builder.infrastructure.ooxml_reader import BodyItem, ParsedDocument
+from mdrk_builder.infrastructure.ooxml_reader import (
+    BodyItem,
+    ParsedCell,
+    ParsedDocument,
+    ParsedRow,
+    ParsedTable,
+)
 
 
-def _document(path: str, text: str) -> ParsedDocument:
+def _document(
+    path: str,
+    text: str,
+    tables: list[ParsedTable] | None = None,
+) -> ParsedDocument:
+    parsed_tables = tables or []
     return ParsedDocument(
         source_path=Path(path),
         normalized_path=Path(path),
         paragraphs=[text],
-        body_items=[BodyItem("paragraph", 0)],
+        tables=parsed_tables,
+        body_items=[
+            BodyItem("paragraph", 0),
+            *(BodyItem("table", index) for index in range(len(parsed_tables))),
+        ],
+    )
+
+
+def _row(values: dict[int, str], logical_cols: int = 15) -> ParsedRow:
+    return ParsedRow(
+        tuple(ParsedCell(column, 1, value) for column, value in sorted(values.items())),
+        logical_cols,
     )
 
 
@@ -49,6 +71,49 @@ def test_mdrk_is_recognized_before_specialist_mentions() -> None:
 
     assert classification.is_mdrk
     assert classification.document_type == "mdrk"
+    assert classification.mdrk_kind == ""
+
+
+def test_mdrk_kind_uses_repeat_table_state_not_filename() -> None:
+    title = "Консилиум мультидисциплинарной реабилитационной команды"
+    initial_table = ParsedTable(
+        (
+            _row({0: "МКФ категориальный профиль"}),
+            _row({0: "b730", 1: "Сила", 11: "2"}),
+        )
+    )
+    final_table = ParsedTable(
+        (
+            _row({0: "МКФ категориальный профиль"}),
+            _row({0: "b730", 1: "Сила", 11: "2", 12: "1"}),
+        )
+    )
+
+    initial = classify_document(_document("/patient/broken-2.docx", title, [initial_table]))
+    final = classify_document(_document("/patient/broken-1.docx", title, [final_table]))
+
+    assert initial.mdrk_kind == "initial"
+    assert final.mdrk_kind == "final"
+
+
+def test_final_outcome_text_prevents_empty_repeat_mdrk2_from_becoming_baseline() -> None:
+    classification = classify_document(
+        _document(
+            "/patient/ambiguous.docx",
+            "Консилиум мультидисциплинарной реабилитационной команды\n"
+            "Достигнута в полном объёме",
+            [
+                ParsedTable(
+                    (
+                        _row({0: "МКФ категориальный профиль"}),
+                        _row({0: "b730", 1: "Сила", 11: "2"}),
+                    )
+                )
+            ],
+        )
+    )
+
+    assert classification.mdrk_kind == "final"
 
 
 def test_explicit_frm_job_title_overrides_neurology_folder_hint() -> None:
