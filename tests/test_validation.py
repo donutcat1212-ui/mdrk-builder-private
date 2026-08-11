@@ -30,7 +30,7 @@ from mdrk_builder.domain import (
 
 def _valid_episode() -> Episode:
     episode = Episode(folder=Path("/episode"))
-    episode.identity.full_name = "Тестов Тест Тестович"
+    episode.identity.full_name = "АЛЬФА БЕТА ГАММА"
     episode.identity.medical_record_number = "123/26"
     episode.admission_datetime = datetime(2026, 6, 5, 12)
     episode.initial_meeting_at = datetime(2026, 6, 6, 8)
@@ -450,7 +450,7 @@ def test_meeting_before_admission_is_blocking() -> None:
     )
 
 
-def test_discharge_before_manual_admission_is_blocking() -> None:
+def test_discharge_date_does_not_block_mdrk_generation() -> None:
     episode = _valid_episode()
     episode.admission_datetime = datetime(2026, 8, 20, 9)
     episode.discharge_datetime = datetime(2026, 8, 19, 12)
@@ -458,36 +458,29 @@ def test_discharge_before_manual_admission_is_blocking() -> None:
 
     issues = current_issues(episode, MdrkKind.INITIAL)
 
-    assert any(
-        issue.code == "discharge_before_admission"
-        and issue.severity is ReviewSeverity.BLOCKING
-        for issue in issues
-    )
-    assert not can_generate(episode, MdrkKind.INITIAL)
+    assert not any("discharge" in issue.code for issue in issues)
+    assert can_generate(episode, MdrkKind.INITIAL)
 
 
-def test_meeting_after_discharge_is_blocking() -> None:
+def test_meeting_after_discharge_does_not_block_mdrk_generation() -> None:
     episode = _valid_episode()
     episode.discharge_datetime = datetime(2026, 6, 20, 10)
     episode.initial_meeting_at = datetime(2026, 6, 20, 10, 1)
 
     issues = current_issues(episode, MdrkKind.INITIAL)
 
-    assert any(
-        issue.code == "meeting_after_discharge"
-        and issue.severity is ReviewSeverity.BLOCKING
-        for issue in issues
-    )
+    assert not any("discharge" in issue.code for issue in issues)
+    assert can_generate(episode, MdrkKind.INITIAL)
 
 
-def test_meeting_at_discharge_time_is_allowed() -> None:
+def test_discharge_date_never_creates_a_validation_issue() -> None:
     episode = _valid_episode()
     episode.discharge_datetime = datetime(2026, 6, 20, 10)
     episode.initial_meeting_at = episode.discharge_datetime
 
     issues = current_issues(episode, MdrkKind.INITIAL)
 
-    assert not any(issue.code == "meeting_after_discharge" for issue in issues)
+    assert not any("discharge" in issue.code for issue in issues)
 
 
 def test_final_meeting_must_be_after_initial_meeting() -> None:

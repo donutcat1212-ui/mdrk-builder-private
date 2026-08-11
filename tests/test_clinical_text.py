@@ -20,7 +20,7 @@ def _observation(
         text=text,
         occurred_at=when,
         document_type=document_type,
-        source=Path(f"/patient/{when:%Y%m%d-%H%M}.docx"),
+        source=Path(f"fixtures/{when:%Y%m%d-%H%M}.docx"),
     )
 
 
@@ -35,18 +35,18 @@ def test_empty_diary_markers_are_not_clinical_content() -> None:
 
 def test_timeline_keeps_primary_baseline_and_only_dated_new_content() -> None:
     initial = _observation(
-        "Острое начало. Получает терапию.",
+        "БАЗОВЫЙ_ФАКТ_А. БАЗОВЫЙ_ФАКТ_Б.",
         datetime(2026, 8, 3, 8, 20),
         document_type="initial",
     )
     unchanged = _observation("без изменений", datetime(2026, 8, 5, 9))
     copied_with_addition = _observation(
-        "Острое начало. Получает терапию. "
-        "Появилась положительная динамика.",
+        "БАЗОВЫЙ_ФАКТ_А. БАЗОВЫЙ_ФАКТ_Б. "
+        "НОВЫЙ_ФАКТ_В.",
         datetime(2026, 8, 7, 10, 15),
     )
     repeated = _observation(
-        "Появилась положительная динамика.",
+        "НОВЫЙ_ФАКТ_В.",
         datetime(2026, 8, 8, 10, 15),
     )
 
@@ -59,43 +59,43 @@ def test_timeline_keeps_primary_baseline_and_only_dated_new_content() -> None:
         include_updates=True,
     )
 
-    assert initial_result.text == "Острое начало. Получает терапию."
+    assert initial_result.text == "БАЗОВЫЙ_ФАКТ_А. БАЗОВЫЙ_ФАКТ_Б."
     assert final_result.text == (
-        "Острое начало. Получает терапию.\n"
-        "(Дополнение от 07.08.2026 10:15): Появилась положительная динамика."
+        "БАЗОВЫЙ_ФАКТ_А. БАЗОВЫЙ_ФАКТ_Б.\n"
+        "(Дополнение от 07.08.2026 10:15): НОВЫЙ_ФАКТ_В."
     )
     assert final_result.source == copied_with_addition.source
 
 
 def test_diagnostic_near_copy_keeps_only_new_sentence() -> None:
     known = (
-        "Клинический анализ крови: Hb 120 г/л, лейкоциты 6,0. "
-        "Общий анализ мочи без патологии."
+        "ПОКАЗАТЕЛЬ_А: 120 ЕД, ПОКАЗАТЕЛЬ_Б: 6 ЕД. "
+        "КОНТРОЛЬНЫЙ_ТЕКСТ_БЕЗ_ИЗМЕНЕНИЙ."
     )
     candidate = (
-        "Клинический анализ крови - Hb 120 г/л, лейкоциты 6,0. "
-        "Общий анализ мочи без патологии. "
-        "С-реактивный белок 12 мг/л."
+        "ПОКАЗАТЕЛЬ_А - 120 ЕД, ПОКАЗАТЕЛЬ_Б: 6 ЕД. "
+        "КОНТРОЛЬНЫЙ_ТЕКСТ_БЕЗ_ИЗМЕНЕНИЙ. "
+        "ПОКАЗАТЕЛЬ_В: 12 ЕД."
     )
 
     assert extract_novel_clinical_text(
         candidate,
         known,
         duplicate_threshold=DIAGNOSTIC_DUPLICATE_THRESHOLD,
-    ) == "С-реактивный белок 12 мг/л."
+    ) == "ПОКАЗАТЕЛЬ_В: 12 ЕД."
 
 
 def test_diagnostic_near_copy_preserves_changed_numeric_result() -> None:
     assert extract_novel_clinical_text(
-        "Клинический анализ крови: Hb 110 г/л, лейкоциты 6,0.",
-        "Клинический анализ крови: Hb 120 г/л, лейкоциты 6,0.",
+        "ПОКАЗАТЕЛЬ_А: 110 ЕД, ПОКАЗАТЕЛЬ_Б: 6 ЕД.",
+        "ПОКАЗАТЕЛЬ_А: 120 ЕД, ПОКАЗАТЕЛЬ_Б: 6 ЕД.",
         duplicate_threshold=DIAGNOSTIC_DUPLICATE_THRESHOLD,
-    ) == "Клинический анализ крови: Hb 110 г/л, лейкоциты 6,0."
+    ) == "ПОКАЗАТЕЛЬ_А: 110 ЕД, ПОКАЗАТЕЛЬ_Б: 6 ЕД."
 
 
 def test_run_on_diagnostic_copy_keeps_only_inserted_numeric_tail() -> None:
     assert extract_novel_clinical_text(
-        "Анализ крови гемоглобин 120 лейкоциты 6 СРБ 12",
-        "Анализ крови: гемоглобин 120, лейкоциты 6",
+        "МАРКЕР А 120 МАРКЕР Б 6 МАРКЕР В 12",
+        "МАРКЕР А: 120, МАРКЕР Б 6",
         duplicate_threshold=DIAGNOSTIC_DUPLICATE_THRESHOLD,
-    ) == "СРБ 12"
+    ) == "МАРКЕР В 12"

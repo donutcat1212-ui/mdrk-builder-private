@@ -1,20 +1,19 @@
-name: Windows release
+name: Windows internal pilot artifact
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: internal-windows-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-release:
+  build-internal-package:
     runs-on: windows-2022
     timeout-minutes: 25
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
@@ -32,19 +31,20 @@ jobs:
             pyproject.toml
             uv.lock
 
-      - name: Verify release tag
+      - name: Verify internal version
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Tag must be SemVer: vX.Y.Z"
-          }
-
           $projectVersion = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          if ("v$projectVersion" -ne $env:GITHUB_REF_NAME) {
-            throw "Tag $env:GITHUB_REF_NAME does not match pyproject version $projectVersion"
+          $packageVersion = python -c "import sys; sys.path.insert(0, 'src'); import mdrk_builder; print(mdrk_builder.__version__)"
+
+          if ($projectVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must be SemVer X.Y.Z: $projectVersion"
+          }
+          if ($projectVersion -ne $packageVersion) {
+            throw "Version mismatch: pyproject.toml=$projectVersion, package=$packageVersion"
           }
 
-      - name: Install pinned release dependencies
+      - name: Install pinned build dependencies
         shell: pwsh
         run: |
           python -m pip install `
@@ -59,9 +59,13 @@ jobs:
         run: |
           python -VV
           python -m PyInstaller --version
-          python -m compileall -q src tests
+          python -m compileall -q src tests tools/package_internal_release.py tools/privacy_gate.py
           python -m pytest
           python -c "import tkinter; import pythoncom; import pywintypes; import win32com.client; import mdrk_builder.ui.app"
+
+      - name: Privacy gate
+        shell: pwsh
+        run: python tools/privacy_gate.py
 
       - name: Build EXE
         shell: pwsh
@@ -96,83 +100,24 @@ jobs:
             throw "Packaged smoke test leaked an MDRK_Builder process"
           }
 
-      - name: Prepare release assets
+      - name: Prepare internal distribution folder
+        id: package
         shell: pwsh
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          $exe = "dist\MDRK_Builder-$tag.exe"
-          $zip = "dist\MDRK_Builder-$tag-windows-x64.zip"
-          $buildInfo = "dist\BUILD_INFO.txt"
+          python tools/package_internal_release.py --replace
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "package_dir=dist/MDRK_Builder_${version}_Internal" >> $env:GITHUB_OUTPUT
 
-          Copy-Item "dist\MDRK_Builder.exe" $exe
+      - name: Audit packaged files
+        shell: pwsh
+        run: python tools/privacy_gate.py --release-candidate "${{ steps.package.outputs.package_dir }}"
 
-          @(
-            "tag=$tag"
-            "commit=$env:GITHUB_SHA"
-            "runner=$env:RUNNER_OS/$env:RUNNER_ARCH"
-            "python=$(python -VV 2>&1)"
-            "pyinstaller=$(python -m PyInstaller --version)"
-            ""
-            "Installed packages:"
-            (python -m pip freeze)
-          ) | Set-Content -Encoding utf8 $buildInfo
-
-          Compress-Archive -Path $exe, "README.md", $buildInfo -DestinationPath $zip -Force
-
-          Get-FileHash -Algorithm SHA256 -Path $exe, $zip |
-            ForEach-Object {
-              "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf)
-            } |
-            Set-Content -Encoding ascii "dist\SHA256SUMS.txt"
-
-          @"
-          MDRK Builder $tag — Windows x64 release candidate.
-
-          В релизе:
-          - готовый EXE;
-          - ZIP с EXE, инструкцией и сведениями о сборке;
-          - SHA-256 контрольные суммы.
-
-          Исправлено подавление системного запроса Word «не является программой
-          по умолчанию» и безопасное завершение служебного Word после конвертации.
-
-          GitHub-сборка проверила тесты, упаковку, встроенный шаблон,
-          генерацию DOCX и реальную инициализацию интерфейса. Конвертацию DOC/RTF через
-          Microsoft Word COM необходимо отдельно проверить на рабочем
-          Windows-компьютере с установленным Word до использования на реальных
-          документах.
-
-          EXE не подписан цифровым сертификатом; SmartScreen может показать
-          предупреждение Unknown publisher.
-          "@ | Set-Content -Encoding utf8 "dist\RELEASE_NOTES.md"
-
-      - name: Upload workflow artifact
+      - name: Upload internal workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: MDRK_Builder-${{ github.ref_name }}-windows-x64
-          path: |
-            dist/MDRK_Builder-${{ github.ref_name }}.exe
-            dist/MDRK_Builder-${{ github.ref_name }}-windows-x64.zip
-            dist/SHA256SUMS.txt
-            dist/BUILD_INFO.txt
+          name: MDRK_Builder-${{ steps.package.outputs.version }}-Internal-windows-x64
+          path: ${{ steps.package.outputs.package_dir }}/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 30
-
-      - name: Publish GitHub Release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          $exe = "dist\MDRK_Builder-$tag.exe"
-          $zip = "dist\MDRK_Builder-$tag-windows-x64.zip"
-
-          gh release create $tag `
-            $exe `
-            $zip `
-            "dist\SHA256SUMS.txt" `
-            "dist\BUILD_INFO.txt" `
-            --verify-tag `
-            --title "MDRK Builder $tag" `
-            --notes-file "dist\RELEASE_NOTES.md"
+          retention-days: 14

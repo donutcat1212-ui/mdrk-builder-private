@@ -7,12 +7,12 @@ from mdrk_builder.domain import Episode, SourceDocument, SpecialistRole
 
 def _valid_episode(folder: Path) -> Episode:
     episode = Episode(folder=folder)
-    episode.identity.full_name = "Тестов Тест Тестович"
-    episode.identity.medical_record_number = "123"
+    episode.identity.full_name = "ПАЦИЕНТ_ТЕСТ"
+    episode.identity.medical_record_number = "НОМЕР_ТЕСТ"
     episode.admission_datetime = datetime(2026, 8, 9, 12, 0)
     episode.initial_meeting_at = datetime(2026, 8, 10, 8, 0)
-    episode.initial_sections.clinical_diagnosis = "Диагноз"
-    episode.sections.clinical_diagnosis = "Диагноз"
+    episode.initial_sections.clinical_diagnosis = "МАРКЕР_ДИАГНОЗА"
+    episode.sections.clinical_diagnosis = "МАРКЕР_ДИАГНОЗА"
     episode.sources.append(
         SourceDocument(folder / "doctor.docx", role=SpecialistRole.NEUROLOGIST)
     )

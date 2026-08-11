@@ -166,7 +166,7 @@ class _ImmediateThread:
 
 def _entry_values(meeting: str) -> dict[str, _Variable]:
     return {
-        "full_name": _Variable("Тестов Тест Тестович"),
+        "full_name": _Variable("ПАЦИЕНТ_ТЕСТ"),
         "record_number": _Variable("123"),
         "birth_date": _Variable("01.01.2000"),
         "sex": _Variable("мужской"),
@@ -379,7 +379,7 @@ def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
 ) -> None:
     app = object.__new__(MdrkBuilderApp)
     app.episode = Episode(folder=tmp_path)
-    app.episode.identity.full_name = "Сохранённый Пациент Тестович"
+    app.episode.identity.full_name = "ПАЦИЕНТ_СОХРАНЁННЫЙ"
     app.episode.initial_meeting_at = datetime(2026, 8, 10, 8)
     app.episode.initial_sections.clinical_diagnosis = "сохранённый"
     app._current_kind = MdrkKind.INITIAL
@@ -396,7 +396,7 @@ def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
 
     assert not app._apply_form()
     assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 8)
-    assert app.episode.identity.full_name == "Сохранённый Пациент Тестович"
+    assert app.episode.identity.full_name == "ПАЦИЕНТ_СОХРАНЁННЫЙ"
     assert app.episode.initial_sections.clinical_diagnosis == "сохранённый"
     assert app._text_fields["clinical_diagnosis"].value == "не потерять"
     assert errors and "Сканировать" in errors[0]
@@ -598,8 +598,8 @@ def test_folder_edit_invalidates_loaded_episode(tmp_path) -> None:
     app._setting_folder_field = False
     app._last_form_error = ""
     app._scanning = False
-    app._entry_variables = {"full_name": _Variable("Старый пациент")}
-    app._text_fields = {"clinical_diagnosis": _Text("Старый диагноз")}
+    app._entry_variables = {"full_name": _Variable("ПАЦИЕНТ_СТАРЫЙ")}
+    app._text_fields = {"clinical_diagnosis": _Text("ДИАГНОЗ_СТАРЫЙ")}
     app.folder_var = _Variable(str(tmp_path / "other"))
     app.status_var = _Variable()
     app.scan_button = _Button()

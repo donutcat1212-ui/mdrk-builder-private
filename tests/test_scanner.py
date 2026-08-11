@@ -90,7 +90,7 @@ def test_initial_mdrk_day_rule_for_each_admission_weekday() -> None:
     assert {value: _initial_mdrk_day(value) for value in cases} == cases
 
 
-def test_meeting_dates_use_clinic_weekend_rule_and_actual_course_length() -> None:
+def test_meeting_dates_use_clinic_weekend_rule_and_ignore_discharge_boundary() -> None:
     record = _record(
         "/patient/source.docx",
         "Дата и время поступления: 05.06.2026 12:12\n"
@@ -106,7 +106,8 @@ def test_meeting_dates_use_clinic_weekend_rule_and_actual_course_length() -> Non
     assert episode.admission_datetime == datetime(2026, 6, 5, 12, 12)
     assert episode.initial_meeting_at == datetime(2026, 6, 8, 8, 0)
     assert episode.final_meeting_at == datetime(2026, 6, 19, 11, 30)
-    assert episode.course_duration_days == 16
+    assert episode.discharge_datetime is None
+    assert episode.course_duration_days == 14
 
 
 def test_explicit_final_mdrk_schedule_overrides_latest_specialist_time() -> None:
@@ -140,7 +141,7 @@ def test_explicit_final_mdrk_schedule_overrides_latest_specialist_time() -> None
     assert episode.final_meeting_at == datetime(2026, 6, 19, 15, 30)
 
 
-def test_discharge_date_does_not_create_final_mdrk_meeting() -> None:
+def test_discharge_date_is_not_materialized_or_used_as_course_boundary() -> None:
     record = _record(
         "/patient/source.docx",
         "Дата и время поступления: 05.06.2026 12:12\n"
@@ -152,8 +153,8 @@ def test_discharge_date_does_not_create_final_mdrk_meeting() -> None:
 
     _merge_dates(episode, [record])
 
-    assert episode.discharge_datetime == datetime(2026, 6, 21, 12)
-    assert episode.course_duration_days == 16
+    assert episode.discharge_datetime is None
+    assert episode.course_duration_days is None
     assert episode.final_meeting_at is None
 
 
@@ -172,7 +173,7 @@ def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
         for value in (
             heading,
             f"Дата осмотра: {examined_at}",
-            "ФИО пациента: Тестов Тест Тестович",
+            "ФИО пациента: АЛЬФА БЕТА ГАММА",
             "Номер ИБ: 123/26",
             "Дата и время поступления: 05.06.2026 12:00",
             f"Клинический диагноз: {diagnosis}",
@@ -216,12 +217,12 @@ def test_mixed_record_numbers_and_admission_dates_are_blocking() -> None:
     records = [
         _record(
             "/patient/stay-1.docx",
-            "ФИО пациента: Тестов Тест Тестович\nНомер ИБ: СКП100/26\n"
+            "ФИО пациента: АЛЬФА БЕТА ГАММА\nНомер ИБ: СКП100/26\n"
             "Дата и время поступления: 05.06.2026 12:00",
         ),
         _record(
             "/patient/stay-2.docx",
-            "ФИО пациента: Тестов Тест Тестович\nНомер ИБ: СКП200/26\n"
+            "ФИО пациента: АЛЬФА БЕТА ГАММА\nНомер ИБ: СКП200/26\n"
             "Дата и время поступления: 01.07.2026 09:00",
         ),
     ]
@@ -312,7 +313,7 @@ def test_scan_overrides_select_episode_before_materialization(tmp_path) -> None:
         for value in (
             "Первичный осмотр невролога",
             f"Дата осмотра: {examined_at}",
-            "ФИО пациента: Тестов Тест Тестович",
+            "ФИО пациента: АЛЬФА БЕТА ГАММА",
             f"Номер ИБ: {record_number}",
             f"Дата и время поступления: {admission}",
             f"Клинический диагноз: {diagnosis}",
@@ -367,7 +368,7 @@ def test_unknown_record_number_override_is_blocking(tmp_path) -> None:
     for value in (
         "Первичный осмотр невролога",
         "Дата осмотра: 05.06.2026 13:00",
-        "ФИО пациента: Тестов Тест Тестович",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
         "Номер ИБ: СКП100/26",
         "Дата и время поступления: 05.06.2026 12:00",
         "Клинический диагноз: тестовый диагноз",
@@ -393,7 +394,7 @@ def test_different_medical_record_stays_visible_but_cannot_supply_episode_data()
     records = [
         _record(
             physician_path,
-            "ФИО пациента: Тестов Тест Тестович\n"
+            "ФИО пациента: АЛЬФА БЕТА ГАММА\n"
             "Номер ИБ: СКП9002/99\n"
             "Дата и время поступления: 01.08.2026 09:11\n"
             "Клинический диагноз: реабилитационный диагноз\n"
@@ -404,7 +405,7 @@ def test_different_medical_record_stays_visible_but_cannot_supply_episode_data()
         ),
         _record(
             cardiology_path,
-            "ФИО пациента: Тестов Тест Тестович\n"
+            "ФИО пациента: АЛЬФА БЕТА ГАММА\n"
             "Номер ИБ: СКП9003/99\n"
             "Дата и время поступления: 28.07.2026 14:17\n"
             "Дата и время выписки: 01.08.2026 12:00\n"

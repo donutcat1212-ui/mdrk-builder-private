@@ -19,7 +19,6 @@ from mdrk_builder.application.extractors import (
     extract_clinical_datetime,
     extract_clinical_sections,
     extract_conclusion,
-    extract_discharge_datetime,
     extract_icf_observations,
     extract_mdrk_document_datetime,
     extract_mdrk_meeting_datetimes,
@@ -291,9 +290,11 @@ def _merge_dates(
                 "admission_datetime",
             )
         )
-    discharge_values = [extract_discharge_datetime(item.document) for item in records]
-    discharge_present = [value for value in discharge_values if value is not None]
-    episode.discharge_datetime = max(discharge_present) if discharge_present else None
+    # MDRK is prepared before discharge.  A discharge date found in a source is
+    # therefore neither a meeting boundary nor an episode validation boundary.
+    # Keep it out of the materialized episode entirely so a discharge summary
+    # cannot silently move or block an MDRK snapshot.
+    episode.discharge_datetime = None
     if episode.admission_datetime:
         episode.initial_meeting_at = datetime.combine(
             _initial_mdrk_day(episode.admission_datetime.date()), time(8, 0)
@@ -303,7 +304,6 @@ def _merge_dates(
         for item in records
         for meeting in extract_mdrk_meeting_datetimes(item.document)
         if (episode.initial_meeting_at is None or meeting > episode.initial_meeting_at)
-        and (episode.discharge_datetime is None or meeting <= episode.discharge_datetime)
     ]
     final_candidates = [
         item.clinical_datetime
@@ -328,9 +328,9 @@ def _merge_dates(
         episode.final_meeting_at = max(scheduled_final_candidates)
     elif latest_source:
         episode.final_meeting_at = latest_source
-    if episode.admission_datetime and episode.discharge_datetime:
+    if episode.admission_datetime and episode.final_meeting_at:
         duration_days = (
-            episode.discharge_datetime.date() - episode.admission_datetime.date()
+            episode.final_meeting_at.date() - episode.admission_datetime.date()
         ).days
         if duration_days > 0:
             episode.course_duration_days = duration_days
@@ -338,6 +338,8 @@ def _merge_dates(
             episode.course_duration_days = 1
         else:
             episode.course_duration_days = None
+    else:
+        episode.course_duration_days = None
 
 
 def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) -> None:

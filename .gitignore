@@ -21,6 +21,12 @@ dist/
 output/
 workspace/
 
+# Pilot feedback may contain personal or medical details and must never enter
+# version control. The packaged copies live under the already ignored dist/.
+issues.txt
+issues.txt.lock
+.issues-pending-*.txt
+
 # Clinical/source documents are denied by default. The only Word file allowed
 # in version control is the sanitized canonical runtime template.
 *.doc

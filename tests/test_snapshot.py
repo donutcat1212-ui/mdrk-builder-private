@@ -18,12 +18,12 @@ def _finding(role: SpecialistRole, when: datetime, conclusion: str) -> Specialis
         role=role,
         conclusion=conclusion,
         source_datetime=when,
-        source=Path(f"/{conclusion}.docx"),
+        source=Path(f"fixtures/{conclusion}.docx"),
     )
 
 
 def test_snapshot_selects_latest_finding_not_after_meeting() -> None:
-    episode = Episode(folder=Path("/episode"))
+    episode = Episode(folder=Path("fixtures/episode"))
     episode.initial_meeting_at = datetime(2026, 6, 6, 8)
     episode.final_meeting_at = datetime(2026, 6, 20, 11)
     episode.findings = [
@@ -40,22 +40,22 @@ def test_snapshot_selects_latest_finding_not_after_meeting() -> None:
 
 
 def test_latest_scale_only_diary_does_not_replace_latest_conclusion() -> None:
-    episode = Episode(folder=Path("/episode"))
+    episode = Episode(folder=Path("fixtures/episode"))
     episode.final_meeting_at = datetime(2026, 6, 20, 11)
     role = SpecialistRole.LOGOPEDIST
     episode.findings = [
-        _finding(role, datetime(2026, 6, 18, 10), "содержательное заключение"),
+        _finding(role, datetime(2026, 6, 18, 10), "ЗАКЛЮЧЕНИЕ_ТЕСТ"),
         SpecialistFinding(
             role=role,
             source_datetime=datetime(2026, 6, 19, 10),
-            source=Path("/copied-scale-diary.docx"),
+            source=Path("fixtures/copied-scale-diary.docx"),
             scales=[
                 ScaleMeasurement(
                     "MASA",
                     "180",
                     datetime(2026, 6, 19, 10),
                     role,
-                    Path("/copied-scale-diary.docx"),
+                    Path("fixtures/copied-scale-diary.docx"),
                 )
             ],
         ),
@@ -63,27 +63,27 @@ def test_latest_scale_only_diary_does_not_replace_latest_conclusion() -> None:
 
     snapshot = build_snapshot(episode, MdrkKind.FINAL)
 
-    assert snapshot.findings[0].conclusion == "содержательное заключение"
+    assert snapshot.findings[0].conclusion == "ЗАКЛЮЧЕНИЕ_ТЕСТ"
 
 
 def test_empty_status_diary_does_not_replace_latest_conclusion() -> None:
-    episode = Episode(folder=Path("/episode"))
+    episode = Episode(folder=Path("fixtures/episode"))
     episode.final_meeting_at = datetime(2026, 6, 20, 11)
     role = SpecialistRole.LOGOPEDIST
     episode.findings = [
-        _finding(role, datetime(2026, 6, 18, 10), "содержательное заключение"),
+        _finding(role, datetime(2026, 6, 18, 10), "ЗАКЛЮЧЕНИЕ_ТЕСТ"),
         _finding(role, datetime(2026, 6, 19, 10), "без изменений"),
     ]
 
     snapshot = build_snapshot(episode, MdrkKind.FINAL)
 
-    assert snapshot.findings[0].conclusion == "содержательное заключение"
+    assert snapshot.findings[0].conclusion == "ЗАКЛЮЧЕНИЕ_ТЕСТ"
 
 
 def test_final_snapshot_uses_fixed_goal_and_tasks() -> None:
-    episode = Episode(folder=Path("/episode"))
-    episode.sections.goal = "Исходная цель"
-    episode.sections.tasks = "Исходные задачи"
+    episode = Episode(folder=Path("fixtures/episode"))
+    episode.sections.goal = "ЦЕЛЬ_ТЕСТ"
+    episode.sections.tasks = "ЗАДАЧИ_ТЕСТ"
 
     snapshot = build_snapshot(episode, MdrkKind.FINAL)
 
@@ -92,20 +92,20 @@ def test_final_snapshot_uses_fixed_goal_and_tasks() -> None:
 
 
 def test_snapshot_selects_clinical_sections_for_kind() -> None:
-    episode = Episode(folder=Path("/episode"))
-    episode.initial_sections.clinical_diagnosis = "исходный диагноз"
-    episode.initial_sections.goal = "исходная цель"
-    episode.sections.clinical_diagnosis = "итоговый диагноз"
-    episode.sections.goal = "поздняя формулировка цели"
+    episode = Episode(folder=Path("fixtures/episode"))
+    episode.initial_sections.clinical_diagnosis = "ДИАГНОЗ_ИСХОДНЫЙ"
+    episode.initial_sections.goal = "ЦЕЛЬ_ИСХОДНАЯ"
+    episode.sections.clinical_diagnosis = "ДИАГНОЗ_ИТОГОВЫЙ"
+    episode.sections.goal = "ЦЕЛЬ_ИТОГОВАЯ"
 
     initial = build_snapshot(episode, MdrkKind.INITIAL)
     final = build_snapshot(episode, MdrkKind.FINAL)
 
     assert initial.sections is episode.initial_sections
-    assert initial.sections.clinical_diagnosis == "исходный диагноз"
-    assert initial.goal == "исходная цель"
+    assert initial.sections.clinical_diagnosis == "ДИАГНОЗ_ИСХОДНЫЙ"
+    assert initial.goal == "ЦЕЛЬ_ИСХОДНАЯ"
     assert final.sections is episode.sections
-    assert final.sections.clinical_diagnosis == "итоговый диагноз"
+    assert final.sections.clinical_diagnosis == "ДИАГНОЗ_ИТОГОВЫЙ"
     assert final.goal == FINAL_GOAL
 
 

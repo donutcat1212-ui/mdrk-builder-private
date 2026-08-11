@@ -6,9 +6,9 @@
   MDRK-2 DOCX files from one rehabilitation episode folder.
 - Supported inputs: DOCX, DOC and RTF. Ignore PDF.
 - Never modify source patient documents.
-- Legacy hand-filled MDRKs are structural examples, not authorities for their
-  mistakes. The current source documents plus the rules in `CONTEXT.md` and
-  `docs/acceptance.md` are authoritative.
+- Local hand-filled MDRKs may be used only for private validation and are never
+  committed or distributed. Their mistakes are not program rules. Current
+  episode sources plus `CONTEXT.md` and `docs/acceptance.md` are authoritative.
 
 ## Domain invariants
 
@@ -16,7 +16,8 @@
 - Select the latest document per specialist by clinical date/time inside the
   document and not by filename or filesystem metadata.
 - Missing optional specialists are not errors.
-- Do not import other specialists' `b/d/Pf` domains from a neurologist source.
+- Do not import rows explicitly assigned to another specialist from a physician
+  source. Preserve ownerless domains and the episode-level `Pf` description.
 - Count completed procedures by date cells containing `+`; do not copy legacy
   MDRK counts.
 - Keep uncertain or missing values empty and visible as review issues; never
@@ -42,6 +43,7 @@ PYTHONPATH=src uv run --with 'pytest>=8.3,<10' pytest -q
 PYTHONPATH=src python -m compileall -q src tests
 ```
 
-Render every generated DOCX and inspect every page before delivery. A Windows
-EXE is complete only after it has been built on Windows and smoke-tested with
-desktop Word on a clean profile without Python.
+Render every generated DOCX and inspect every page before delivery. Reference
+documents used for that check remain local and outside version control. A
+Windows EXE is complete only after it has been built on Windows and smoke-tested
+with desktop Word on a clean profile without Python.

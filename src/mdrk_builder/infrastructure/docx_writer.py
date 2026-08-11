@@ -831,10 +831,34 @@ class _DocumentRenderer:
             set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER, keep_with_next=True)
         mark_header_row(table.rows[0])
 
-        for table_row, signatory in zip(table.rows[1:], rows, strict=True):
-            set_cell_text(table_row.cells[0], signatory.display_role, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
-            set_cell_text(table_row.cells[1], signatory.full_name, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
-            set_cell_text(table_row.cells[2], "", style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+        for index, (table_row, signatory) in enumerate(
+            zip(table.rows[1:], rows, strict=True)
+        ):
+            # The roster is short enough to stay on one page. Chaining every
+            # row except the last prevents Word from leaving one or two
+            # signatures alone on a following page.
+            keep_with_next = index < len(rows) - 1
+            set_cell_text(
+                table_row.cells[0],
+                signatory.display_role,
+                style=STYLE_TABLE,
+                alignment=WD_ALIGN_PARAGRAPH.LEFT,
+                keep_with_next=keep_with_next,
+            )
+            set_cell_text(
+                table_row.cells[1],
+                signatory.full_name,
+                style=STYLE_TABLE,
+                alignment=WD_ALIGN_PARAGRAPH.LEFT,
+                keep_with_next=keep_with_next,
+            )
+            set_cell_text(
+                table_row.cells[2],
+                "",
+                style=STYLE_TABLE,
+                alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                keep_with_next=keep_with_next,
+            )
 
     def _resolved_signatories(self) -> tuple[SignatoryRow, ...]:
         rows = list(SIGNATORY_ROSTER)

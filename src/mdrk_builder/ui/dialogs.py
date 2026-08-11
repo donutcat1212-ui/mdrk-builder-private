@@ -5,6 +5,11 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
+from mdrk_builder.application.feedback import (
+    FEEDBACK_CATEGORIES,
+    MAX_FEEDBACK_MESSAGE_LENGTH,
+    FeedbackSubmission,
+)
 from mdrk_builder.domain import (
     IcfDomain,
     MdrkKind,
@@ -147,6 +152,94 @@ def _select_all_text(widget: Any) -> str | None:
     except (AttributeError, tk.TclError):
         return None
     return "break"
+
+
+class FeedbackDialog(simpledialog.Dialog):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        initial: FeedbackSubmission | None = None,
+    ) -> None:
+        self.initial = initial
+        self.result: FeedbackSubmission | None = None
+        self._category = tk.StringVar(
+            value=initial.category if initial else FEEDBACK_CATEGORIES[0]
+        )
+        self._author = tk.StringVar(value=initial.author if initial else "")
+        self._message: tk.Text | None = None
+        super().__init__(parent, "Обратная связь")
+
+    def body(self, master: tk.Frame) -> tk.Widget:
+        ttk.Label(
+            master,
+            text=(
+                "В issues.txt попадают только поля, которые вы заполните. "
+                "Данные пациента, выбранная папка и логи не добавляются автоматически."
+            ),
+            wraplength=540,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(5, 10))
+
+        ttk.Label(master, text="Тип").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        category = ttk.Combobox(
+            master,
+            textvariable=self._category,
+            values=FEEDBACK_CATEGORIES,
+            state="readonly",
+            width=24,
+        )
+        category.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(master, text="Имя или контакт (необязательно)").grid(
+            row=2, column=0, sticky="w", padx=6, pady=4
+        )
+        ttk.Entry(master, textvariable=self._author, width=52).grid(
+            row=2, column=1, sticky="ew", padx=6, pady=4
+        )
+
+        ttk.Label(master, text="Сообщение").grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(8, 2)
+        )
+        self._message = tk.Text(master, width=72, height=12, wrap="word", undo=True)
+        self._message.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        if self.initial:
+            self._message.insert("1.0", self.initial.message)
+
+        master.columnconfigure(1, weight=1)
+        master.rowconfigure(4, weight=1)
+        return self._message
+
+    def buttonbox(self) -> None:
+        box = ttk.Frame(self)
+        ttk.Button(box, text="Сохранить", width=12, command=self.ok).pack(
+            side="left", padx=5, pady=5
+        )
+        ttk.Button(box, text="Отмена", width=12, command=self.cancel).pack(
+            side="left", padx=5, pady=5
+        )
+        self.bind("<Escape>", self.cancel)
+        box.pack()
+
+    def validate(self) -> bool:
+        message = self._message.get("1.0", "end-1c").strip() if self._message else ""
+        if not message:
+            messagebox.showerror("Проверьте данные", "Введите текст сообщения", parent=self)
+            return False
+        if len(message) > MAX_FEEDBACK_MESSAGE_LENGTH:
+            messagebox.showerror(
+                "Проверьте данные",
+                f"Сообщение слишком длинное: максимум {MAX_FEEDBACK_MESSAGE_LENGTH} символов",
+                parent=self,
+            )
+            return False
+        return True
+
+    def apply(self) -> None:
+        self.result = FeedbackSubmission(
+            category=self._category.get(),
+            author=self._author.get().strip(),
+            message=self._message.get("1.0", "end-1c").strip() if self._message else "",
+        )
 
 
 class IcfDomainDialog(simpledialog.Dialog):

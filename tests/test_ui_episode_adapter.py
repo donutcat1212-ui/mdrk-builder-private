@@ -62,7 +62,7 @@ def test_form_is_parsed_before_selected_snapshot_is_mutated(tmp_path) -> None:
     episode.initial_sections.clinical_diagnosis = "исходный"
     episode.sections.clinical_diagnosis = "итоговый"
     entries = {
-        "full_name": "Тестов Тест Тестович",
+        "full_name": "ПАЦИЕНТ_ТЕСТ",
         "record_number": "123",
         "birth_date": "01.01.2000",
         "sex": "мужской",

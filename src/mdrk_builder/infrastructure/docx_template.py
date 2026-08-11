@@ -207,7 +207,16 @@ def _sanitize_package(path: Path) -> None:
     with ZipFile(path) as source, ZipFile(temporary, "w", ZIP_DEFLATED) as target:
         for info in source.infolist():
             name = info.filename
-            if name.startswith("customXml/") or name == "docProps/thumbnail.jpeg":
+            lowered = name.casefold()
+            if (
+                lowered.startswith("customxml/")
+                or lowered.startswith("word/comments")
+                or lowered in {
+                    "docprops/custom.xml",
+                    "docprops/thumbnail.jpeg",
+                    "word/people.xml",
+                }
+            ):
                 continue
             data = source.read(name)
             if name == "[Content_Types].xml":
@@ -216,8 +225,23 @@ def _sanitize_package(path: Path) -> None:
                 data = _sanitize_relationships(data, {"docProps/thumbnail.jpeg"})
             elif name == "word/_rels/document.xml.rels":
                 data = _sanitize_relationships(data, {"../customXml/item1.xml"})
+            elif lowered.endswith(".xml"):
+                data = _strip_revision_session_ids(data)
             target.writestr(info, data)
     replace(temporary, path)
+
+
+def _strip_revision_session_ids(data: bytes) -> bytes:
+    root = etree.fromstring(data)
+    for element in root.iter():
+        for attribute in list(element.attrib):
+            if etree.QName(attribute).localname.casefold().startswith("rsid"):
+                del element.attrib[attribute]
+    for element in list(root.iter()):
+        for child in list(element):
+            if etree.QName(child).localname in {"rsid", "rsidRoot", "rsids"}:
+                element.remove(child)
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
 def _sanitize_content_types(data: bytes) -> bytes:

@@ -26,7 +26,7 @@ from mdrk_builder.infrastructure.ooxml_reader import (
 def _document(
     text: str = "",
     *,
-    path: str = "/patient/source.docx",
+    path: str = "fixtures/source.docx",
     tables: list[ParsedTable] | None = None,
 ) -> ParsedDocument:
     paragraphs = [text] if text else []
@@ -58,7 +58,7 @@ def test_clinical_datetime_prefers_labeled_document_time_over_filename() -> None
                 '"05"июня 2026 г. время: 14 час.30 мин.',
             )
         ),
-        path="/patient/фт/1 осмотр_05.06.26_16.10.docx",
+        path="fixtures/фт/1 осмотр_05.06.26_16.10.docx",
     )
 
     assert extract_clinical_datetime(document) == datetime(2026, 6, 5, 14, 30)
@@ -75,35 +75,35 @@ def test_clinical_datetime_accepts_space_inside_numeric_date() -> None:
 
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:
     document = _document(
-        "Фамилия, имя, отчество: Тестов Тест Тестович\n"
-        "СКП: 9001 /99\nДата рождения: 01.01.1970\nПол: муж"
+        "Фамилия, имя, отчество: АЛЬФА БЕТА ГАММА\n"
+        "СКП: 0000 /00\nДата рождения: 01.01.1900\nПол: муж"
     )
 
     identity = extract_patient_identity(document)
 
-    assert identity.full_name == "Тестов Тест Тестович"
-    assert identity.medical_record_number == "СКП9001/99"
+    assert identity.full_name == "АЛЬФА БЕТА ГАММА"
+    assert identity.medical_record_number == "СКП0000/00"
     assert identity.sex == "мужской"
-    assert identity.birth_date and identity.birth_date.isoformat() == "1970-01-01"
+    assert identity.birth_date and identity.birth_date.isoformat() == "1900-01-01"
 
 
 def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
     document = _document(
         "\n".join(
             (
-                "Клинический диагноз: I69.3",
+                "Клинический диагноз: ДИАГНОЗ_ТЕСТ",
                 "Реабилитационный диагноз: не копировать",
                 "Факторы риска проведения реабилитационных мероприятий: нет",
                 "Диагноз клинический: не копировать",
-                "Медикаментозная терапия: Лозартан 25 мг",
+                "Медикаментозная терапия: ТЕРАПИЯ_ТЕСТ",
                 "немедикаментозное лечение: ЛФК",
                 "Свободный двигательный режим;",
                 "Диета: ОВД",
-                "Фамилия, имя, отчество: Врач Тест Тестович",
-                "Пациентом предоставлены необходимые для госпитализации документы Клинический анализ крови: норма",
-                "ВИЧ, вирусные гепатиты: отрицательно",
-                "ЭКГ от 05.06.2026: ритм синусовый",
-                "Рентгенография ОГК: без патологии",
+                "Фамилия, имя, отчество: ДЕЛЬТА ЭПСИЛОН ДЗЕТА",
+                "Пациентом предоставлены необходимые для госпитализации документы Клинический анализ крови: ЛАБ_1",
+                "Клинический анализ мочи: ЛАБ_2",
+                "ЭКГ от 05.06.2026: ИНСТ_1",
+                "Рентгенография ОГК: ИНСТ_2",
                 "Физикальное исследование, локальный статус",
             )
         )
@@ -111,9 +111,9 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
 
     sections = extract_clinical_sections(document)
 
-    assert sections["clinical_diagnosis"] == "I69.3"
+    assert sections["clinical_diagnosis"] == "ДИАГНОЗ_ТЕСТ"
     assert sections["risks"] == "нет"
-    assert sections["medication"] == "Лозартан 25 мг"
+    assert sections["medication"] == "ТЕРАПИЯ_ТЕСТ"
     assert sections["movement_regimen"] == "свободный"
     assert sections["diet"] == "ОВД"
     assert "Клинический анализ" in sections["laboratory_results"]
@@ -122,14 +122,14 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
 
 def test_section_does_not_absorb_discharge_metadata() -> None:
     document = _document(
-        "Анамнез заболевания: Острое начало.\n"
+        "Анамнез заболевания: АНАМНЕЗ_ТЕСТ.\n"
         "Дата и время выписки: 20.08.2026 12:00\n"
-        "Клинический диагноз: I69.3"
+        "Клинический диагноз: ДИАГНОЗ_ТЕСТ"
     )
 
     sections = extract_clinical_sections(document)
 
-    assert sections["disease_history"] == "Острое начало."
+    assert sections["disease_history"] == "АНАМНЕЗ_ТЕСТ."
     assert "выписк" not in sections["disease_history"].casefold()
 
 
@@ -137,10 +137,10 @@ def test_sections_split_completed_interventions_and_prefixed_movement_regimen() 
     document = _document(
         "\n".join(
             (
-                "Выполненные медицинские вмешательства Клинический анализ крови: норма",
-                "Клинический анализ мочи: без патологии",
-                "Рентгенография ОГК: без очаговых изменений",
-                "ЭКГ: ритм синусовый",
+                "Выполненные медицинские вмешательства Клинический анализ крови: ЛАБ_1",
+                "Клинический анализ мочи: ЛАБ_2",
+                "Рентгенография ОГК: ИНСТ_1",
+                "ЭКГ: ИНСТ_2",
                 "Консультация хирурга: не копировать",
                 "План лечения Двигательный режим свободный",
             )
@@ -162,9 +162,9 @@ def test_plan_treatment_preserves_medication_lines_and_short_regimen() -> None:
                 "План лечения Режим свободный",
                 "Диета ОВД",
                 "Назначения Медикаментозная терапия:",
-                "С гипотензивной целью: Perindoprili 4 mg утром",
-                "Таб. Индапамид 1,5 мг утром",
-                "С гиполипидемической целью: Atorvastatini 40 мг вечером",
+                "ТЕРАПИЯ_СТРОКА_1",
+                "ТЕРАПИЯ_СТРОКА_2",
+                "ТЕРАПИЯ_СТРОКА_3",
                 "Немедикаментозная терапия:",
             )
         )
@@ -174,17 +174,17 @@ def test_plan_treatment_preserves_medication_lines_and_short_regimen() -> None:
 
     assert sections["movement_regimen"] == "свободный"
     assert sections["medication"].splitlines() == [
-        "С гипотензивной целью: Perindoprili 4 mg утром",
-        "Таб. Индапамид 1,5 мг утром",
-        "С гиполипидемической целью: Atorvastatini 40 мг вечером",
+        "ТЕРАПИЯ_СТРОКА_1",
+        "ТЕРАПИЯ_СТРОКА_2",
+        "ТЕРАПИЯ_СТРОКА_3",
     ]
 
 
 def test_completed_interventions_split_inline_instrumental_marker() -> None:
     document = _document(
         "Выполненные медицинские вмешательства "
-        "Клинический анализ крови от 01.08.2026: норма. "
-        "Рентгенография ОГК от 01.08.2026: без особенностей. "
+        "Клинический анализ крови от 01.08.2026: ЛАБ_1. "
+        "Рентгенография ОГК от 01.08.2026: ИНСТ_1. "
         "План лечения: Двигательный режим: свободный"
     )
 
@@ -200,10 +200,10 @@ def test_numbered_completed_interventions_split_and_stop_cleanly() -> None:
     document = _document(
         "\n".join(
             (
-                "1. Выполненные медицинские вмешательства Клинический анализ крови: норма",
-                "1.1 Клинический анализ мочи: без патологии",
-                "2. Рентгенография ОГК: без очаговых изменений",
-                "2.1 ЭКГ: ритм синусовый",
+                "1. Выполненные медицинские вмешательства Клинический анализ крови: ЛАБ_1",
+                "1.1 Клинический анализ мочи: ЛАБ_2",
+                "2. Рентгенография ОГК: ИНСТ_1",
+                "2.1 ЭКГ: ИНСТ_2",
                 "3. План лечения Двигательный режим свободный",
             )
         )
@@ -222,16 +222,16 @@ def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> Non
     document = _document(
         "\n".join(
             (
-                "Заключение по результатам предшествующего обследования: старое",
+                "Заключение по результатам предшествующего обследования: МАРКЕР_СТАРЫЙ",
                 "Нейропсихологический статус:",
-                "1. Сохранность высших психических функций.",
+                "1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА.",
                 "Исследование анамнеза: дальше не включать",
             )
         )
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. Сохранность высших психических функций."
+        "1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА."
     )
 
 
@@ -240,36 +240,36 @@ def test_conclusion_accepts_topical_neuropsych_heading_and_stops_at_recommendati
         "\n".join(
             (
                 "Нейропсихологический статус и топический диагноз :",
-                "1. Снижение нейродинамических показателей.",
-                "2. Нарушение произвольной регуляции.",
+                "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.",
+                "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.",
                 "На основании данных рекомендован курс: не включать",
             )
         )
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. Снижение нейродинамических показателей. "
-        "2. Нарушение произвольной регуляции."
+        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1. "
+        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2."
     )
 
 
 def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:
     document = _document(
-        "Нейропсихологический статус и топический диагноз: лобная дисфункция\n"
+        "Нейропсихологический статус и топический диагноз: ДИАГНОЗ_НЕЙРОПСИХОЛОГА\n"
         "Рекомендовано: занятия"
     )
 
-    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == "лобная дисфункция"
+    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == "ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
 
 
 def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
     document = _document(
         "\n".join(
             (
-                "Понимание речи сохранено.",
-                "Т.о. на момент исследования нарушений не выявлено.",
-                "На основании данных логопедические занятия не показаны.",
-                "Медицинский логопед Тестова А.А.",
+                "ВВОДНЫЙ_ТЕКСТ.",
+                "Т.о. ЗАКЛЮЧЕНИЕ_ЛОГОПЕДА.",
+                "На основании данных РЕКОМЕНДАЦИЯ_ТЕСТ.",
+                "Медицинский логопед АЛЬФА А.А.",
             )
         )
     )
@@ -277,8 +277,8 @@ def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
     conclusion = extract_conclusion(document, SpecialistRole.LOGOPEDIST)
 
     assert conclusion.startswith("Т.о.")
-    assert "занятия не показаны" in conclusion
-    assert "Тестова" not in conclusion
+    assert "РЕКОМЕНДАЦИЯ_ТЕСТ" in conclusion
+    assert "АЛЬФА" not in conclusion
 
 
 def test_icf_extracts_owner_and_preserves_merged_personal_factor() -> None:
@@ -287,7 +287,7 @@ def test_icf_extracts_owner_and_preserves_merged_personal_factor() -> None:
             _row({0: "МКФ", 13: "Ответственный специалист МДРК"}, 15),
             _row({0: "b2351", 1: "Равновесие", 11: "2", 12: "1", 13: "ФТ"}, 15),
             ParsedRow(
-                (ParsedCell(0, 1, "Pf"), ParsedCell(1, 14, "Мужчина 58 лет")),
+                (ParsedCell(0, 1, "Pf"), ParsedCell(1, 14, "ПЕРСОНАЛЬНЫЙ_ФАКТОР_ТЕСТ")),
                 15,
             ),
         )
@@ -299,7 +299,7 @@ def test_icf_extracts_owner_and_preserves_merged_personal_factor() -> None:
     assert [value.display() for value in observations[0].ratings] == ["2", "1"]
     assert observations[0].note == ""
     assert observations[1].code == "Pf"
-    assert observations[1].description == "Мужчина 58 лет"
+    assert observations[1].description == "ПЕРСОНАЛЬНЫЙ_ФАКТОР_ТЕСТ"
     assert observations[1].ratings == ()
 
 
@@ -324,7 +324,7 @@ def test_procedure_count_is_number_of_plus_marks_and_zero_is_not_missing() -> No
                 {
                     0: "A19.23.002.014 Индивидуальное занятие ЛФК",
                     1: "08:00",
-                    2: "42",
+                    2: "КАБИНЕТ_А",
                     3: "+",
                     4: "10.55++",
                     5: "30 мин",
@@ -335,7 +335,7 @@ def test_procedure_count_is_number_of_plus_marks_and_zero_is_not_missing() -> No
                 {
                     0: "A13.23.007 Медико-логопедическая процедура",
                     1: "13:00",
-                    2: "холл",
+                    2: "КАБИНЕТ_Б",
                     5: "20 мин",
                 },
                 6,
@@ -369,14 +369,14 @@ def test_assignment_dates_infer_frequency_and_include_sis_without_code() -> None
                 {
                     0: "A19.23.002.014 Индивидуальное занятие ЛФК",
                     1: "11:00",
-                    2: "7042",
+                    2: "КАБИНЕТ_А",
                     **daily_marks,
                     17: "30 мин",
                 },
                 18,
             ),
             _row(
-                {0: "SiS терапия", 1: "15:50", 2: "238к", **sis_marks, 17: "30мин"},
+                {0: "SiS терапия", 1: "15:50", 2: "КАБИНЕТ_Б", **sis_marks, 17: "30мин"},
                 18,
             ),
             _row(
@@ -418,7 +418,7 @@ def test_scale_short_date_headers_use_document_year_and_role() -> None:
             _row({0: "Шкала баланса Берга", 1: "44", 2: "48"}, 3),
         )
     )
-    document = _document(tables=[table], path="/patient/ft.docx")
+    document = _document(tables=[table], path="fixtures/ft.docx")
 
     values = extract_scale_measurements(
         document,
@@ -570,8 +570,8 @@ def test_mdrk_datetime_and_scale_roles_are_read_from_local_headings() -> None:
         "Результат осмотра специалиста по физической реабилитации:",
     ]
     document = ParsedDocument(
-        source_path=Path("/patient/mdrk.docx"),
-        normalized_path=Path("/patient/mdrk.docx"),
+        source_path=Path("fixtures/mdrk.docx"),
+        normalized_path=Path("fixtures/mdrk.docx"),
         paragraphs=paragraphs,
         tables=[physician, physical],
         body_items=[
@@ -653,10 +653,10 @@ def test_physician_scales_are_extracted_from_bounded_narrative_lines() -> None:
 
 def test_conclusion_stops_before_specialist_signature_line() -> None:
     document = _document(
-        "Заключение: Отмечается положительная динамика.\n"
-        "Примеров П.П., специалист по физической реабилитации /_______________/"
+        "Заключение: ЗАКЛЮЧЕНИЕ_ФТ.\n"
+        "АЛЬФА А.А., специалист по физической реабилитации /_______________/"
     )
 
     value = extract_conclusion(document, SpecialistRole.PHYSICAL_THERAPIST)
 
-    assert value == "Отмечается положительная динамика."
+    assert value == "ЗАКЛЮЧЕНИЕ_ФТ."

@@ -33,10 +33,10 @@ def _representative_episode(folder: Path) -> Episode:
     initial_at = datetime(2026, 6, 5, 16)
     final_at = datetime(2026, 6, 19, 13)
     episode = Episode(folder=folder)
-    episode.identity.full_name = "Тестов Алексей Юрьевич"
+    episode.identity.full_name = "ПАЦИЕНТ_ТЕСТ"
     episode.identity.birth_date = date(1968, 2, 20)
     episode.identity.sex = "муж"
-    episode.identity.medical_record_number = "СКП9001/99"
+    episode.identity.medical_record_number = "СКП0000/00"
     episode.department = "Отделение медицинской реабилитации для пациентов с нарушением функции ЦНС №2"
     episode.admission_datetime = datetime(2026, 6, 4, 12, 15)
     episode.discharge_datetime = datetime(2026, 6, 20, 10)
@@ -44,34 +44,34 @@ def _representative_episode(folder: Path) -> Episode:
     episode.final_meeting_at = final_at
     episode.course_duration_days = 16
     initial_sections = episode.initial_sections
-    initial_sections.clinical_diagnosis = "Исходный диагноз. ШРМ 4 балла."
-    initial_sections.disease_history = "Первичный анамнез заболевания."
-    initial_sections.life_history = "Исходный анамнез жизни."
-    initial_sections.laboratory_results = "Исходный общий анализ крови."
-    initial_sections.instrumental_results = "Исходная МРТ головного мозга."
+    initial_sections.clinical_diagnosis = "ДИАГНОЗ_ИСХОДНЫЙ"
+    initial_sections.disease_history = "АНАМНЕЗ_ЗАБОЛЕВАНИЯ_ИСХОДНЫЙ"
+    initial_sections.life_history = "АНАМНЕЗ_ЖИЗНИ_ИСХОДНЫЙ"
+    initial_sections.laboratory_results = "ЛАБОРАТОРНЫЙ_МАРКЕР_ИСХОДНЫЙ"
+    initial_sections.instrumental_results = "ИНСТРУМЕНТАЛЬНЫЙ_МАРКЕР_ИСХОДНЫЙ"
     initial_sections.rehabilitation_potential = "средний"
-    initial_sections.limitations = "нет"
-    initial_sections.risks = "риск падения"
+    initial_sections.limitations = "МАРКЕР_ОГРАНИЧЕНИЙ"
+    initial_sections.risks = "МАРКЕР_РИСКОВ"
     initial_sections.movement_regimen = "палатный"
     initial_sections.diet = "ОВД"
-    initial_sections.medication = "Исходная строка терапии 1.\nИсходная строка терапии 2."
-    initial_sections.goal = "Повысить мобильность и самостоятельность."
-    initial_sections.tasks = "1. Улучшить равновесие\n2. Расширить дистанцию ходьбы"
+    initial_sections.medication = "ТЕРАПИЯ_СТРОКА_1\nТЕРАПИЯ_СТРОКА_2"
+    initial_sections.goal = "ЦЕЛЬ_ИСХОДНАЯ"
+    initial_sections.tasks = "ЗАДАЧА_1\nЗАДАЧА_2"
 
     final_sections = episode.sections
-    final_sections.clinical_diagnosis = "Уточнённый диагноз. ШРМ 3 балла."
-    final_sections.disease_history = "Анамнез заболевания дополнен на выписке."
-    final_sections.life_history = "Анамнез жизни без дополнений."
-    final_sections.laboratory_results = "Контрольный общий анализ крови."
-    final_sections.instrumental_results = "Контрольная МРТ головного мозга."
+    final_sections.clinical_diagnosis = "ДИАГНОЗ_ИТОГОВЫЙ"
+    final_sections.disease_history = "АНАМНЕЗ_ЗАБОЛЕВАНИЯ_ИТОГОВЫЙ"
+    final_sections.life_history = "АНАМНЕЗ_ЖИЗНИ_ИТОГОВЫЙ"
+    final_sections.laboratory_results = "ЛАБОРАТОРНЫЙ_МАРКЕР_ИТОГОВЫЙ"
+    final_sections.instrumental_results = "ИНСТРУМЕНТАЛЬНЫЙ_МАРКЕР_ИТОГОВЫЙ"
     final_sections.rehabilitation_potential = "высокий"
-    final_sections.limitations = "нет"
-    final_sections.risks = "риск падения снижен"
+    final_sections.limitations = "МАРКЕР_ОГРАНИЧЕНИЙ"
+    final_sections.risks = "МАРКЕР_РИСКОВ_ИТОГОВЫЙ"
     final_sections.movement_regimen = "свободный"
     final_sections.diet = "ОВД"
-    final_sections.medication = "Итоговая базисная терапия."
-    final_sections.goal = "Поздняя формулировка цели не выводится в итоговом режиме."
-    final_sections.tasks = "Поздние задачи не выводятся в итоговом режиме."
+    final_sections.medication = "ТЕРАПИЯ_ИТОГОВАЯ"
+    final_sections.goal = "ЦЕЛЬ_ИТОГОВАЯ_НЕ_ИСПОЛЬЗУЕТСЯ"
+    final_sections.tasks = "ЗАДАЧИ_ИТОГОВЫЕ_НЕ_ИСПОЛЬЗУЮТСЯ"
     episode.sources.append(
         SourceDocument(
             folder / "невролог.docx",
@@ -96,7 +96,7 @@ def _representative_episode(folder: Path) -> Episode:
         (
             SpecialistFinding(
                 SpecialistRole.NEUROLOGIST,
-                "Сознание ясное. Неврологический статус стабилен.",
+                "ЗАКЛЮЧЕНИЕ_НЕВРОЛОГА",
                 initial_at,
                 scales=[
                     ScaleMeasurement(
@@ -109,19 +109,19 @@ def _representative_episode(folder: Path) -> Episode:
             ),
             SpecialistFinding(
                 SpecialistRole.PHYSICAL_THERAPIST,
-                "Передвигается с помощью специалиста.",
+                "ЗАКЛЮЧЕНИЕ_ФТ_ИСХОДНОЕ",
                 initial_at,
                 scales=[initial_scale],
             ),
             SpecialistFinding(
                 SpecialistRole.PHYSICAL_THERAPIST,
-                "Передвигается самостоятельно.",
+                "ЗАКЛЮЧЕНИЕ_ФТ_ИТОГОВОЕ",
                 final_at,
                 scales=[final_scale],
             ),
             SpecialistFinding(
                 SpecialistRole.NEUROPSYCHOLOGIST,
-                "Поздний осмотр отсутствует; сохраняется исходное заключение.",
+                "ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА",
                 initial_at,
             ),
         )
@@ -151,7 +151,7 @@ def _representative_episode(folder: Path) -> Episode:
             ),
             IcfDomain(
                 "Pf",
-                "Мужчина 58 лет",
+                "ПЕРСОНАЛЬНЫЙ_ФАКТОР_ТЕСТ",
                 SpecialistRole.OTHER,
             ),
         )
@@ -192,6 +192,15 @@ def _assert_signature_table_page_separator(document) -> None:
         for separator in separators
     )
     assert separators[-1].find("./w:pPr/w:keepNext", separators[-1].nsmap) is not None
+
+    for row in signatures.rows[:-1]:
+        assert all(
+            cell.paragraphs[0]._p.get_or_add_pPr().find(qn("w:keepNext")) is not None
+            for cell in row.cells
+        )
+    for cell in signatures.rows[-1].cells:
+        marker = cell.paragraphs[0]._p.get_or_add_pPr().find(qn("w:keepNext"))
+        assert marker is None or marker.get(qn("w:val")) in {"0", "false", "off"}
 
 
 def _cell_fill(cell) -> str | None:
@@ -287,8 +296,8 @@ def _assert_ooxml_child_order(element, expected_order: tuple[str, ...]) -> None:
 def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     episode = _representative_episode(tmp_path)
     signatories = (
-        SignatoryRow(SpecialistRole.NEUROLOGIST, "Иванов И.И."),
-        SignatoryRow(SpecialistRole.PHYSICAL_THERAPIST, "Петров П.П."),
+        SignatoryRow(SpecialistRole.NEUROLOGIST, "СОТРУДНИК_1"),
+        SignatoryRow(SpecialistRole.PHYSICAL_THERAPIST, "СОТРУДНИК_2"),
     )
     initial_path = write_mdrk_docx(
         episode,
@@ -309,12 +318,12 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     for number in range(1, 13):
         assert f"{number}. " in initial_text
         assert f"{number}. " in final_text
-    assert "Повысить мобильность" in initial_text
-    assert "Исходный диагноз" in initial_text
-    assert "Уточнённый диагноз" not in initial_text
+    assert "ЦЕЛЬ_ИСХОДНАЯ" in initial_text
+    assert "ДИАГНОЗ_ИСХОДНЫЙ" in initial_text
+    assert "ДИАГНОЗ_ИТОГОВЫЙ" not in initial_text
     assert "Дата и время выписки:" not in initial_text
-    assert "Уточнённый диагноз" in final_text
-    assert "Исходный диагноз" not in final_text
+    assert "ДИАГНОЗ_ИТОГОВЫЙ" in final_text
+    assert "ДИАГНОЗ_ИСХОДНЫЙ" not in final_text
     assert "Дата и время выписки:" not in final_text
     assert "Достигнута в полном объёме" in final_text
     assert "Выполнены в полном объёме" in final_text
@@ -326,10 +335,10 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         "по эргореабилитации",
         '"05" июня 2026 г. время: 16 час. 00 мин.',
         "",
-        "Номер ИБ: СКП9001/99",
+        "Номер ИБ: СКП0000/00",
         "Отделение медицинской реабилитации для пациентов с нарушением функции ЦНС №2.",
         "",
-        "ФИО пациента: Тестов Алексей Юрьевич",
+        "ФИО пациента: ПАЦИЕНТ_ТЕСТ",
         "Дата рождения: «20» февраля 1968г. (58 лет)",
         "Пол: муж",
         "",
@@ -389,7 +398,7 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     assert len(physical_cells) == 2
     grid_span = physical_cells[1].find("./w:tcPr/w:gridSpan", physical_cells[1].nsmap)
     assert grid_span is not None and grid_span.get(qn("w:val")) == "14"
-    assert personal_factor.cells[1].text == "Мужчина 58 лет"
+    assert personal_factor.cells[1].text == "ПЕРСОНАЛЬНЫЙ_ФАКТОР_ТЕСТ"
     for cell in final_mcf.rows[2].cells[2:13]:
         _assert_compact_header_cell(cell)
 
@@ -470,8 +479,8 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     ]
     assert [row.cells[0].text for row in signatures.rows[1:]] == expected_roles
     assert [row.cells[0].text for row in final_signatures.rows[1:]] == expected_roles
-    assert signatures.rows[1].cells[1].text == "Иванов И.И."
-    assert signatures.rows[2].cells[1].text == "Петров П.П."
+    assert signatures.rows[1].cells[1].text == "СОТРУДНИК_1"
+    assert signatures.rows[2].cells[1].text == "СОТРУДНИК_2"
     assert signatures.rows[1].cells[2].text == ""
     assert all(row.cells[1].text == "" for row in final_signatures.rows[1:])
     _assert_signature_table_page_separator(initial)
@@ -500,8 +509,8 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         paragraph.runs[0].bold and paragraph.runs[0].underline
         for paragraph in (plan_heading, medication_heading, procedures_heading)
     )
-    assert "Исходная строка терапии 1." in [p.text for p in initial.paragraphs]
-    assert "Исходная строка терапии 2." in [p.text for p in initial.paragraphs]
+    assert "ТЕРАПИЯ_СТРОКА_1" in [p.text for p in initial.paragraphs]
+    assert "ТЕРАПИЯ_СТРОКА_2" in [p.text for p in initial.paragraphs]
 
     _assert_table_geometry_and_pagination(initial)
     _assert_table_geometry_and_pagination(final)

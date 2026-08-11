@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdrk-builder"
-version = "0.1.10"
-description = "Local Windows tool for assembling MDRK1 and MDRK2 DOCX documents"
+version = "1.0.0"
+description = "Internal offline Windows tool for preparing editable MDRK DOCX drafts"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

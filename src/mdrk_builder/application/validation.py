@@ -24,8 +24,6 @@ _RECOMPUTED_CODES = {
     "required_meeting_datetime",
     "required_physician_source",
     "meeting_before_admission",
-    "discharge_before_admission",
-    "meeting_after_discharge",
     "final_meeting_not_after_initial",
     "icf_incomplete_pair",
     "icf_initial_missing",
@@ -382,32 +380,6 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             ReviewIssue(
                 code="meeting_before_admission",
                 message="Время заседания указано раньше поступления",
-                severity=ReviewSeverity.BLOCKING,
-                field="meeting_at",
-            )
-        )
-    if (
-        episode.admission_datetime is not None
-        and episode.discharge_datetime is not None
-        and episode.discharge_datetime < episode.admission_datetime
-    ):
-        issues.append(
-            ReviewIssue(
-                code="discharge_before_admission",
-                message="Дата выписки указана раньше даты поступления",
-                severity=ReviewSeverity.BLOCKING,
-                field="admission_datetime",
-            )
-        )
-    if (
-        selected_meeting is not None
-        and episode.discharge_datetime is not None
-        and selected_meeting > episode.discharge_datetime
-    ):
-        issues.append(
-            ReviewIssue(
-                code="meeting_after_discharge",
-                message="Время заседания указано позже выписки",
                 severity=ReviewSeverity.BLOCKING,
                 field="meeting_at",
             )

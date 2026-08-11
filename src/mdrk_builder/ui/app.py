@@ -15,6 +15,8 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from docx import Document
 
+from mdrk_builder import __version__
+from mdrk_builder.application.feedback import FeedbackStorageError, save_feedback
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.application.validation import (
@@ -36,6 +38,7 @@ from mdrk_builder.domain import (
 )
 from mdrk_builder.infrastructure.docx_writer import canonical_template_path, write_mdrk_docx
 from mdrk_builder.ui.dialogs import (
+    FeedbackDialog,
     FindingDialog,
     IcfDomainDialog,
     ProcedureDialog,
@@ -66,6 +69,26 @@ MEETING_RESCAN_MESSAGE = (
     "заново собрать данные на этот момент. Ручные правки будут заменены "
     "только после вашего подтверждения."
 )
+
+REVIEW_NOTICE_SHORT = (
+    "Перед подписанием проверьте созданный DOCX: "
+    "автоматический перенос может содержать пропуски или ошибки."
+)
+
+
+def about_text() -> str:
+    return (
+        f"МДРК Builder {__version__}\n\n"
+        "Локальный инструмент подготовки редактируемого проекта документа МДРК.\n\n"
+        "Программа автоматически переносит и форматирует данные из выбранных "
+        "документов. Результат может содержать пропуски или ошибки распознавания и должен быть "
+        "проверен перед подписанием и включением в медицинскую документацию.\n\n"
+        "Программа не выполняет диагностику, не назначает лечение и не заменяет "
+        "профессиональное решение специалиста.\n\n"
+        "Программное обеспечение предоставляется «как есть», без гарантии безошибочного "
+        "формирования документа."
+    )
+
 
 def _normalized_record_number(value: str) -> str:
     normalized = "".join(
@@ -128,6 +151,8 @@ class MdrkBuilderApp:
         menu.add_cascade(label="Файл", menu=file_menu)
 
         help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label="Обратная связь…", command=self._show_feedback)
+        help_menu.add_separator()
         help_menu.add_command(label="О программе", command=self._show_about)
         menu.add_cascade(label="Справка", menu=help_menu)
         self.root.config(menu=menu)
@@ -151,6 +176,12 @@ class MdrkBuilderApp:
             state="disabled",
         )
         self.generate_button.grid(row=0, column=4, padx=(8, 2))
+        ttk.Label(
+            top,
+            text=REVIEW_NOTICE_SHORT,
+            wraplength=880,
+            justify="left",
+        ).grid(row=1, column=1, columnspan=4, sticky="w", padx=(6, 2), pady=(4, 0))
         top.columnconfigure(1, weight=1)
 
         snapshot = ttk.LabelFrame(self.root, text="Снимок", padding=(8, 4))
@@ -1270,9 +1301,44 @@ class MdrkBuilderApp:
     def _show_about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            "МДРК Builder 0.1.10\n\nЛокальная подготовка редактируемых МДРК-1 и МДРК-2.\n"
-            "Программа не отправляет документы в интернет и не заменяет проверку специалистом.",
+            about_text(),
         )
+
+    def _show_feedback(self) -> None:
+        initial = None
+        while True:
+            dialog = FeedbackDialog(self.root, initial=initial)
+            submission = dialog.result
+            if submission is None:
+                return
+            try:
+                result = save_feedback(submission, app_version=__version__)
+            except (FeedbackStorageError, ValueError):
+                retry = messagebox.askretrycancel(
+                    "Не удалось сохранить отзыв",
+                    "Папка программы недоступна для записи. "
+                    "Текст не был сохранён. Повторить?",
+                    parent=self.root,
+                )
+                if not retry:
+                    return
+                initial = submission
+                continue
+
+            if result.queued:
+                messagebox.showwarning(
+                    "Отзыв сохранён",
+                    "Файл issues.txt сейчас занят. Отзыв не потерян: он сохранён "
+                    "рядом с программой и будет добавлен в issues.txt при следующей отправке.",
+                    parent=self.root,
+                )
+            else:
+                messagebox.showinfo(
+                    "Спасибо",
+                    "Отзыв добавлен в issues.txt рядом с программой.",
+                    parent=self.root,
+                )
+            return
 
     def _on_close(self) -> None:
         if self._scanning:
@@ -1291,12 +1357,12 @@ def _generate_smoke_document(directory: Path) -> Path:
         raise FileNotFoundError(f"Канонический шаблон не найден: {template}")
 
     episode = Episode(folder=directory)
-    episode.identity.full_name = "Тестов Тест Тестович"
+    episode.identity.full_name = "АЛЬФА БЕТА ГАММА"
     episode.identity.medical_record_number = "SMOKE-1"
     episode.admission_datetime = datetime(2026, 1, 1, 9, 0)
     episode.initial_meeting_at = datetime(2026, 1, 2, 8, 0)
-    episode.initial_sections.clinical_diagnosis = "Тестовый диагноз"
-    episode.sections.clinical_diagnosis = "Тестовый диагноз"
+    episode.initial_sections.clinical_diagnosis = "АБСТРАКТНЫЙ МАРКЕР"
+    episode.sections.clinical_diagnosis = "АБСТРАКТНЫЙ МАРКЕР"
     episode.sources.append(
         SourceDocument(directory / "smoke-source.docx", role=SpecialistRole.NEUROLOGIST)
     )
