@@ -71,6 +71,98 @@ def install_edit_shortcuts(root: tk.Misc) -> None:
     """
 
     root.bind_all("<Control-KeyPress>", _dispatch_control_shortcut, add="+")
+    root.bind_all("<Button-3>", _show_edit_context_menu, add="+")
+
+
+def _show_edit_context_menu(event: Any) -> str | None:
+    widget = event.widget
+    try:
+        widget_class = widget.winfo_class()
+    except (AttributeError, tk.TclError):
+        return None
+    editable = widget_class in {"Text", "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox"}
+    tree = widget_class == "Treeview"
+    if not editable and not tree:
+        return None
+
+    try:
+        widget.focus_set()
+        if tree:
+            row = widget.identify_row(event.y)
+            if row and row not in widget.selection():
+                widget.selection_set(row)
+        menu = tk.Menu(widget, tearoff=False)
+        disabled_widget = _widget_state(widget) == "disabled"
+        readonly_widget = _widget_state(widget) == "readonly"
+        has_selection = _has_selection(widget, widget_class)
+        can_edit = not disabled_widget and not readonly_widget
+        if widget_class == "Text":
+            edit_state = "normal" if can_edit else "disabled"
+            menu.add_command(label="Отменить", state=edit_state, command=lambda: _generate_event(widget, "<<Undo>>"))
+            menu.add_command(label="Повторить", state=edit_state, command=lambda: _generate_event(widget, "<<Redo>>"))
+            menu.add_separator()
+        if tree:
+            copy_state = "normal" if widget.selection() else "disabled"
+            menu.add_command(label="Копировать", state=copy_state, command=lambda: _copy_tree_selection(widget))
+            menu.add_separator()
+            menu.add_command(label="Выделить всё", command=lambda: _select_tree_all(widget))
+        else:
+            cut_state = "normal" if can_edit and has_selection else "disabled"
+            copy_state = "normal" if not disabled_widget and has_selection else "disabled"
+            paste_state = "normal" if can_edit and _clipboard_has_text(widget) else "disabled"
+            menu.add_command(label="Вырезать", state=cut_state, command=lambda: _generate_event(widget, "<<Cut>>"))
+            menu.add_command(label="Копировать", state=copy_state, command=lambda: _generate_event(widget, "<<Copy>>"))
+            menu.add_command(label="Вставить", state=paste_state, command=lambda: _generate_event(widget, "<<Paste>>"))
+            menu.add_separator()
+            select_state = "disabled" if disabled_widget else "normal"
+            menu.add_command(label="Выделить всё", state=select_state, command=lambda: _select_all_text(widget))
+        menu.tk_popup(event.x_root, event.y_root)
+    except (AttributeError, tk.TclError):
+        return None
+    finally:
+        try:
+            menu.grab_release()
+        except (AttributeError, UnboundLocalError, tk.TclError):
+            pass
+    return "break"
+
+
+def _widget_state(widget: Any) -> str:
+    try:
+        return str(widget.cget("state"))
+    except (AttributeError, tk.TclError):
+        return "normal"
+
+
+def _has_selection(widget: Any, widget_class: str) -> bool:
+    try:
+        if widget_class == "Text":
+            return bool(widget.tag_ranges("sel"))
+        return bool(widget.selection_present())
+    except (AttributeError, tk.TclError):
+        return False
+
+
+def _clipboard_has_text(widget: Any) -> bool:
+    try:
+        return bool(widget.clipboard_get())
+    except (AttributeError, tk.TclError):
+        return False
+
+
+def _generate_event(widget: Any, virtual_event: str) -> str | None:
+    try:
+        widget.event_generate(virtual_event)
+    except (AttributeError, tk.TclError):
+        return None
+    return "break"
+
+
+def _select_tree_all(tree: Any) -> str:
+    children = tree.get_children()
+    if children:
+        tree.selection_set(children)
+    return "break"
 
 
 def _dispatch_control_shortcut(event: Any) -> str | None:
@@ -83,10 +175,7 @@ def _dispatch_control_shortcut(event: Any) -> str | None:
         if action == "copy":
             return _copy_tree_selection(widget)
         if action == "select_all":
-            children = widget.get_children()
-            if children:
-                widget.selection_set(children)
-            return "break"
+            return _select_tree_all(widget)
         return None
 
     if action == "select_all":

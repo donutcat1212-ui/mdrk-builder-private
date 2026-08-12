@@ -618,6 +618,21 @@ def _normalized_icf_code(value: str) -> str:
     return value.casefold().replace(" ", "")
 
 
+def _allowed_from_initial_neurologist(
+    record: ScannedRecord,
+    observation: IcfObservation,
+) -> bool:
+    """Keep only the neurologist-owned slice of a copied primary SHRM table."""
+
+    if not (
+        record.classification.role is SpecialistRole.NEUROLOGIST
+        and record.classification.document_type == "initial"
+    ):
+        return True
+    code = _normalized_icf_code(observation.code)
+    return code.startswith(("b", "s", "pf")) or code == "e1101"
+
+
 def _normalized_personal_factor_description(value: str) -> str:
     return " ".join(value.casefold().replace("ё", "е").split()).strip(" .,:;")
 
@@ -634,6 +649,8 @@ def _personal_factor_records(
         if source_role not in _PERSONAL_FACTOR_ROLE_PRIORITY:
             continue
         for observation in extract_icf_observations(record.document):
+            if not _allowed_from_initial_neurologist(record, observation):
+                continue
             code = _normalized_icf_code(observation.code)
             if not code.startswith("pf") or not observation.description.strip():
                 continue
@@ -742,6 +759,8 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
         physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
         by_owner: dict[SpecialistRole, list[IcfObservation]] = defaultdict(list)
         for observation in observations:
+            if not _allowed_from_initial_neurologist(record, observation):
+                continue
             is_personal_factor = observation.code.casefold().startswith("pf")
             if is_personal_factor:
                 # Pf is episode-level descriptive data and is merged separately

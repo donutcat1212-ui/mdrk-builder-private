@@ -60,6 +60,25 @@ class PatientIdentity:
 
 
 @dataclass(slots=True)
+class ReverseSheetRow:
+    intervention: str
+    appointment_date: date | None = None
+    performed_at: datetime | None = None
+    performer: str = ""
+    source: Path | None = None
+
+
+@dataclass(slots=True)
+class ReverseSheetDraft:
+    folder: Path
+    identity: PatientIdentity = field(default_factory=PatientIdentity)
+    admission_datetime: datetime | None = None
+    header_source: Path | None = None
+    rows: list[ReverseSheetRow] = field(default_factory=list)
+    issues: list[ReviewIssue] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ClinicalSections:
     clinical_diagnosis: str = ""
     disease_history: str = ""

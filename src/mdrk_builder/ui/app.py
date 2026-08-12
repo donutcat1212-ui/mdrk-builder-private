@@ -17,6 +17,7 @@ from docx import Document
 
 from mdrk_builder import __version__
 from mdrk_builder.application.feedback import FeedbackStorageError, save_feedback
+from mdrk_builder.application.reverse_sheet import scan_reverse_sheet
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.application.validation import (
@@ -31,6 +32,7 @@ from mdrk_builder.domain import (
     MdrkKind,
     ReviewIssue,
     ReviewSeverity,
+    ReverseSheetDraft,
     ScaleMeasurement,
     SourceDocument,
     SpecialistFinding,
@@ -56,6 +58,7 @@ from mdrk_builder.ui.episode_adapter import (
     parse_optional_meeting_datetime,
     sections_for,
 )
+from mdrk_builder.ui.reverse_sheet_dialog import ReverseSheetDialog
 
 
 SEVERITY_LABELS = {
@@ -107,8 +110,12 @@ class MdrkBuilderApp:
         self.episode: Episode | None = None
         self._current_kind = MdrkKind.INITIAL
         self._scan_results: queue.Queue[tuple[Episode | None, Exception | None]] = queue.Queue()
+        self._reverse_scan_results: queue.Queue[
+            tuple[ReverseSheetDraft | None, Exception | None]
+        ] = queue.Queue()
         self._scan_thread: threading.Thread | None = None
         self._scan_folder: Path | None = None
+        self._reverse_scan_folder: Path | None = None
         self._scanning = False
         self._setting_folder_field = False
         self._last_form_error = ""
@@ -144,6 +151,7 @@ class MdrkBuilderApp:
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Выбрать папку…", command=self._choose_folder, accelerator="Ctrl+O")
         file_menu.add_command(label="Сканировать", command=self._start_scan, accelerator="F5")
+        file_menu.add_command(label="Оборотный лист назначений…", command=self._start_reverse_sheet_scan)
         file_menu.add_separator()
         file_menu.add_command(label="Создать DOCX…", command=self._generate, accelerator="Ctrl+S")
         file_menu.add_separator()
@@ -176,12 +184,18 @@ class MdrkBuilderApp:
             state="disabled",
         )
         self.generate_button.grid(row=0, column=4, padx=(8, 2))
+        self.reverse_sheet_button = ttk.Button(
+            top,
+            text="Оборотный лист…",
+            command=self._start_reverse_sheet_scan,
+        )
+        self.reverse_sheet_button.grid(row=0, column=5, padx=(2, 0))
         ttk.Label(
             top,
             text=REVIEW_NOTICE_SHORT,
             wraplength=880,
             justify="left",
-        ).grid(row=1, column=1, columnspan=4, sticky="w", padx=(6, 2), pady=(4, 0))
+        ).grid(row=1, column=1, columnspan=5, sticky="w", padx=(6, 2), pady=(4, 0))
         top.columnconfigure(1, weight=1)
 
         snapshot = ttk.LabelFrame(self.root, text="Снимок", padding=(8, 4))
@@ -657,6 +671,57 @@ class MdrkBuilderApp:
             f"{len(episode.procedures)} процедур"
         )
 
+    def _start_reverse_sheet_scan(self) -> None:
+        if self._scanning:
+            return
+        try:
+            folder = parse_episode_folder(self.folder_var.get())
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Папка не найдена", str(exc))
+            return
+        if not folder.is_dir():
+            messagebox.showerror("Папка не найдена", "Выберите существующую папку эпизода.")
+            return
+        self._reverse_scan_folder = folder
+        self._set_scanning(True)
+        self.status_var.set("Сбор оборотного листа из документов консультаций…")
+
+        def worker() -> None:
+            try:
+                self._reverse_scan_results.put((scan_reverse_sheet(folder), None))
+            except Exception as exc:  # delivered to the UI thread
+                self._reverse_scan_results.put((None, exc))
+
+        self._scan_thread = threading.Thread(
+            target=worker,
+            name="mdrk-reverse-sheet-scan",
+            daemon=False,
+        )
+        self._scan_thread.start()
+        self.root.after(100, self._poll_reverse_sheet_result)
+
+    def _poll_reverse_sheet_result(self) -> None:
+        try:
+            draft, error = self._reverse_scan_results.get_nowait()
+        except queue.Empty:
+            if self._scanning:
+                self.root.after(100, self._poll_reverse_sheet_result)
+            return
+        self._set_scanning(False)
+        scan_folder = self._reverse_scan_folder
+        self._reverse_scan_folder = None
+        if error is not None:
+            self.status_var.set("Сбор оборотного листа завершился ошибкой")
+            messagebox.showerror("Ошибка сканирования", str(error))
+            return
+        if draft is None or scan_folder is None or not self._folder_field_matches(scan_folder):
+            self.status_var.set("Результат оборотного листа отброшен: папка изменилась.")
+            return
+        self.status_var.set(
+            f"Оборотный лист: найдено строк — {len(draft.rows)}, требует проверки — {len(draft.issues)}"
+        )
+        ReverseSheetDialog(self.root, draft)
+
     def _set_scanning(self, value: bool) -> None:
         self._scanning = value
         self._update_action_states()
@@ -667,6 +732,9 @@ class MdrkBuilderApp:
 
     def _update_action_states(self) -> None:
         self.scan_button.configure(state="disabled" if self._scanning else "normal")
+        reverse_button = getattr(self, "reverse_sheet_button", None)
+        if reverse_button is not None:
+            reverse_button.configure(state="disabled" if self._scanning else "normal")
         can_use_episode = self.episode is not None and not self._scanning
         self.generate_button.configure(state="normal" if can_use_episode else "disabled")
 

@@ -731,8 +731,10 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
         "",
         clinical_datetime=datetime(2026, 8, 3, 8, 39),
         tables=[
-            _icf_table(
-                _row({0: "e310", 1: "Семья и ближайшие родственники", 11: "4+"}),
+                _icf_table(
+                    _row({0: "b730", 1: "Мышечная сила", 11: "3"}),
+                    _row({0: "e1101", 1: "Лекарственные препараты", 11: "4+"}),
+                    _row({0: "e310", 1: "Семья и ближайшие родственники", 11: "4+"}),
                 _row({0: "d550", 1: "Приём пищи", 11: "2"}),
                 ParsedRow(
                     (
@@ -756,13 +758,8 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
     assert personal.initial is None and personal.final is None
     assert personal.initial_source == Path("/patient/physician-initial.docx")
     assert personal.final_source is None
-    environment = next(item for item in episode.icf_domains if item.code == "e310")
-    assert environment.initial and environment.initial.display() == "4+"
-    assert environment.specialist is SpecialistRole.OTHER
-    assert environment.initial_source == Path("/patient/physician-initial.docx")
-    activity = next(item for item in episode.icf_domains if item.code == "d550")
-    assert activity.initial and activity.initial.display() == "2"
-    assert activity.specialist is SpecialistRole.OTHER
+    # Copied FT/FZT domains from a neurologist's primary SHRM table are excluded.
+    assert {item.code for item in episode.icf_domains} == {"b730", "e1101", "Pf"}
 
 
 def test_pf_is_merged_once_across_roles_and_prefers_authoritative_source() -> None:

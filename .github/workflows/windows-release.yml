@@ -2,13 +2,16 @@ name: Windows internal pilot artifact
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 concurrency:
   group: internal-windows-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-internal-package:
@@ -121,3 +124,24 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+      - name: Create ZIP release bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: release_bundle
+        shell: pwsh
+        run: |
+          $version = "${{ steps.package.outputs.version }}"
+          $packageDir = "${{ steps.package.outputs.package_dir }}"
+          $zipPath = "dist/MDRK_Builder-$version-Internal-windows-x64.zip"
+          Compress-Archive -Path "$packageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+
+      - name: Publish temporary GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.package.outputs.version }}"
+          $notes = "Внутренний Windows x64 ZIP. Локальная работа без сетевой передачи данных. Перед использованием прочитайте инструкцию внутри архива и проверьте созданные DOCX."
+          gh release create "${{ github.ref_name }}" "${{ steps.release_bundle.outputs.zip_path }}" --verify-tag --title "MDRK Builder $version Internal" --notes $notes
