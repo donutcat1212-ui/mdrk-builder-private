@@ -231,25 +231,29 @@ def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> Non
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА."
+        "Нейропсихологический статус:\n1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА."
     )
 
 
-def test_conclusion_accepts_topical_neuropsych_heading_and_stops_at_recommendations() -> None:
+def test_conclusion_keeps_neuropsych_status_and_basis_but_not_later_dynamics() -> None:
     document = _document(
         "\n".join(
             (
                 "Нейропсихологический статус и топический диагноз :",
                 "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.",
                 "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.",
-                "На основании данных рекомендован курс: не включать",
+                "Количественная оценка данных обследования:",
+                "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ",
+                "Отмечается положительная динамика: НЕ_ВКЛЮЧАТЬ",
             )
         )
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1. "
-        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2."
+        "Нейропсихологический статус и топический диагноз :\n"
+        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.\n"
+        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.\n"
+        "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ"
     )
 
 
@@ -259,7 +263,26 @@ def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:
         "Рекомендовано: занятия"
     )
 
-    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == "ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
+    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
+        "Нейропсихологический статус и топический диагноз: ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
+    )
+
+
+def test_logopedist_final_conclusion_is_dynamics_plus_discharge_status() -> None:
+    document = _document(
+        "На основании данных: НЕ_ВКЛЮЧАТЬ\n"
+        "Динамика: ДИНАМИКА_ЛОГОПЕДА.\n"
+        "Логопедический статус при выписке изменен:\n"
+        "СТАТУС_СТРОКА_1.\nСТАТУС_СТРОКА_2.\n"
+        "Медицинский логопед АЛЬФА А.А."
+    )
+
+    assert extract_conclusion(document, SpecialistRole.LOGOPEDIST).splitlines() == [
+        "Динамика: ДИНАМИКА_ЛОГОПЕДА.",
+        "Логопедический статус при выписке изменен:",
+        "СТАТУС_СТРОКА_1.",
+        "СТАТУС_СТРОКА_2.",
+    ]
 
 
 def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
@@ -541,6 +564,15 @@ def test_scheduled_mdrk_rows_prefer_explicit_execution_time() -> None:
     values = extract_mdrk_meeting_datetimes(_document(tables=[table]))
 
     assert values[-1] == datetime(2026, 6, 19, 15, 30)
+
+
+def test_mdrk_datetime_accepts_dash_separated_time_only_after_full_date() -> None:
+    document = _document(
+        "Консилиум мультидисциплинарной реабилитационной команды\n"
+        "14.05.2026 08-46"
+    )
+
+    assert extract_mdrk_document_datetime(document) == datetime(2026, 5, 14, 8, 46)
 
 
 def test_mdrk_datetime_and_scale_roles_are_read_from_local_headings() -> None:

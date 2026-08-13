@@ -16,6 +16,30 @@ from mdrk_builder.ui.episode_adapter import (
 )
 
 
+def confirm_incomplete_reverse_dates(
+    parent: tk.Misc,
+    rows: list[ReverseSheetRow],
+) -> bool:
+    missing: list[str] = []
+    for row in rows:
+        fields: list[str] = []
+        if row.appointment_date is None:
+            fields.append("дата назначения")
+        if row.performed_at is None:
+            fields.append("дата исполнения")
+        if fields:
+            missing.append(f"• {row.intervention}: {', '.join(fields)}")
+    if not missing:
+        return True
+    return messagebox.askyesno(
+        "Создать с пустыми датами?",
+        "В оборотном листе не заполнены даты:\n\n"
+        + "\n".join(missing)
+        + "\n\nПродолжить и оставить эти ячейки пустыми?",
+        parent=parent,
+    )
+
+
 class ReverseSheetRowDialog(simpledialog.Dialog):
     def __init__(self, parent: tk.Misc, row: ReverseSheetRow | None = None) -> None:
         self._source = row.source if row else None
@@ -250,15 +274,7 @@ class ReverseSheetDialog(tk.Toplevel):
     def _generate(self) -> None:
         if not self._apply_header():
             return
-        undated = [row.intervention for row in self.draft.rows if row.performed_at is None]
-        if undated:
-            messagebox.showerror(
-                "Не заполнена хронология",
-                "Для следующих строк не указана дата исполнения:\n\n"
-                + "\n".join(f"• {value}" for value in undated)
-                + "\n\nЗаполните дату либо удалите строку перед созданием DOCX.",
-                parent=self,
-            )
+        if not confirm_incomplete_reverse_dates(self, self.draft.rows):
             return
         patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", self.draft.identity.full_name).strip("_")
         output = filedialog.asksaveasfilename(

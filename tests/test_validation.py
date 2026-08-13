@@ -178,6 +178,27 @@ def test_any_generated_blocker_can_be_acknowledged_and_stays_visible() -> None:
     assert is_issue_acknowledged(
         episode, refreshed, MdrkKind.INITIAL
     )
+
+
+def test_missing_meeting_datetime_can_be_acknowledged_globally() -> None:
+    episode = _valid_episode()
+    episode.initial_meeting_at = None
+    issue = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_meeting_datetime"
+    )
+
+    acknowledge_issue(episode, issue, MdrkKind.INITIAL)
+
+    assert can_generate(episode, MdrkKind.INITIAL)
+    refreshed = next(
+        item
+        for item in current_issues(episode, MdrkKind.INITIAL)
+        if item.code == "required_meeting_datetime"
+    )
+    assert refreshed.acknowledged
+    assert refreshed.severity is ReviewSeverity.INFO
     assert can_generate(episode, MdrkKind.INITIAL)
 
 

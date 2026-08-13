@@ -49,7 +49,7 @@ GENERIC_SPECIALTIES: tuple[tuple[tuple[str, ...], str], ...] = (
 
 _CONSULTATION_HEADING_RE = re.compile(
     r"\b(?:первичн\w*|повторн\w*|заключительн\w*|итогов\w*)?\s*"
-    r"(?:консультаци\w*|осмотр\w*)\b",
+    r"(?:консультаци\w*|осмотр\w*|обследован\w*)\b",
     re.IGNORECASE,
 )
 _NAME_INITIALS_RE = re.compile(
@@ -132,7 +132,10 @@ def _planned_dates(document: ParsedDocument) -> dict[str, date]:
 
     for line in lines:
         low = line.casefold().replace("ё", "е")
-        if not any(token in low for token in ("назнач", "заплан", "планов", "направ")):
+        if not re.search(
+            r"\b(?:назначен[аоы]?|запланирован[аоы]?|планов\w*|направлен[аоы]?\s+на)\b",
+            low,
+        ):
             continue
         parsed = parse_first_datetime(line)
         if parsed is None:
@@ -228,6 +231,7 @@ def scan_reverse_sheet(
     primary = primary_candidates[0][0] if primary_candidates else None
     planned: dict[str, date] = {}
     primary_performer = ""
+    primary_clinical_date: date | None = None
     if primary is None:
         draft.issues.append(
             ReviewIssue(
@@ -243,6 +247,8 @@ def scan_reverse_sheet(
         draft.admission_datetime = extract_admission_datetime(primary)
         planned = _planned_dates(primary)
         primary_performer = _treating_neurologist_performer(primary)
+        primary_datetime = extract_clinical_datetime(primary)
+        primary_clinical_date = primary_datetime.date() if primary_datetime is not None else None
 
     rows: list[ReverseSheetRow] = []
     mdrk_index = 0
@@ -256,7 +262,7 @@ def scan_reverse_sheet(
                 else None
             )
             mdrk_index += 1
-            if existing is not None:
+            if performed_at is None and existing is not None:
                 performed_at = existing.performed_at
                 draft.issues.append(
                     ReviewIssue(
@@ -280,16 +286,22 @@ def scan_reverse_sheet(
             rows.append(
                 ReverseSheetRow(
                     intervention,
-                    planned.get(intervention)
-                    or planned.get("Консилиум МДРК")
-                    or (existing.appointment_date if existing is not None else None),
+                    performed_at.date()
+                    if performed_at is not None
+                    else (
+                        existing.appointment_date
+                        if existing is not None
+                        else planned.get(intervention) or planned.get("Консилиум МДРК")
+                    ),
                     performed_at,
                     primary_performer or (existing.performer if existing is not None else ""),
                     document.source_path,
                 )
             )
             continue
-        if _is_primary_neurologist(classification):
+        # Neurologist documents supply the episode header and clinical MDRK
+        # content, but are never separate interventions on the reverse sheet.
+        if classification.role is SpecialistRole.NEUROLOGIST:
             continue
         if classification.document_type in {
             "administrative",
@@ -303,9 +315,12 @@ def scan_reverse_sheet(
             continue
         performed_at = extract_clinical_datetime(document)
         is_repeat = classification.document_type in {"follow_up", "final"}
-        appointment_date = (
-            performed_at.date() if is_repeat and performed_at is not None else planned.get(intervention)
-        )
+        if classification.document_type == "initial":
+            appointment_date = primary_clinical_date or planned.get(intervention)
+        elif is_repeat and performed_at is not None:
+            appointment_date = performed_at.date()
+        else:
+            appointment_date = planned.get(intervention)
         rows.append(
             ReverseSheetRow(
                 intervention,

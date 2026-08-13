@@ -223,7 +223,26 @@ def extract_mdrk_document_datetime(document: ParsedDocument) -> datetime | None:
         if title not in clean_text(value).casefold():
             continue
         for candidate in ordered[index : index + 3]:
-            if parsed := parse_first_datetime(clean_text(candidate)):
+            candidate = clean_text(candidate)
+            first = next(_date_matches(candidate), None)
+            if first is None:
+                continue
+            date_match, parsed_date = first
+            # Some approved forms write the meeting time as ``08-46``.  Keep
+            # this deliberately adjacent to a complete date so ``14-05-2026``
+            # can never be mistaken for 14:05.
+            suffix = candidate[date_match.end() : date_match.end() + 40]
+            dash_time = re.match(
+                r"^\s*[,;]?\s*(?:время\s*)?([0-2]?\d)\s*[-–—]\s*([0-5]\d)(?!\d)",
+                suffix,
+                re.IGNORECASE,
+            )
+            if dash_time is not None and int(dash_time.group(1)) <= 23:
+                return datetime.combine(
+                    parsed_date,
+                    time(int(dash_time.group(1)), int(dash_time.group(2))),
+                )
+            if parsed := parse_first_datetime(candidate):
                 return parsed
         return None
     return None
@@ -493,12 +512,109 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
     return result
 
 
+def _extract_neuropsych_conclusion(lines: list[str]) -> str:
+    """Return the bounded status and rationale, leaving scale tables structured."""
+
+    heading_re = re.compile(
+        r"^нейропсихологический статус(?:\s+и\s+топический\s+диагноз)?\s*:",
+        re.IGNORECASE,
+    )
+    starts = [index for index, line in enumerate(lines) if heading_re.match(line)]
+    for start in reversed(starts):
+        status: list[str] = [lines[start]]
+        for line in lines[start + 1 :]:
+            if re.match(r"^на основании данных\b", line, re.IGNORECASE):
+                break
+            if re.match(
+                r"^(?:количественная\s+оценка|монреальская\s+шкала|"
+                r"оценка\s+устойчивости|исследование\s+анамнеза|"
+                r"отмечается\b.*\bдинамик|рекомендовано|медицинский\s+психолог|подпись)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+            status.append(line)
+
+        rationale = ""
+        for line in lines[start + 1 :]:
+            if re.match(r"^на основании данных\b", line, re.IGNORECASE):
+                rationale = line
+                break
+            if re.match(
+                r"^(?:отмечается\b.*\bдинамик|рекомендовано|"
+                r"медицинский\s+психолог|подпись)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+        result = [clean_text(line) for line in status if clean_text(line)]
+        if rationale:
+            result.append(clean_text(rationale))
+        if len(result) > 1 or heading_re.sub("", result[0]).strip():
+            return "\n".join(result)
+    return ""
+
+
+def _extract_logopedist_conclusion(lines: list[str]) -> str:
+    """Prefer course dynamics plus the final speech status when available."""
+
+    dynamics = [
+        index for index, line in enumerate(lines) if re.match(r"^динамика\s*:", line, re.IGNORECASE)
+    ]
+    status_re = re.compile(
+        r"^логопедический статус(?:\s+при\s+выписке)?(?:\s+измен[её]н)?\s*:",
+        re.IGNORECASE,
+    )
+    signature_re = re.compile(r"^(?:медицинский\s+логопед|подпись)\b", re.IGNORECASE)
+    if dynamics:
+        start = dynamics[-1]
+        result = [lines[start]]
+        status_index = next(
+            (index for index in range(start + 1, len(lines)) if status_re.match(lines[index])),
+            None,
+        )
+        if status_index is not None:
+            result.append(lines[status_index])
+            for line in lines[status_index + 1 :]:
+                if signature_re.match(line) or re.match(
+                    r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
+                    r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
+                    line,
+                    re.IGNORECASE,
+                ):
+                    break
+                result.append(line)
+        return "\n".join(clean_text(line) for line in result if clean_text(line))
+
+    status_indices = [index for index, line in enumerate(lines) if status_re.match(line)]
+    if status_indices:
+        start = status_indices[-1]
+        result = [lines[start]]
+        for line in lines[start + 1 :]:
+            if signature_re.match(line) or re.match(
+                r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
+                r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+            result.append(line)
+        return "\n".join(clean_text(line) for line in result if clean_text(line))
+    return ""
+
+
 def extract_conclusion(
     document: ParsedDocument,
     role: SpecialistRole | None = None,
 ) -> str:
     blocks: list[str] = []
     lines = _document_lines(document)
+    if role is SpecialistRole.NEUROPSYCHOLOGIST:
+        if value := _extract_neuropsych_conclusion(lines):
+            return value
+    if role is SpecialistRole.LOGOPEDIST:
+        if value := _extract_logopedist_conclusion(lines):
+            return value
     for index, line in enumerate(lines):
         match = re.match(r"^заключение(?:[^:\n]{0,180})?\s*:\s*", line, re.IGNORECASE)
         if not match:

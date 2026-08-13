@@ -177,6 +177,13 @@ def _find_domain_row(table, code: str):
     return next(row for row in table.rows if row.cells[0].text == code)
 
 
+def _body_text_blocks(document: DocxDocument) -> list[str]:
+    return [
+        "".join(node.text or "" for node in child.iter(qn("w:t")))
+        for child in document.element.body
+    ]
+
+
 def _assert_signature_table_page_separator(document) -> None:
     procedures = _find_table(document, "Реабилитационные процедуры")
     signatures = _find_table(document, "Специалист МДРК")
@@ -514,6 +521,36 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
 
     _assert_table_geometry_and_pagination(initial)
     _assert_table_geometry_and_pagination(final)
+
+
+def test_neuropsych_status_precedes_scales_and_basis_follows_them(tmp_path) -> None:
+    episode = _representative_episode(tmp_path)
+    measured_at = episode.final_meeting_at
+    assert measured_at is not None
+    episode.findings.append(
+        SpecialistFinding(
+            SpecialistRole.NEUROPSYCHOLOGIST,
+            "Нейропсихологический статус:\nСТАТУС_НЕЙРО_ТЕСТ.\n"
+            "На основании данных ОБОСНОВАНИЕ_НЕЙРО_ТЕСТ.",
+            measured_at,
+            scales=[
+                ScaleMeasurement(
+                    "ШКАЛА_НЕЙРО_ТЕСТ",
+                    "3",
+                    measured_at,
+                    SpecialistRole.NEUROPSYCHOLOGIST,
+                )
+            ],
+        )
+    )
+
+    output = write_mdrk_docx(episode, MdrkKind.FINAL, tmp_path / "neuro-order.docx")
+    blocks = _body_text_blocks(Document(output))
+    status_index = next(index for index, text in enumerate(blocks) if "СТАТУС_НЕЙРО_ТЕСТ" in text)
+    table_index = next(index for index, text in enumerate(blocks) if "ШКАЛА_НЕЙРО_ТЕСТ" in text)
+    basis_index = next(index for index, text in enumerate(blocks) if "ОБОСНОВАНИЕ_НЕЙРО_ТЕСТ" in text)
+
+    assert status_index < table_index < basis_index
 
 
 def test_writer_recomputes_blockers_after_manual_fill(tmp_path) -> None:

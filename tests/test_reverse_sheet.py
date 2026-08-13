@@ -7,6 +7,8 @@ from docx.oxml.ns import qn
 from mdrk_builder.application.reverse_sheet import scan_reverse_sheet
 from mdrk_builder.domain import PatientIdentity, ReverseSheetDraft, ReverseSheetRow
 from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
+from mdrk_builder.ui import reverse_sheet_dialog as reverse_dialog_module
+from mdrk_builder.ui.reverse_sheet_dialog import confirm_incomplete_reverse_dates
 
 
 def _write_docx(path: Path, *paragraphs: str) -> None:
@@ -41,6 +43,12 @@ def test_reverse_sheet_uses_strict_header_dates_and_consultation_chronology(tmp_
         "Медицинский логопед: БЕТА Б.Б.",
     )
     _write_docx(
+        tmp_path / "невролог дневник.docx",
+        "Повторная консультация невролога",
+        "Дата консультации: 08.08.2026 12:15",
+        "Врач-невролог: ДЕЛЬТА Д.Д.",
+    )
+    _write_docx(
         tmp_path / "мдрк.docx",
         "Консилиум мультидисциплинарной реабилитационной команды",
         "10.08.2026 12:00",
@@ -62,9 +70,10 @@ def test_reverse_sheet_uses_strict_header_dates_and_consultation_chronology(tmp_
         "Консультация медицинского логопеда",
         "Консилиум МДРК",
     ]
-    assert draft.rows[0].appointment_date == date(2026, 8, 6)
+    assert draft.rows[0].appointment_date == date(2026, 8, 5)
     assert draft.rows[1].appointment_date == date(2026, 8, 8)
-    assert draft.rows[2].appointment_date is None
+    assert draft.rows[2].appointment_date == date(2026, 8, 10)
+    assert all("невролог" not in row.intervention.casefold() for row in draft.rows)
     assert draft.rows[2].performer == "АЛЬФА А.А."
     assert [row.performed_at for row in draft.rows] == sorted(
         row.performed_at for row in draft.rows if row.performed_at is not None
@@ -148,12 +157,66 @@ def test_existing_reverse_sheet_supplies_only_mdrk_dates_as_reviewable_evidence(
     draft = scan_reverse_sheet(tmp_path)
 
     mdrk = next(row for row in draft.rows if row.intervention == "Консилиум МДРК")
-    assert mdrk.appointment_date == date(2026, 8, 6)
+    assert mdrk.appointment_date == date(2026, 8, 7)
     assert mdrk.performed_at == datetime(2026, 8, 7, 8)
     assert any(
         issue.code == "reverse_mdrk_date_carried_from_existing_sheet"
         for issue in draft.issues
     )
+
+
+def test_source_mdrk_time_wins_and_planned_date_matches_execution_date(tmp_path) -> None:
+    _write_docx(
+        tmp_path / "невролог первичный.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 05.08.2026 09:00",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Номер ИБ: 123/26",
+    )
+    _write_docx(
+        tmp_path / "мдрк.docx",
+        "Консилиум мультидисциплинарной реабилитационной команды",
+        "10.08.2026 08-46",
+    )
+    existing = Document()
+    table = existing.add_table(rows=1, cols=6)
+    for index, value in enumerate(
+        ("Консилиум МДРК", "09.08.2026", "", "09.08.2026 07:00", "", "АЛЬФА А.А.")
+    ):
+        table.cell(0, index).text = value
+    existing.save(tmp_path / "оборотная сторона раздела.docx")
+
+    draft = scan_reverse_sheet(tmp_path)
+    mdrk = next(row for row in draft.rows if row.intervention == "Консилиум МДРК")
+
+    assert mdrk.appointment_date == date(2026, 8, 10)
+    assert mdrk.performed_at == datetime(2026, 8, 10, 8, 46)
+    assert not any(
+        issue.code == "reverse_mdrk_date_carried_from_existing_sheet"
+        for issue in draft.issues
+    )
+
+
+def test_initial_examination_uses_primary_neurologist_date_as_appointment(tmp_path) -> None:
+    _write_docx(
+        tmp_path / "невролог первичный.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 05.08.2026 09:00",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Номер ИБ: 123/26",
+    )
+    _write_docx(
+        tmp_path / "патопсихолог.docx",
+        "Первичное обследование медицинского психолога (патопсихолога)",
+        "Дата приема: 06.08.2026 08:00",
+        "Медицинский психолог/патопсихолог: БЕТА Б.Б.",
+    )
+
+    draft = scan_reverse_sheet(tmp_path)
+    row = next(item for item in draft.rows if "патопсихолога" in item.intervention)
+
+    assert row.appointment_date == date(2026, 8, 5)
+    assert row.performed_at == datetime(2026, 8, 6, 8)
 
 
 def test_writer_places_manual_fill_rows_between_appointment_blocks(tmp_path) -> None:
@@ -173,3 +236,32 @@ def test_writer_places_manual_fill_rows_between_appointment_blocks(tmp_path) -> 
     assert table.cell(5, 0).text == ""
     assert table.cell(6, 0).text == ""
     assert table.cell(7, 0).text == "Третья"
+
+
+def test_missing_reverse_dates_can_be_accepted_globally(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def accept(_title: str, message: str, **_kwargs) -> bool:
+        calls.append(message)
+        return True
+
+    monkeypatch.setattr(reverse_dialog_module.messagebox, "askyesno", accept)
+    rows = [ReverseSheetRow("КОНСУЛЬТАЦИЯ_ТЕСТ", None, None)]
+
+    assert confirm_incomplete_reverse_dates(object(), rows)
+    assert len(calls) == 1
+    assert "дата назначения" in calls[0]
+    assert "дата исполнения" in calls[0]
+
+
+def test_complete_reverse_dates_need_no_confirmation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        reverse_dialog_module.messagebox,
+        "askyesno",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected dialog")),
+    )
+
+    assert confirm_incomplete_reverse_dates(
+        object(),
+        [ReverseSheetRow("КОНСУЛЬТАЦИЯ_ТЕСТ", date(2026, 8, 5), datetime(2026, 8, 5, 9))],
+    )

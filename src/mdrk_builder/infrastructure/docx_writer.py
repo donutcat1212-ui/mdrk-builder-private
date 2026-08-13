@@ -373,6 +373,33 @@ class _DocumentRenderer:
         if physician:
             self._add_blank_paragraph(keep_with_next=True)
 
+        conclusion_text = finding.conclusion.strip() if finding is not None else ""
+        if (
+            role is SpecialistRole.NEUROPSYCHOLOGIST
+            and re.match(r"^нейропсихологический статус\b", conclusion_text, re.IGNORECASE)
+        ):
+            rationale_match = re.search(
+                r"(?im)^на основании данных\b",
+                conclusion_text,
+            )
+            status = (
+                conclusion_text[: rationale_match.start()].strip()
+                if rationale_match is not None
+                else conclusion_text
+            )
+            rationale = (
+                conclusion_text[rationale_match.start() :].strip()
+                if rationale_match is not None
+                else ""
+            )
+            if status:
+                self._add_multiline(status)
+            if scale_rows:
+                self._render_scale_table(scale_rows)
+            if rationale:
+                self._add_multiline(rationale)
+            return
+
         if scale_rows:
             if physician and self.snapshot.kind is MdrkKind.INITIAL:
                 self._render_initial_physician_scale_table(scale_rows)
@@ -380,12 +407,10 @@ class _DocumentRenderer:
                 self._render_scale_table(scale_rows)
 
         conclusion = self.document.add_paragraph(style=STYLE_BODY)
-        conclusion.paragraph_format.keep_with_next = bool(
-            finding is not None and finding.conclusion.strip()
-        )
+        conclusion.paragraph_format.keep_with_next = bool(conclusion_text)
         conclusion.add_run("Заключение: ")
-        if finding is not None and finding.conclusion.strip():
-            conclusion.add_run(finding.conclusion.strip())
+        if conclusion_text:
+            conclusion.add_run(conclusion_text)
 
     def _render_outcomes(self) -> None:
         self._add_section_value(
