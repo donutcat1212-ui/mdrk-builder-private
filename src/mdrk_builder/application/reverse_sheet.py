@@ -58,6 +58,25 @@ _NAME_INITIALS_RE = re.compile(
 _INITIALS_NAME_RE = re.compile(
     r"\b([А-ЯЁ])\.\s*([А-ЯЁ])\.\s*([А-ЯЁ][А-ЯЁа-яё-]{2,})\b",
 )
+_SIGNATURE_SEPARATOR_RE = re.compile(r"[_/\\|]+")
+_ROLE_PERFORMER_TOKENS: dict[SpecialistRole, tuple[str, ...]] = {
+    SpecialistRole.FRM: ("врач фрм", "врач физической и реабилитационной медицины"),
+    SpecialistRole.NEUROLOGIST: ("невролог",),
+    SpecialistRole.PHYSICAL_THERAPIST: (
+        "специалист по физической реабилитации",
+        "физический терапевт",
+        "врач лфк",
+    ),
+    SpecialistRole.OCCUPATIONAL_THERAPIST: ("эргореабилитолог", "эрготерапевт"),
+    SpecialistRole.LOGOPEDIST: ("логопед", "афазиолог"),
+    SpecialistRole.NEUROPSYCHOLOGIST: ("нейропсихолог",),
+    SpecialistRole.PATHOPSYCHOLOGIST: ("патопсихолог",),
+}
+_GENERIC_PERFORMER_LABEL_RE = re.compile(
+    r"\b(?:специалист|исполнитель|медицинский\s+работник|лечащий\s+врач)\b",
+    re.IGNORECASE,
+)
+_NON_NAME_SURNAMES = {"фамилия", "пациент", "пациентка"}
 
 
 def _leading_text(document: ParsedDocument) -> str:
@@ -80,14 +99,35 @@ def _consultation_intervention(
     return None
 
 
-def _performer(document: ParsedDocument) -> str:
-    text = clean_text(document.text)
+def _name_from_performer_line(line: str) -> str:
+    """Extract a name only after making Word signature separators non-semantic."""
+
+    text = clean_text(_SIGNATURE_SEPARATOR_RE.sub(" ", line))
     matches: list[tuple[int, str]] = []
     for match in _NAME_INITIALS_RE.finditer(text):
-        matches.append((match.start(), f"{match.group(1)} {match.group(2)}.{match.group(3)}."))
+        if match.group(1).casefold() not in _NON_NAME_SURNAMES:
+            matches.append((match.start(), f"{match.group(1)} {match.group(2)}.{match.group(3)}."))
     for match in _INITIALS_NAME_RE.finditer(text):
-        matches.append((match.start(), f"{match.group(3)} {match.group(1)}.{match.group(2)}."))
+        if match.group(3).casefold() not in _NON_NAME_SURNAMES:
+            matches.append((match.start(), f"{match.group(3)} {match.group(1)}.{match.group(2)}."))
     return max(matches, default=(-1, ""), key=lambda item: item[0])[1]
+
+
+def _performer(document: ParsedDocument, role: SpecialistRole) -> str:
+    """Read a performer from a professional header or signature, never body prose."""
+
+    lines = [line for line in document.text.splitlines() if clean_text(line)]
+    role_tokens = _ROLE_PERFORMER_TOKENS.get(role, ())
+    for line in reversed(lines):
+        low = line.casefold().replace("ё", "е")
+        if role_tokens and any(token.replace("ё", "е") in low for token in role_tokens):
+            if name := _name_from_performer_line(line):
+                return name
+    for line in reversed(lines):
+        if _GENERIC_PERFORMER_LABEL_RE.search(line):
+            if name := _name_from_performer_line(line):
+                return name
+    return ""
 
 
 def _treating_neurologist_performer(document: ParsedDocument) -> str:
@@ -326,7 +366,7 @@ def scan_reverse_sheet(
                 intervention,
                 appointment_date,
                 performed_at,
-                _performer(document),
+                _performer(document, classification.role),
                 document.source_path,
             )
         )

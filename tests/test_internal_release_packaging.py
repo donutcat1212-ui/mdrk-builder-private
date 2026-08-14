@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 from pathlib import Path
 
@@ -48,7 +47,6 @@ def test_builds_minimal_copy_ready_internal_folder(tmp_path: Path) -> None:
         "MDRK_Builder.exe",
         "issues.txt",
         "README_ПЕРЕД_ИСПОЛЬЗОВАНИЕМ.txt",
-        "SHA256SUMS.txt",
     }
     assert (package_dir / "MDRK_Builder.exe").read_bytes() == source_exe.read_bytes()
     assert (package_dir / "issues.txt").read_bytes() == b"\xef\xbb\xbf"
@@ -59,11 +57,6 @@ def test_builds_minimal_copy_ready_internal_folder(tmp_path: Path) -> None:
     assert "MDRK BUILDER 1.0.0 INTERNAL" in readme
     assert "как есть" in readme
     assert "issues.txt" in readme
-
-    expected_exe_hash = hashlib.sha256(source_exe.read_bytes()).hexdigest()
-    checksums = (package_dir / "SHA256SUMS.txt").read_text(encoding="ascii")
-    assert f"{expected_exe_hash}  MDRK_Builder.exe" in checksums
-    assert "issues.txt" not in checksums
 
 
 def test_rejects_mismatched_versions(tmp_path: Path) -> None:

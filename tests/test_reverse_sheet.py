@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -217,6 +218,40 @@ def test_initial_examination_uses_primary_neurologist_date_as_appointment(tmp_pa
 
     assert row.appointment_date == date(2026, 8, 5)
     assert row.performed_at == datetime(2026, 8, 6, 8)
+
+
+@pytest.mark.parametrize(
+    ("noise", "signature", "expected"),
+    [
+        ("ФАМИЛИЯ А.Д.", "АЛЬФА А.Д.", "АЛЬФА А.Д."),
+        ("Оценка работоспособности по А.Ю. ШКАЛОВОЙ", "БЕТА В.Г.", "БЕТА В.Г."),
+    ],
+)
+def test_neuropsych_performer_comes_from_professional_signature(
+    tmp_path,
+    noise: str,
+    signature: str,
+    expected: str,
+) -> None:
+    _write_docx(
+        tmp_path / "невролог первичный.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 05.08.2026 09:00",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Номер ИБ: 123/26",
+    )
+    _write_docx(
+        tmp_path / "нейропсихолог.docx",
+        "Повторная консультация медицинского психолога (нейропсихолога)",
+        "Дата консультации: 08.08.2026 11:45",
+        noise,
+        f"Медицинский психолог (нейропсихолог)____________________________{signature}",
+    )
+
+    draft = scan_reverse_sheet(tmp_path)
+    row = next(item for item in draft.rows if "нейропсихолога" in item.intervention)
+
+    assert row.performer == expected
 
 
 def test_writer_places_manual_fill_rows_between_appointment_blocks(tmp_path) -> None:
