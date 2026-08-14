@@ -12,6 +12,7 @@ from mdrk_builder.application.extractors import (
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
+    extract_specialist_name,
 )
 from mdrk_builder.domain import SpecialistRole
 from mdrk_builder.infrastructure.ooxml_reader import (
@@ -71,6 +72,31 @@ def test_clinical_datetime_accepts_space_inside_numeric_date() -> None:
     )
 
     assert extract_clinical_datetime(document) == datetime(2026, 8, 3, 16)
+
+
+def test_specialist_name_comes_from_role_signature_not_scale_attribution() -> None:
+    document = _document(
+        "Оценка по шкале КОЗЫРЕВОЙ: 12 баллов\n"
+        "ФАМИЛИЯ А.Д.\n"
+        "Медицинский психолог (нейропсихолог)__________СОТРУДНИК А.Д."
+    )
+
+    assert (
+        extract_specialist_name(document, SpecialistRole.NEUROPSYCHOLOGIST)
+        == "СОТРУДНИК А.Д."
+    )
+
+
+def test_treating_neurologist_wins_over_department_head_on_shared_line() -> None:
+    document = _document(
+        "СОТРУДНИК А.А., лечащий врач, врач-невролог /___/ "
+        "РУКОВОДИТЕЛЬ Б.Б., заведующий отделением"
+    )
+
+    assert (
+        extract_specialist_name(document, SpecialistRole.NEUROLOGIST)
+        == "СОТРУДНИК А.А."
+    )
 
 
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:

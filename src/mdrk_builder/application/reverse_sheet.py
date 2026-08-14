@@ -9,6 +9,7 @@ from mdrk_builder.application.extractors import (
     extract_clinical_datetime,
     extract_mdrk_document_datetime,
     extract_patient_identity,
+    extract_specialist_name,
     parse_first_datetime,
 )
 from mdrk_builder.application.scanner import discover_source_files
@@ -52,33 +53,6 @@ _CONSULTATION_HEADING_RE = re.compile(
     r"(?:консультаци\w*|осмотр\w*|обследован\w*)\b",
     re.IGNORECASE,
 )
-_NAME_INITIALS_RE = re.compile(
-    r"\b([А-ЯЁ][А-ЯЁа-яё-]{2,})\s+([А-ЯЁ])\.\s*([А-ЯЁ])\.",
-)
-_INITIALS_NAME_RE = re.compile(
-    r"\b([А-ЯЁ])\.\s*([А-ЯЁ])\.\s*([А-ЯЁ][А-ЯЁа-яё-]{2,})\b",
-)
-_SIGNATURE_SEPARATOR_RE = re.compile(r"[_/\\|]+")
-_ROLE_PERFORMER_TOKENS: dict[SpecialistRole, tuple[str, ...]] = {
-    SpecialistRole.FRM: ("врач фрм", "врач физической и реабилитационной медицины"),
-    SpecialistRole.NEUROLOGIST: ("невролог",),
-    SpecialistRole.PHYSICAL_THERAPIST: (
-        "специалист по физической реабилитации",
-        "физический терапевт",
-        "врач лфк",
-    ),
-    SpecialistRole.OCCUPATIONAL_THERAPIST: ("эргореабилитолог", "эрготерапевт"),
-    SpecialistRole.LOGOPEDIST: ("логопед", "афазиолог"),
-    SpecialistRole.NEUROPSYCHOLOGIST: ("нейропсихолог",),
-    SpecialistRole.PATHOPSYCHOLOGIST: ("патопсихолог",),
-}
-_GENERIC_PERFORMER_LABEL_RE = re.compile(
-    r"\b(?:специалист|исполнитель|медицинский\s+работник|лечащий\s+врач)\b",
-    re.IGNORECASE,
-)
-_NON_NAME_SURNAMES = {"фамилия", "пациент", "пациентка"}
-
-
 def _leading_text(document: ParsedDocument) -> str:
     return clean_text(" ".join(document.paragraphs[:24]))[:5000]
 
@@ -97,51 +71,6 @@ def _consultation_intervention(
         if any(token.replace("ё", "е") in low for token in tokens):
             return intervention
     return None
-
-
-def _name_from_performer_line(line: str) -> str:
-    """Extract a name only after making Word signature separators non-semantic."""
-
-    text = clean_text(_SIGNATURE_SEPARATOR_RE.sub(" ", line))
-    matches: list[tuple[int, str]] = []
-    for match in _NAME_INITIALS_RE.finditer(text):
-        if match.group(1).casefold() not in _NON_NAME_SURNAMES:
-            matches.append((match.start(), f"{match.group(1)} {match.group(2)}.{match.group(3)}."))
-    for match in _INITIALS_NAME_RE.finditer(text):
-        if match.group(3).casefold() not in _NON_NAME_SURNAMES:
-            matches.append((match.start(), f"{match.group(3)} {match.group(1)}.{match.group(2)}."))
-    return max(matches, default=(-1, ""), key=lambda item: item[0])[1]
-
-
-def _performer(document: ParsedDocument, role: SpecialistRole) -> str:
-    """Read a performer from a professional header or signature, never body prose."""
-
-    lines = [line for line in document.text.splitlines() if clean_text(line)]
-    role_tokens = _ROLE_PERFORMER_TOKENS.get(role, ())
-    for line in reversed(lines):
-        low = line.casefold().replace("ё", "е")
-        if role_tokens and any(token.replace("ё", "е") in low for token in role_tokens):
-            if name := _name_from_performer_line(line):
-                return name
-    for line in reversed(lines):
-        if _GENERIC_PERFORMER_LABEL_RE.search(line):
-            if name := _name_from_performer_line(line):
-                return name
-    return ""
-
-
-def _treating_neurologist_performer(document: ParsedDocument) -> str:
-    for line in document.text.splitlines():
-        low = line.casefold()
-        if "лечащ" not in low or "невролог" not in low:
-            continue
-        match = _NAME_INITIALS_RE.search(line)
-        if match:
-            return f"{match.group(1)} {match.group(2)}.{match.group(3)}."
-        reverse = _INITIALS_NAME_RE.search(line)
-        if reverse:
-            return f"{reverse.group(3)} {reverse.group(1)}.{reverse.group(2)}."
-    return ""
 
 
 def _planned_dates(document: ParsedDocument) -> dict[str, date]:
@@ -286,7 +215,7 @@ def scan_reverse_sheet(
         draft.identity = extract_patient_identity(primary)
         draft.admission_datetime = extract_admission_datetime(primary)
         planned = _planned_dates(primary)
-        primary_performer = _treating_neurologist_performer(primary)
+        primary_performer = extract_specialist_name(primary, SpecialistRole.NEUROLOGIST)
         primary_datetime = extract_clinical_datetime(primary)
         primary_clinical_date = primary_datetime.date() if primary_datetime is not None else None
 
@@ -366,7 +295,7 @@ def scan_reverse_sheet(
                 intervention,
                 appointment_date,
                 performed_at,
-                _performer(document, classification.role),
+                extract_specialist_name(document, classification.role),
                 document.source_path,
             )
         )

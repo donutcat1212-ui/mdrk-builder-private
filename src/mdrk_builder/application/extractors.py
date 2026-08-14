@@ -86,6 +86,82 @@ PHYSICIAN_NARRATIVE_SCALES = (
     ("Шкала Бартел", r"^Шкала\s+Бартел\w*\s*[:–—-]\s*(.+)$"),
 )
 
+_SPECIALIST_NAME_INITIALS_RE = re.compile(
+    r"\b([А-ЯЁ][А-ЯЁа-яё-]{2,})\s+([А-ЯЁ])\.\s*([А-ЯЁ])\."
+)
+_SPECIALIST_INITIALS_NAME_RE = re.compile(
+    r"\b([А-ЯЁ])\.\s*([А-ЯЁ])\.\s*([А-ЯЁ][А-ЯЁа-яё-]{2,})\b"
+)
+_SIGNATURE_SEPARATOR_RE = re.compile(r"[_/\\|]+")
+_SPECIALIST_ROLE_TOKENS: dict[SpecialistRole, tuple[str, ...]] = {
+    SpecialistRole.FRM: ("врач фрм", "врач физической и реабилитационной медицины"),
+    SpecialistRole.NEUROLOGIST: ("невролог",),
+    SpecialistRole.PHYSICAL_THERAPIST: (
+        "специалист по физической реабилитации",
+        "физический терапевт",
+        "врач лфк",
+    ),
+    SpecialistRole.OCCUPATIONAL_THERAPIST: (
+        "эргореабилитолог",
+        "эрготерапевт",
+        "специалист по эргореабилитации",
+    ),
+    SpecialistRole.LOGOPEDIST: ("логопед", "афазиолог"),
+    SpecialistRole.NEUROPSYCHOLOGIST: ("нейропсихолог",),
+    SpecialistRole.PATHOPSYCHOLOGIST: ("патопсихолог",),
+}
+_GENERIC_SPECIALIST_LABEL_RE = re.compile(
+    r"\b(?:специалист|исполнитель|медицинский\s+работник|лечащий\s+врач)\b",
+    re.IGNORECASE,
+)
+_NON_NAME_SURNAMES = {"фамилия", "пациент", "пациентка"}
+
+
+def _specialist_names_from_line(line: str) -> list[str]:
+    """Return ordered name candidates after neutralizing Word signature rules."""
+
+    text = clean_text(_SIGNATURE_SEPARATOR_RE.sub(" ", line))
+    matches: list[tuple[int, str]] = []
+    for match in _SPECIALIST_NAME_INITIALS_RE.finditer(text):
+        if match.group(1).casefold() not in _NON_NAME_SURNAMES:
+            matches.append(
+                (match.start(), f"{match.group(1)} {match.group(2)}.{match.group(3)}.")
+            )
+    for match in _SPECIALIST_INITIALS_NAME_RE.finditer(text):
+        if match.group(3).casefold() not in _NON_NAME_SURNAMES:
+            matches.append(
+                (match.start(), f"{match.group(3)} {match.group(1)}.{match.group(2)}.")
+            )
+    return [value for _, value in sorted(matches)]
+
+
+def extract_specialist_name(document: ParsedDocument, role: SpecialistRole) -> str:
+    """Read a clinician name only from a professional header or signature.
+
+    Scale names, patient labels, and narrative mentions are deliberately ignored.
+    A combined treating-physician/department-head line belongs to the treating
+    neurologist, so its first name is selected; ordinary signature lines use the
+    last name next to the professional label.
+    """
+
+    lines = [clean_text(line) for line in document.text.splitlines() if clean_text(line)]
+    role_tokens = _SPECIALIST_ROLE_TOKENS.get(role, ())
+    for line in reversed(lines):
+        low = line.casefold().replace("ё", "е")
+        if not role_tokens or not any(token.replace("ё", "е") in low for token in role_tokens):
+            continue
+        names = _specialist_names_from_line(line)
+        if names:
+            if role is SpecialistRole.NEUROLOGIST and "лечащ" in low:
+                return names[0]
+            return names[-1]
+    for line in reversed(lines):
+        if _GENERIC_SPECIALIST_LABEL_RE.search(line):
+            names = _specialist_names_from_line(line)
+            if names:
+                return names[-1]
+    return ""
+
 
 def _canonical_scale_name(value: str) -> str:
     name = clean_text(value)

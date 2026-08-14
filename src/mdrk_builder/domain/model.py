@@ -49,6 +49,7 @@ class SourceDocument:
     document_type: str = "unknown"
     extraction_method: str = "docx"
     sha256: str = ""
+    specialist_name: str = ""
 
 
 @dataclass(slots=True)

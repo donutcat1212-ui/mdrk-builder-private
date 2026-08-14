@@ -213,6 +213,24 @@ def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
     assert {domain.code for domain in episode.icf_domains} == {"s110"}
 
 
+def test_scan_preserves_specialist_name_for_signature_roster(tmp_path) -> None:
+    document = Document()
+    for value in (
+        "Первичная консультация медицинского логопеда",
+        "Дата консультации: 05.06.2026 14:00",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Медицинский логопед /________/ СОТРУДНИК Л.Г.",
+    ):
+        document.add_paragraph(value)
+    document.save(tmp_path / "логопед первичный.docx")
+
+    episode = scan_patient_folder(tmp_path)
+
+    source = next(item for item in episode.sources if item.role is SpecialistRole.LOGOPEDIST)
+    assert source.specialist_name == "СОТРУДНИК Л.Г."
+
+
 def test_mixed_record_numbers_and_admission_dates_are_blocking() -> None:
     records = [
         _record(

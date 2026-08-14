@@ -26,6 +26,7 @@ from mdrk_builder.application.extractors import (
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
+    extract_specialist_name,
 )
 from mdrk_builder.domain import (
     Episode,
@@ -1381,6 +1382,7 @@ def scan_patient_folder(
                         document_type=classification.document_type,
                         extraction_method="docx" if source_path.suffix.casefold() == ".docx" else "converted",
                         sha256=document.sha256,
+                        specialist_name=extract_specialist_name(document, classification.role),
                     )
                 )
                 records.append(ScannedRecord(document, classification, clinical_datetime))
