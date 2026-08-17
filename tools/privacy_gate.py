@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -12,7 +13,16 @@ from zipfile import BadZipFile, ZipFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_TEMPLATE = Path("src/mdrk_builder/resources/canonical_mdrk_template.docx")
+DISCHARGE_SUMMARY_TEMPLATE = Path(
+    "src/mdrk_builder/resources/discharge_summary_template.docx"
+)
+RUNTIME_TEMPLATES = {CANONICAL_TEMPLATE, DISCHARGE_SUMMARY_TEMPLATE}
 ALLOWED_STAFF_NAMES = ("Поляев Б.Б.",)
+ALLOWED_ORGANIZATION_NAMES = ("ФГБУ «ФЦМН» ФМБА РОССИИ",)
+APPROVED_DISCHARGE_MEDIA = {
+    "word/media/image1.png": "bf790a517fad5ffcf3cf05043b284aee5a075ffd47dff6b87a90c0e8f6515434",
+    "word/media/image2.png": "146c9f8747d25dbd7b34d63dd4ec9e3adc21ce800bb73d71d800b329dee276e9",
+}
 
 EXCLUDED_PARTS = {
     ".git",
@@ -185,9 +195,11 @@ def _read_text(path: Path) -> str | None:
     return None
 
 
-def _without_allowed_staff_names(text: str) -> str:
+def _without_allowed_text(text: str) -> str:
     for full_name in ALLOWED_STAFF_NAMES:
         text = text.replace(full_name, "РАЗРЕШЕННЫЙ_СОТРУДНИК")
+    for organization_name in ALLOWED_ORGANIZATION_NAMES:
+        text = text.replace(organization_name, "РАЗРЕШЕННАЯ_ОРГАНИЗАЦИЯ")
     return text
 
 
@@ -195,7 +207,7 @@ def _scan_text(path: Path, display_path: Path) -> list[Finding]:
     text = _read_text(path)
     if text is None:
         return []
-    text = _without_allowed_staff_names(text)
+    text = _without_allowed_text(text)
     findings: list[Finding] = []
     for reason, pattern in _risky_text_patterns():
         for match in pattern.finditer(text):
@@ -218,6 +230,10 @@ def _scan_binary_markers(path: Path, display_path: Path) -> list[Finding]:
 
 def audit_docx(path: Path, display_path: Path | None = None) -> list[Finding]:
     shown = display_path or path
+    is_discharge_template = (
+        shown == DISCHARGE_SUMMARY_TEMPLATE
+        or path.resolve() == (PROJECT_ROOT / DISCHARGE_SUMMARY_TEMPLATE).resolve()
+    )
     findings: list[Finding] = []
     try:
         with ZipFile(path) as archive:
@@ -227,8 +243,19 @@ def audit_docx(path: Path, display_path: Path | None = None) -> list[Finding]:
             names = archive.namelist()
             lowered = [name.casefold() for name in names]
             for name, low_name in zip(names, lowered, strict=True):
+                if is_discharge_template and name in APPROVED_DISCHARGE_MEDIA:
+                    digest = hashlib.sha256(archive.read(name)).hexdigest()
+                    if digest != APPROVED_DISCHARGE_MEDIA[name]:
+                        findings.append(
+                            Finding(shown, f"изменён утверждённый медиа-ресурс DOCX: {name}")
+                        )
+                    continue
                 if any(low_name.startswith(prefix) for prefix in FORBIDDEN_DOCX_PARTS):
                     findings.append(Finding(shown, f"запрещённая скрытая часть DOCX: {name}"))
+            if is_discharge_template:
+                missing_media = set(APPROVED_DISCHARGE_MEDIA).difference(names)
+                for name in sorted(missing_media):
+                    findings.append(Finding(shown, f"отсутствует утверждённый медиа-ресурс DOCX: {name}"))
             for name in names:
                 if not name.casefold().endswith((".xml", ".rels")):
                     continue
@@ -247,7 +274,7 @@ def audit_docx(path: Path, display_path: Path | None = None) -> list[Finding]:
                     for attribute in element.attrib:
                         if attribute.rsplit("}", 1)[-1].casefold().startswith("rsid"):
                             findings.append(Finding(shown, f"атрибут сессии редактирования в {name}"))
-                decoded = _without_allowed_staff_names(data.decode("utf-8", errors="ignore"))
+                decoded = _without_allowed_text(data.decode("utf-8", errors="ignore"))
                 for reason, pattern in _risky_text_patterns():
                     if pattern.search(decoded):
                         findings.append(Finding(shown, f"{reason} внутри {name}"))
@@ -276,7 +303,7 @@ def audit_source_tree(root: Path) -> list[Finding]:
         relative = _relative(path, root)
         suffix = path.suffix.casefold()
         if suffix in PATIENT_SOURCE_SUFFIXES:
-            if relative == CANONICAL_TEMPLATE:
+            if relative in RUNTIME_TEMPLATES:
                 findings.extend(audit_docx(path, relative))
             else:
                 findings.append(Finding(relative, "patient/source формат запрещён в исходном дереве"))

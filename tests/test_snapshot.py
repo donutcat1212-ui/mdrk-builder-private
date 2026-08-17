@@ -291,6 +291,43 @@ def test_scale_history_merges_common_short_and_full_name_aliases() -> None:
     assert rows[0].current and rows[0].current.value == "40"
 
 
+def test_rankin_spelling_and_language_aliases_share_one_scale_row() -> None:
+    episode = Episode(folder=Path("/episode"))
+    episode.final_meeting_at = datetime(2026, 6, 20, 11)
+    role = SpecialistRole.FRM
+    episode.findings = [
+        SpecialistFinding(
+            role=role,
+            scales=[
+                ScaleMeasurement(
+                    "Модифицированная шкала Рэнкина",
+                    "4",
+                    datetime(2026, 6, 5, 15),
+                    role,
+                ),
+                ScaleMeasurement(
+                    "Шкала Ренкина",
+                    "3",
+                    datetime(2026, 6, 12, 15),
+                    role,
+                ),
+                ScaleMeasurement(
+                    "Modified Rankin Scale",
+                    "2",
+                    datetime(2026, 6, 19, 15),
+                    role,
+                ),
+            ],
+        )
+    ]
+
+    rows = build_snapshot(episode, MdrkKind.FINAL).scale_rows
+
+    assert len(rows) == 1
+    assert rows[0].initial and rows[0].initial.value == "4"
+    assert rows[0].current and rows[0].current.value == "2"
+
+
 def test_scale_rows_do_not_leak_retrospective_values_from_late_source() -> None:
     episode = Episode(folder=Path("/episode"))
     episode.initial_meeting_at = datetime(2026, 6, 6, 8)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from mdrk_builder.domain import SpecialistRole
+from mdrk_builder.domain import MdrkKind, SpecialistRole
 from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, clean_text
 
 
@@ -13,7 +13,9 @@ class DocumentClassification:
     document_type: str
     is_mdrk: bool = False
     confidence: float = 0.5
-    mdrk_kind: str = ""
+    mdrk_kind: MdrkKind | None = None
+    is_discharge_summary: bool = False
+    is_generated_output: bool = False
 
 
 def _haystack(document: ParsedDocument) -> tuple[str, str]:
@@ -22,11 +24,40 @@ def _haystack(document: ParsedDocument) -> tuple[str, str]:
     return path_text, content
 
 
+def _is_discharge_summary(document: ParsedDocument) -> bool:
+    heading = re.compile(
+        r"^выписной(?:\s+\(переводной\))?\s+эпикриз$",
+        re.IGNORECASE,
+    )
+    cell_texts = (
+        cell.text
+        for table in document.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    has_heading = any(
+        heading.fullmatch(cleaned)
+        for value in (*document.paragraphs, *cell_texts)
+        for line in value.replace("\r", "\n").splitlines()
+        if (cleaned := clean_text(line))
+    )
+    normalized = clean_text(document.text).casefold()
+    return bool(
+        has_heading
+        and "номер медицинской карты" in normalized
+        and "сведения о пациенте" in normalized
+    )
+
+
 _ICF_CODE_RE = re.compile(r"^(?:[bsdeе]\d[\w.]*|pf\d*)$", re.IGNORECASE)
 _QUALIFIER_RE = re.compile(r"^[0-4]\s*\+?$", re.IGNORECASE)
+_MDRK_HEADING = (
+    "консилиум мультидисциплинарной "
+    "реабилитационной команды"
+)
 
 
-def _classify_mdrk_kind(document: ParsedDocument) -> str:
+def _classify_mdrk_kind(document: ParsedDocument) -> MdrkKind | None:
     """Distinguish MDRK-1 from MDRK-2 using the document's own table state.
 
     Filenames are intentionally ignored: anonymized folders often contain
@@ -44,7 +75,7 @@ def _classify_mdrk_kind(document: ParsedDocument) -> str:
             "выполнены в полном объеме",
         )
     ):
-        return "final"
+        return MdrkKind.FINAL
 
     initial_evidence = False
     for table in document.tables:
@@ -66,21 +97,45 @@ def _classify_mdrk_kind(document: ParsedDocument) -> str:
                 if _QUALIFIER_RE.fullmatch(repeat):
                     repeat_rows += 1
             if repeat_rows:
-                return "final"
+                return MdrkKind.FINAL
             if initial_rows:
                 initial_evidence = True
 
         header = " ".join(clean_text(value) for value in table.rows[0].as_list()).casefold()
         if "повторно" in header:
-            return "final"
+            return MdrkKind.FINAL
         if "шкала/опросник" in header and "исходно" in header:
             initial_evidence = True
 
-    return "initial" if initial_evidence else ""
+    return MdrkKind.INITIAL if initial_evidence else None
 
 
 def classify_document(document: ParsedDocument) -> DocumentClassification:
     path_text, content = _haystack(document)
+    if document.is_generated_output:
+        if _MDRK_HEADING in content:
+            return DocumentClassification(
+                SpecialistRole.OTHER,
+                "mdrk",
+                is_mdrk=True,
+                confidence=1.0,
+                mdrk_kind=_classify_mdrk_kind(document),
+                is_generated_output=True,
+            )
+        return DocumentClassification(
+            SpecialistRole.OTHER,
+            "generated_output",
+            confidence=1.0,
+            is_generated_output=True,
+        )
+    is_discharge_summary = _is_discharge_summary(document)
+    if is_discharge_summary:
+        return DocumentClassification(
+            SpecialistRole.OTHER,
+            "discharge_summary",
+            confidence=1.0,
+            is_discharge_summary=True,
+        )
     leading_lines = [
         cleaned.casefold()
         for paragraph in document.paragraphs[:12]
@@ -89,7 +144,7 @@ def classify_document(document: ParsedDocument) -> DocumentClassification:
     ][:24]
     leading_content = clean_text(" ".join(leading_lines[:8])).casefold()[:1600]
     heading_content = clean_text(" ".join(leading_lines)).casefold()[:4000]
-    if "консилиум мультидисциплинарной реабилитационной команды" in content:
+    if _MDRK_HEADING in content:
         return DocumentClassification(
             SpecialistRole.OTHER,
             "mdrk",

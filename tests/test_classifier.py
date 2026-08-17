@@ -1,7 +1,10 @@
 from pathlib import Path
 
-from mdrk_builder.domain import SpecialistRole
+from mdrk_builder.domain import MdrkKind, SpecialistRole
 from mdrk_builder.infrastructure.classifier import classify_document
+from mdrk_builder.infrastructure.document_metadata import (
+    GENERATED_DOCUMENT_IDENTIFIER,
+)
 from mdrk_builder.infrastructure.ooxml_reader import (
     BodyItem,
     ParsedCell,
@@ -71,7 +74,7 @@ def test_mdrk_is_recognized_before_specialist_mentions() -> None:
 
     assert classification.is_mdrk
     assert classification.document_type == "mdrk"
-    assert classification.mdrk_kind == ""
+    assert classification.mdrk_kind is None
 
 
 def test_mdrk_kind_uses_repeat_table_state_not_filename() -> None:
@@ -92,8 +95,8 @@ def test_mdrk_kind_uses_repeat_table_state_not_filename() -> None:
     initial = classify_document(_document("fixtures/broken-2.docx", title, [initial_table]))
     final = classify_document(_document("fixtures/broken-1.docx", title, [final_table]))
 
-    assert initial.mdrk_kind == "initial"
-    assert final.mdrk_kind == "final"
+    assert initial.mdrk_kind is MdrkKind.INITIAL
+    assert final.mdrk_kind is MdrkKind.FINAL
 
 
 def test_final_outcome_text_prevents_empty_repeat_mdrk2_from_becoming_baseline() -> None:
@@ -113,7 +116,7 @@ def test_final_outcome_text_prevents_empty_repeat_mdrk2_from_becoming_baseline()
         )
     )
 
-    assert classification.mdrk_kind == "final"
+    assert classification.mdrk_kind is MdrkKind.FINAL
 
 
 def test_explicit_frm_job_title_overrides_neurology_folder_hint() -> None:
@@ -212,6 +215,66 @@ def test_discharge_heading_precedes_historical_primary_exam() -> None:
     )
 
     assert classification.document_type == "final"
+
+
+def test_canonical_discharge_summary_is_a_distinct_non_specialist_document() -> None:
+    classification = classify_document(
+        _document(
+            "fixtures/discharge.docx",
+            "\n".join(
+                (
+                    "Выписной эпикриз",
+                    "Сведения о пациенте",
+                    "Номер медицинской карты пациента №5906/26",
+                    "Первичный осмотр невролога в анамнезе",
+                )
+            ),
+        )
+    )
+
+    assert classification.role is SpecialistRole.OTHER
+    assert classification.document_type == "discharge_summary"
+    assert classification.is_discharge_summary
+
+
+def test_generated_marker_takes_precedence_over_clinical_content() -> None:
+    document = _document(
+        "fixtures/generated.docx",
+        "\n".join(
+            (
+                "Выписной эпикриз",
+                "Сведения о пациенте",
+                "Номер медицинской карты пациента №5906/26",
+            )
+        ),
+    )
+    document.core_identifier = GENERATED_DOCUMENT_IDENTIFIER
+
+    classification = classify_document(document)
+
+    assert classification.role is SpecialistRole.OTHER
+    assert classification.document_type == "generated_output"
+    assert classification.is_generated_output
+    assert not classification.is_discharge_summary
+    assert not classification.is_mdrk
+
+
+def test_generated_mdrk_keeps_clinical_type_for_discharge_projection() -> None:
+    document = _document(
+        "fixtures/generated-mdrk.docx",
+        (
+            "Консилиум мультидисциплинарной реабилитационной команды\n"
+            "Достигнута в полном объёме"
+        ),
+    )
+    document.core_identifier = GENERATED_DOCUMENT_IDENTIFIER
+
+    classification = classify_document(document)
+
+    assert classification.document_type == "mdrk"
+    assert classification.is_mdrk
+    assert classification.mdrk_kind is MdrkKind.FINAL
+    assert classification.is_generated_output
 
 
 def test_primary_heading_in_fifth_paragraph_is_still_a_heading() -> None:

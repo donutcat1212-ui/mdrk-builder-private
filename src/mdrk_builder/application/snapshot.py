@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from difflib import SequenceMatcher
-import re
 
 from mdrk_builder.application.clinical_text import is_empty_clinical_update
+from mdrk_builder.application.scale_registry import (
+    canonical_scale_key,
+    canonical_scale_name,
+)
 from mdrk_builder.domain import (
     ClinicalSections,
     Episode,
@@ -80,25 +83,6 @@ def select_findings(episode: Episode, boundary: datetime | None) -> tuple[Specia
         if (item := _latest_finding(by_role.get(role, []), boundary)) is not None
     ]
     return tuple(selected)
-
-
-def _normalized_scale_name(value: str) -> str:
-    normalized = " ".join(value.casefold().replace("ё", "е").split())
-    normalized = re.sub(r"[^0-9a-zа-я]+", " ", normalized)
-    normalized = " ".join(normalized.split())
-    if "ренкин" in normalized:
-        return "модифицированная шкала ренкина"
-    if "берг" in normalized:
-        return "шкала баланса берга"
-    if "бартел" in normalized:
-        return "индекс бартел"
-    if "ривермид" in normalized:
-        return "индекс мобильности ривермид"
-    if "тинетт" in normalized:
-        return "шкала тинетти"
-    if "moca" in normalized:
-        return "moca"
-    return normalized
 
 
 def _normalized_scale_value(value: str) -> str:
@@ -223,7 +207,7 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
                 continue
             key = _matching_scale_key(
                 normalized_measurement.specialist,
-                _normalized_scale_name(normalized_measurement.name),
+                canonical_scale_name(normalized_measurement.name),
                 observations,
             )
             observations.setdefault(key, []).append(
@@ -240,18 +224,22 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         sample = current or initial
         rows.append(ScaleRow(role, sample.name, initial, current))
     physician_order = (
-        "ривермид",
-        "рэнкин",
+        "rivermead",
+        "rankin",
         "nrs 2002",
         "скф",
-        "реабилитационной маршрутизации",
-        "бартел",
+        "shrm",
+        "barthel",
     )
 
     def scale_sort_key(item: ScaleRow) -> tuple[str, int, str]:
-        normalized = item.name.casefold()
+        normalized = canonical_scale_key(item.name)
         priority = next(
-            (index for index, token in enumerate(physician_order) if token in normalized),
+            (
+                index
+                for index, token in enumerate(physician_order)
+                if token in normalized
+            ),
             len(physician_order),
         )
         if item.role not in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:

@@ -321,6 +321,11 @@ def set_cell_horizontal_margins(cell: _Cell, *, left: int, right: int) -> None:
         margins.append(element)
 
 
+def compact_header_cell(cell: _Cell) -> None:
+    set_cell_horizontal_margins(cell, left=0, right=0)
+    set_cell_no_wrap(cell)
+
+
 def mark_header_row(row: _Row) -> None:
     set_repeat_table_header(row)
     set_cant_split(row)

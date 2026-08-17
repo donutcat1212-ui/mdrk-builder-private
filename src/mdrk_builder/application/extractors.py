@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
 
+from mdrk_builder.application.scale_registry import canonical_scale_label
 from mdrk_builder.domain import (
     IcfQualifier,
     PatientIdentity,
@@ -61,6 +62,7 @@ INSTRUMENTAL_START_RE = re.compile(
 )
 PHYSICIAN_SCALE_TOKENS = (
     "ривермид",
+    "ренкин",
     "рэнкин",
     "rankin",
     "nrs 2002",
@@ -161,13 +163,6 @@ def extract_specialist_name(document: ParsedDocument, role: SpecialistRole) -> s
             if names:
                 return names[-1]
     return ""
-
-
-def _canonical_scale_name(value: str) -> str:
-    name = clean_text(value)
-    if re.match(r"^Модифицированная\s+шкала\s+Р[еэ]нкин\w*$", name, re.IGNORECASE):
-        return "Модифицированная шкала Рэнкина"
-    return name
 
 
 def _year(raw: str) -> int:
@@ -989,7 +984,7 @@ def extract_scale_measurements(
                 if len(values) < 3:
                     continue
                 measured = header_datetime(values[0]) or document_datetime
-                name, value = _canonical_scale_name(values[1]), values[2]
+                name, value = canonical_scale_label(values[1]), values[2]
                 if name and value:
                     measurements.append(ScaleMeasurement(name, value, measured, role, document.source_path))
             continue
@@ -999,7 +994,7 @@ def extract_scale_measurements(
                 values = [clean_text(value) for value in row]
                 if not values or not values[0]:
                     continue
-                scale_name = _canonical_scale_name(values[0])
+                scale_name = canonical_scale_label(values[0])
                 if (
                     role is SpecialistRole.NEUROPSYCHOLOGIST
                     and scale_name.casefold() == "общий балл"

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from mdrk_builder.application.identifiers import normalize_medical_record_number
 from mdrk_builder.application.validation import (
     acknowledge_conflict,
     acknowledge_issue,
@@ -26,6 +27,20 @@ from mdrk_builder.domain import (
     SpecialistFinding,
     SpecialistRole,
 )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "СКП9002/99",
+        "№ СКП 9002 / 99",
+        "скпскп9002/99",
+    ),
+)
+def test_medical_record_number_normalization_has_one_public_contract(
+    value: str,
+) -> None:
+    assert normalize_medical_record_number(value) == "9002/99"
 
 
 def _valid_episode() -> Episode:

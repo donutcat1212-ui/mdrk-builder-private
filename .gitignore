@@ -27,8 +27,8 @@ issues.txt
 issues.txt.lock
 .issues-pending-*.txt
 
-# Clinical/source documents are denied by default. The only Word file allowed
-# in version control is the sanitized canonical runtime template.
+# Clinical/source documents are denied by default. Only sanitized runtime
+# templates are allowed in version control.
 *.doc
 *.docx
 *.rtf
@@ -46,3 +46,4 @@ issues.txt.lock
 *.tiff
 *.zip
 !src/mdrk_builder/resources/canonical_mdrk_template.docx
+!src/mdrk_builder/resources/discharge_summary_template.docx

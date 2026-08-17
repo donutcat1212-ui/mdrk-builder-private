@@ -7,8 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from mdrk_builder.infrastructure.document_metadata import (
+    GENERATED_DOCUMENT_IDENTIFIER,
+)
+
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+DC_NS = "http://purl.org/dc/elements/1.1/"
 NS = {"w": W_NS}
 
 
@@ -107,6 +112,7 @@ class ParsedDocument:
     tables: list[ParsedTable] = field(default_factory=list)
     body_items: list[BodyItem] = field(default_factory=list)
     sha256: str = ""
+    core_identifier: str = ""
 
     @property
     def text(self) -> str:
@@ -117,6 +123,10 @@ class ParsedDocument:
             elif item.kind == "table":
                 ordered.append(self.tables[item.index].text)
         return "\n".join(value for value in ordered if value)
+
+    @property
+    def is_generated_output(self) -> bool:
+        return self.core_identifier == GENERATED_DOCUMENT_IDENTIFIER
 
 
 def _parse_table(table_element: ET.Element) -> ParsedTable:
@@ -151,6 +161,14 @@ def read_docx(path: Path, *, source_path: Path | None = None) -> ParsedDocument:
         sha256=hashlib.sha256(raw).hexdigest(),
     )
     with zipfile.ZipFile(path) as package:
+        try:
+            core_properties = ET.fromstring(package.read("docProps/core.xml"))
+        except KeyError:
+            core_properties = None
+        if core_properties is not None:
+            identifier = core_properties.find(f"{{{DC_NS}}}identifier")
+            if identifier is not None and identifier.text:
+                parsed.core_identifier = clean_text(identifier.text)
         root = ET.fromstring(package.read("word/document.xml"))
     body = root.find("./w:body", NS)
     if body is None:

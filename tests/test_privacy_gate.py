@@ -13,6 +13,12 @@ def test_canonical_template_has_no_hidden_privacy_surfaces() -> None:
     assert audit_docx(template) == []
 
 
+def test_discharge_template_has_only_approved_static_branding() -> None:
+    template = Path("src/mdrk_builder/resources/discharge_summary_template.docx")
+
+    assert audit_docx(template) == []
+
+
 def test_source_gate_rejects_identity_and_local_user_path(tmp_path) -> None:
     source = tmp_path / "fixture.py"
     local_path = "/" + "Users" + "/account/Documents/source.docx"

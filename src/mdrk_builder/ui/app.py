@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import queue
 import re
 import sys
 import threading
@@ -12,11 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import TypeVar
 
 from docx import Document
 
 from mdrk_builder import __version__
+from mdrk_builder.application.discharge_summary import scan_discharge_summary
 from mdrk_builder.application.feedback import FeedbackStorageError, save_feedback
+from mdrk_builder.application.identifiers import normalize_medical_record_number
 from mdrk_builder.application.reverse_sheet import scan_reverse_sheet
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.snapshot import build_snapshot
@@ -28,8 +30,10 @@ from mdrk_builder.application.validation import (
     has_issue_acknowledgements,
 )
 from mdrk_builder.domain import (
+    DischargeSummaryDraft,
     Episode,
     MdrkKind,
+    PatientIdentity,
     ReviewIssue,
     ReviewSeverity,
     ReverseSheetDraft,
@@ -39,6 +43,9 @@ from mdrk_builder.domain import (
     SpecialistRole,
 )
 from mdrk_builder.infrastructure.docx_writer import canonical_template_path, write_mdrk_docx
+from mdrk_builder.infrastructure.discharge_summary_writer import (
+    write_discharge_summary_docx,
+)
 from mdrk_builder.ui.dialogs import (
     FeedbackDialog,
     FindingDialog,
@@ -47,6 +54,8 @@ from mdrk_builder.ui.dialogs import (
     ScaleDialog,
     install_edit_shortcuts,
 )
+from mdrk_builder.ui.background_job import BackgroundJobRunner
+from mdrk_builder.ui.discharge_summary_dialog import DischargeSummaryDialog
 from mdrk_builder.ui.episode_adapter import (
     EpisodeFormData,
     apply_episode_form_data,
@@ -78,11 +87,14 @@ REVIEW_NOTICE_SHORT = (
     "автоматический перенос может содержать пропуски или ошибки."
 )
 
+BackgroundResultT = TypeVar("BackgroundResultT")
+
 
 def about_text() -> str:
     return (
         f"МДРК Builder {__version__}\n\n"
-        "Локальный инструмент подготовки редактируемого проекта документа МДРК.\n\n"
+        "Локальный инструмент подготовки редактируемых проектов МДРК, "
+        "выписного эпикриза и оборотного листа.\n\n"
         "Программа автоматически переносит и форматирует данные из выбранных "
         "документов. Результат может содержать пропуски или ошибки распознавания и должен быть "
         "проверен перед подписанием и включением в медицинскую документацию.\n\n"
@@ -93,29 +105,13 @@ def about_text() -> str:
     )
 
 
-def _normalized_record_number(value: str) -> str:
-    normalized = "".join(
-        character
-        for character in value.casefold().replace("№", "")
-        if character.isalnum() or character == "/"
-    )
-    while normalized.startswith("скп"):
-        normalized = normalized.removeprefix("скп")
-    return normalized
-
-
 class MdrkBuilderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.episode: Episode | None = None
         self._current_kind = MdrkKind.INITIAL
-        self._scan_results: queue.Queue[tuple[Episode | None, Exception | None]] = queue.Queue()
-        self._reverse_scan_results: queue.Queue[
-            tuple[ReverseSheetDraft | None, Exception | None]
-        ] = queue.Queue()
-        self._scan_thread: threading.Thread | None = None
-        self._scan_folder: Path | None = None
-        self._reverse_scan_folder: Path | None = None
+        self._background_jobs = BackgroundJobRunner(root, thread_factory=threading.Thread)
+        self._active_job_folder: Path | None = None
         self._scanning = False
         self._setting_folder_field = False
         self._last_form_error = ""
@@ -152,6 +148,7 @@ class MdrkBuilderApp:
         file_menu.add_command(label="Выбрать папку…", command=self._choose_folder, accelerator="Ctrl+O")
         file_menu.add_command(label="Сканировать", command=self._start_scan, accelerator="F5")
         file_menu.add_command(label="Оборотный лист назначений…", command=self._start_reverse_sheet_scan)
+        file_menu.add_command(label="Выписной эпикриз…", command=self._start_discharge_summary_scan)
         file_menu.add_separator()
         file_menu.add_command(label="Создать DOCX…", command=self._generate, accelerator="Ctrl+S")
         file_menu.add_separator()
@@ -190,12 +187,18 @@ class MdrkBuilderApp:
             command=self._start_reverse_sheet_scan,
         )
         self.reverse_sheet_button.grid(row=0, column=5, padx=(2, 0))
+        self.discharge_summary_button = ttk.Button(
+            top,
+            text="Выписной эпикриз…",
+            command=self._start_discharge_summary_scan,
+        )
+        self.discharge_summary_button.grid(row=0, column=6, padx=(6, 0))
         ttk.Label(
             top,
             text=REVIEW_NOTICE_SHORT,
             wraplength=880,
             justify="left",
-        ).grid(row=1, column=1, columnspan=5, sticky="w", padx=(6, 2), pady=(4, 0))
+        ).grid(row=1, column=1, columnspan=6, sticky="w", padx=(6, 2), pady=(4, 0))
         top.columnconfigure(1, weight=1)
 
         snapshot = ttk.LabelFrame(self.root, text="Снимок", padding=(8, 4))
@@ -571,8 +574,8 @@ class MdrkBuilderApp:
         if self.episode is not None:
             record_number_changed = (
                 bool(entered_record_number)
-                and _normalized_record_number(entered_record_number)
-                != _normalized_record_number(
+                and normalize_medical_record_number(entered_record_number)
+                != normalize_medical_record_number(
                     self.episode.materialized_medical_record_number
                     or self.episode.identity.medical_record_number
                 )
@@ -622,32 +625,19 @@ class MdrkBuilderApp:
             scan_overrides[override_name] = entered_meeting
         self._invalidate_episode()
         self._set_folder_field(str(folder))
-        self._scan_folder = folder
+        self._active_job_folder = folder
         self._set_scanning(True)
         self.status_var.set("Сканирование исходных документов…")
+        self._start_background_job(
+            lambda: scan_patient_folder(folder, **scan_overrides),
+            self._finish_scan,
+            thread_name="mdrk-folder-scan",
+        )
 
-        def worker() -> None:
-            try:
-                self._scan_results.put(
-                    (scan_patient_folder(folder, **scan_overrides), None)
-                )
-            except Exception as exc:  # delivered to the UI thread
-                self._scan_results.put((None, exc))
-
-        self._scan_thread = threading.Thread(target=worker, name="mdrk-folder-scan", daemon=False)
-        self._scan_thread.start()
-        self.root.after(100, self._poll_scan_result)
-
-    def _poll_scan_result(self) -> None:
-        try:
-            episode, error = self._scan_results.get_nowait()
-        except queue.Empty:
-            if self._scanning:
-                self.root.after(100, self._poll_scan_result)
-            return
+    def _finish_scan(self, episode: Episode | None, error: Exception | None) -> None:
         self._set_scanning(False)
-        scan_folder = self._scan_folder
-        self._scan_folder = None
+        scan_folder = self._active_job_folder
+        self._active_job_folder = None
         if error is not None:
             self._invalidate_episode()
             self.status_var.set("Сканирование завершилось ошибкой")
@@ -674,42 +664,26 @@ class MdrkBuilderApp:
     def _start_reverse_sheet_scan(self) -> None:
         if self._scanning:
             return
-        try:
-            folder = parse_episode_folder(self.folder_var.get())
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Папка не найдена", str(exc))
+        folder = self._auxiliary_scan_folder()
+        if folder is None:
             return
-        if not folder.is_dir():
-            messagebox.showerror("Папка не найдена", "Выберите существующую папку эпизода.")
-            return
-        self._reverse_scan_folder = folder
+        self._active_job_folder = folder
         self._set_scanning(True)
         self.status_var.set("Сбор оборотного листа из документов консультаций…")
-
-        def worker() -> None:
-            try:
-                self._reverse_scan_results.put((scan_reverse_sheet(folder), None))
-            except Exception as exc:  # delivered to the UI thread
-                self._reverse_scan_results.put((None, exc))
-
-        self._scan_thread = threading.Thread(
-            target=worker,
-            name="mdrk-reverse-sheet-scan",
-            daemon=False,
+        self._start_background_job(
+            lambda: scan_reverse_sheet(folder),
+            self._finish_reverse_sheet_scan,
+            thread_name="mdrk-reverse-sheet-scan",
         )
-        self._scan_thread.start()
-        self.root.after(100, self._poll_reverse_sheet_result)
 
-    def _poll_reverse_sheet_result(self) -> None:
-        try:
-            draft, error = self._reverse_scan_results.get_nowait()
-        except queue.Empty:
-            if self._scanning:
-                self.root.after(100, self._poll_reverse_sheet_result)
-            return
+    def _finish_reverse_sheet_scan(
+        self,
+        draft: ReverseSheetDraft | None,
+        error: Exception | None,
+    ) -> None:
         self._set_scanning(False)
-        scan_folder = self._reverse_scan_folder
-        self._reverse_scan_folder = None
+        scan_folder = self._active_job_folder
+        self._active_job_folder = None
         if error is not None:
             self.status_var.set("Сбор оборотного листа завершился ошибкой")
             messagebox.showerror("Ошибка сканирования", str(error))
@@ -721,6 +695,74 @@ class MdrkBuilderApp:
             f"Оборотный лист: найдено строк — {len(draft.rows)}, требует проверки — {len(draft.issues)}"
         )
         ReverseSheetDialog(self.root, draft)
+
+    def _start_discharge_summary_scan(self) -> None:
+        if self._scanning:
+            return
+        folder = self._auxiliary_scan_folder()
+        if folder is None:
+            return
+
+        self._active_job_folder = folder
+        self._set_scanning(True)
+        self.status_var.set("Сбор выписного эпикриза из документов эпизода…")
+        self._start_background_job(
+            lambda: scan_discharge_summary(folder),
+            self._finish_discharge_summary_scan,
+            thread_name="mdrk-discharge-summary-scan",
+        )
+
+    def _finish_discharge_summary_scan(
+        self,
+        draft: DischargeSummaryDraft | None,
+        error: Exception | None,
+    ) -> None:
+        self._set_scanning(False)
+        scan_folder = self._active_job_folder
+        self._active_job_folder = None
+        if error is not None:
+            self.status_var.set("Сбор выписного эпикриза завершился ошибкой")
+            messagebox.showerror("Ошибка сканирования", str(error))
+            return
+
+        if draft is None or scan_folder is None or not self._folder_field_matches(scan_folder):
+            self.status_var.set("Результат выписного эпикриза отброшен: папка изменилась.")
+            return
+        blockers = len(
+            [issue for issue in draft.issues if issue.severity is ReviewSeverity.BLOCKING]
+        )
+        warnings = len(
+            [issue for issue in draft.issues if issue.severity is ReviewSeverity.WARNING]
+        )
+        self.status_var.set(
+            "Выписной эпикриз собран: "
+            f"блокирующих проблем — {blockers}, предупреждений — {warnings}"
+        )
+        DischargeSummaryDialog(self.root, draft)
+
+    def _auxiliary_scan_folder(self) -> Path | None:
+        try:
+            folder = parse_episode_folder(self.folder_var.get())
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Папка не найдена", str(exc))
+            return None
+        if not folder.is_dir():
+            messagebox.showerror("Папка не найдена", "Выберите существующую папку эпизода.")
+            return None
+        return folder
+
+    def _start_background_job(
+        self,
+        operation: Callable[[], BackgroundResultT],
+        on_finished: Callable[[BackgroundResultT | None, Exception | None], None],
+        *,
+        thread_name: str,
+    ) -> None:
+        runner = getattr(self, "_background_jobs", None)
+        if runner is None:
+            runner = BackgroundJobRunner(self.root, thread_factory=threading.Thread)
+            self._background_jobs = runner
+        runner.start(operation, on_finished, thread_name=thread_name)
 
     def _set_scanning(self, value: bool) -> None:
         self._scanning = value
@@ -735,6 +777,9 @@ class MdrkBuilderApp:
         reverse_button = getattr(self, "reverse_sheet_button", None)
         if reverse_button is not None:
             reverse_button.configure(state="disabled" if self._scanning else "normal")
+        discharge_button = getattr(self, "discharge_summary_button", None)
+        if discharge_button is not None:
+            discharge_button.configure(state="disabled" if self._scanning else "normal")
         can_use_episode = self.episode is not None and not self._scanning
         self.generate_button.configure(state="normal" if can_use_episode else "disabled")
 
@@ -1446,27 +1491,58 @@ def _generate_smoke_document(directory: Path) -> Path:
     reopened = Document(output)
     if not reopened.paragraphs:
         raise RuntimeError("Тестовый DOCX не содержит ожидаемых абзацев")
+
+    _write_smoke_report("phase=write_discharge_docx")
+    discharge = DischargeSummaryDraft(
+        folder=directory,
+        identity=PatientIdentity(
+            full_name=episode.identity.full_name,
+            birth_date=episode.identity.birth_date,
+            sex=episode.identity.sex,
+            medical_record_number=episode.identity.medical_record_number,
+        ),
+        admission_datetime=episode.admission_datetime,
+        source_paths=tuple(source.path for source in episode.sources),
+        header_text="Сведения о пациенте: АБСТРАКТНЫЙ МАРКЕР",
+        clinical_diagnosis="АБСТРАКТНЫЙ МАРКЕР",
+        radiation_exposure="0 мЗв",
+        recommendations="ПРОВЕРИТЬ ПЕРЕД ПОДПИСАНИЕМ",
+    )
+    discharge_output = write_discharge_summary_docx(
+        discharge,
+        directory / "smoke-discharge-output.docx",
+    )
+    _write_smoke_report("phase=reopen_discharge_docx")
+    discharge_document = Document(discharge_output)
+    if not discharge_document.tables or not discharge_document.paragraphs:
+        raise RuntimeError("Тестовый выписной эпикриз не содержит ожидаемой разметки")
     return output
 
 
 def smoke_test(*, include_ui: bool = False) -> int:
     with TemporaryDirectory(prefix="mdrk-builder-smoke-") as temporary:
-        _generate_smoke_document(Path(temporary))
+        temporary_path = Path(temporary)
+        _generate_smoke_document(temporary_path)
 
-    if include_ui:
-        _write_smoke_report("phase=tk_init")
-        root = tk.Tk()
-        try:
-            root.withdraw()
-            MdrkBuilderApp(root)
-            _write_smoke_report("phase=app_constructed")
-            _assert_consistent_geometry_managers(root)
-            root.update_idletasks()
-            root.update()
-            _write_smoke_report("phase=idle_updated")
-        finally:
-            root.destroy()
-            _write_smoke_report("phase=ui_destroyed")
+        if include_ui:
+            _write_smoke_report("phase=tk_init")
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                MdrkBuilderApp(root)
+                smoke_discharge = DischargeSummaryDraft(
+                    folder=temporary_path,
+                )
+                discharge_dialog = DischargeSummaryDialog(root, smoke_discharge)
+                _write_smoke_report("phase=app_constructed")
+                _assert_consistent_geometry_managers(root)
+                root.update_idletasks()
+                root.update()
+                discharge_dialog.destroy()
+                _write_smoke_report("phase=idle_updated")
+            finally:
+                root.destroy()
+                _write_smoke_report("phase=ui_destroyed")
     return 0
 
 

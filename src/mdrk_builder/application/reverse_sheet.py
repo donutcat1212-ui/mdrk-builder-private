@@ -12,7 +12,7 @@ from mdrk_builder.application.extractors import (
     extract_specialist_name,
     parse_first_datetime,
 )
-from mdrk_builder.application.scanner import discover_source_files
+from mdrk_builder.application.source_scan import scan_source_documents
 from mdrk_builder.domain import (
     ReverseSheetDraft,
     ReverseSheetRow,
@@ -20,9 +20,9 @@ from mdrk_builder.domain import (
     ReviewSeverity,
     SpecialistRole,
 )
-from mdrk_builder.infrastructure.classifier import DocumentClassification, classify_document
-from mdrk_builder.infrastructure.converter import ConversionError, DocumentNormalizer
-from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, clean_text, read_docx
+from mdrk_builder.infrastructure.classifier import DocumentClassification
+from mdrk_builder.infrastructure.converter import DocumentNormalizer
+from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, clean_text
 
 
 ROLE_INTERVENTIONS = {
@@ -157,29 +157,23 @@ def scan_reverse_sheet(
 ) -> ReverseSheetDraft:
     folder = folder.resolve()
     draft = ReverseSheetDraft(folder=folder)
-    source_files = discover_source_files(folder)
-    owns_normalizer = normalizer is None
-    normalizer = normalizer or DocumentNormalizer()
-    parsed: list[tuple[ParsedDocument, DocumentClassification]] = []
-    try:
-        for source_path in source_files:
-            try:
-                normalized = normalizer.normalize(source_path)
-                document = read_docx(normalized, source_path=source_path)
-                parsed.append((document, classify_document(document)))
-            except (ConversionError, OSError, ValueError, KeyError) as exc:
-                draft.issues.append(
-                    ReviewIssue(
-                        "reverse_source_read_failed",
-                        f"Не удалось прочитать {source_path.name}: {exc}",
-                        ReviewSeverity.WARNING,
-                        "sources",
-                        source_path,
-                    )
-                )
-    finally:
-        if owns_normalizer:
-            normalizer.close()
+    source_scan = scan_source_documents(folder, normalizer=normalizer)
+    parsed = [
+        (item.document, item.classification) for item in source_scan.documents
+    ]
+    for failure in source_scan.failures:
+        draft.issues.append(
+            ReviewIssue(
+                "reverse_source_read_failed",
+                (
+                    f"Не удалось прочитать {failure.source_path.name}: "
+                    f"{failure.error}"
+                ),
+                ReviewSeverity.WARNING,
+                "sources",
+                failure.source_path,
+            )
+        )
 
     primary_candidates = [item for item in parsed if _is_primary_neurologist(item[1])]
     existing_mdrk_rows = [
@@ -275,6 +269,8 @@ def scan_reverse_sheet(
         if classification.document_type in {
             "administrative",
             "assignment_sheet",
+            "discharge_summary",
+            "generated_output",
             "other_consilium",
             "unknown",
         }:

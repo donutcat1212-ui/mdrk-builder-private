@@ -2,8 +2,9 @@
 
 ## Scope
 
-- Local, offline-first Windows desktop tool for assembling editable MDRK-1 and
-  MDRK-2 DOCX files from one rehabilitation episode folder.
+- Local, offline-first Windows desktop tool for assembling editable MDRK-1,
+  MDRK-2, discharge-summary and reverse-sheet DOCX files from one rehabilitation
+  episode folder.
 - Supported inputs: DOCX, DOC and RTF. Ignore PDF.
 - Never modify source patient documents.
 - Local hand-filled MDRKs may be used only for private validation and are never

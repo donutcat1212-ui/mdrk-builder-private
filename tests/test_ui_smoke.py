@@ -9,6 +9,9 @@ def test_packaged_smoke_path_generates_docx(tmp_path) -> None:
 
     assert output.is_file()
     assert Document(output).paragraphs
+    discharge_output = tmp_path / "smoke-discharge-output.docx"
+    assert discharge_output.is_file()
+    assert Document(discharge_output).tables
 
 
 def test_packaged_ci_smoke_does_not_initialize_tk(monkeypatch) -> None:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from os import replace
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -11,7 +9,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor, Twips
 from docx.styles.style import BaseStyle
-from lxml import etree
 
 from .docx_layout import (
     BOTTOM_MARGIN_DXA,
@@ -23,6 +20,7 @@ from .docx_layout import (
     RIGHT_MARGIN_DXA,
     TOP_MARGIN_DXA,
 )
+from .docx_output import resolve_docx_output_path, save_sanitized_docx_atomically
 
 
 TEMPLATE_FILENAME = "canonical_mdrk_template.docx"
@@ -47,12 +45,11 @@ def canonical_template_path() -> Path:
 
 
 def create_canonical_template(output_path: Path) -> Path:
-    output_path = output_path.resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = resolve_docx_output_path(output_path)
 
     document = Document()
     _configure_page(document)
-    _configure_styles(document)
+    configure_mdrk_styles(document)
     _configure_metadata(document)
 
     document.add_paragraph("Канонический шаблон МДРК", style=STYLE_TITLE)
@@ -60,9 +57,7 @@ def create_canonical_template(output_path: Path) -> Path:
         "Служебный ресурс. Содержимое заменяется генератором документа.",
         style=STYLE_BODY,
     )
-    document.save(output_path)
-    _sanitize_package(output_path)
-    return output_path
+    return save_sanitized_docx_atomically(document, output_path)
 
 
 def _configure_page(document: Document) -> None:
@@ -80,7 +75,7 @@ def _configure_page(document: Document) -> None:
     section.different_first_page_header_footer = False
 
 
-def _configure_styles(document: Document) -> None:
+def configure_mdrk_styles(document: Document) -> None:
     styles = document.styles
     normal = styles["Normal"]
     _set_font(normal)
@@ -131,7 +126,11 @@ def _configure_styles(document: Document) -> None:
     _set_font(mcf_code, size_pt=TABLE_FONT_SIZE_PT)
     _set_paragraph_format(mcf_code, alignment=WD_ALIGN_PARAGRAPH.CENTER)
 
-    task = _paragraph_style(styles, STYLE_TASK, styles["List Number"])
+    try:
+        task_base = styles["List Number"]
+    except KeyError:
+        task_base = body
+    task = _paragraph_style(styles, STYLE_TASK, task_base)
     _set_font(task)
     _set_paragraph_format(task, alignment=WD_ALIGN_PARAGRAPH.LEFT)
 
@@ -200,66 +199,3 @@ def _configure_metadata(document: Document) -> None:
     properties.comments = "Санитизированный служебный ресурс без данных пациента"
     properties.keywords = ""
     properties.category = ""
-
-
-def _sanitize_package(path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.sanitizing")
-    with ZipFile(path) as source, ZipFile(temporary, "w", ZIP_DEFLATED) as target:
-        for info in source.infolist():
-            name = info.filename
-            lowered = name.casefold()
-            if (
-                lowered.startswith("customxml/")
-                or lowered.startswith("word/comments")
-                or lowered in {
-                    "docprops/custom.xml",
-                    "docprops/thumbnail.jpeg",
-                    "word/people.xml",
-                }
-            ):
-                continue
-            data = source.read(name)
-            if name == "[Content_Types].xml":
-                data = _sanitize_content_types(data)
-            elif name == "_rels/.rels":
-                data = _sanitize_relationships(data, {"docProps/thumbnail.jpeg"})
-            elif name == "word/_rels/document.xml.rels":
-                data = _sanitize_relationships(data, {"../customXml/item1.xml"})
-            elif lowered.endswith(".xml"):
-                data = _strip_revision_session_ids(data)
-            target.writestr(info, data)
-    replace(temporary, path)
-
-
-def _strip_revision_session_ids(data: bytes) -> bytes:
-    root = etree.fromstring(data)
-    for element in root.iter():
-        for attribute in list(element.attrib):
-            if etree.QName(attribute).localname.casefold().startswith("rsid"):
-                del element.attrib[attribute]
-    for element in list(root.iter()):
-        for child in list(element):
-            if etree.QName(child).localname in {"rsid", "rsidRoot", "rsids"}:
-                element.remove(child)
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
-
-
-def _sanitize_content_types(data: bytes) -> bytes:
-    root = etree.fromstring(data)
-    namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
-    for override in list(root.findall(f"{{{namespace}}}Override")):
-        if override.get("PartName", "").startswith("/customXml/"):
-            root.remove(override)
-    for default in list(root.findall(f"{{{namespace}}}Default")):
-        if default.get("Extension", "").casefold() == "jpeg":
-            root.remove(default)
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
-
-
-def _sanitize_relationships(data: bytes, stripped_targets: set[str]) -> bytes:
-    root = etree.fromstring(data)
-    namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
-    for relationship in list(root.findall(f"{{{namespace}}}Relationship")):
-        if relationship.get("Target") in stripped_targets:
-            root.remove(relationship)
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)

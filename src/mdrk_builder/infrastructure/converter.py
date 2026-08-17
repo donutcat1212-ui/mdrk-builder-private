@@ -26,6 +26,7 @@ class WindowsWordConverter:
 
     WD_FORMAT_DOCX = 16
     WD_DO_NOT_SAVE_CHANGES = 0
+    MSO_AUTOMATION_SECURITY_FORCE_DISABLE = 3
     WORD_QUIT_TIMEOUT_SECONDS = 5.0
     WORD_KILL_TIMEOUT_SECONDS = 5.0
 
@@ -90,6 +91,7 @@ class WindowsWordConverter:
         self._word = word
         self._word_pid = self._process_id_for_word(word)
         try:
+            word.AutomationSecurity = self.MSO_AUTOMATION_SECURITY_FORCE_DISABLE
             word.Visible = False
             word.DisplayAlerts = 0
             # This suppresses Word's own "not the default app" prompt. It does not

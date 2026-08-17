@@ -1,4 +1,3 @@
-import queue
 from datetime import date, datetime
 from types import SimpleNamespace
 
@@ -504,9 +503,7 @@ def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
     app.episode.final_meeting_at = datetime(2026, 8, 20, 11)
     app._current_kind = MdrkKind.FINAL
     app._scanning = False
-    app._scan_results = queue.Queue()
-    app._scan_thread = None
-    app._scan_folder = None
+    app._active_job_folder = None
     app._entry_variables = {"meeting": _Variable("19.08.2026 15:30")}
     app.folder_var = _Variable(str(tmp_path))
     app.status_var = _Variable()
@@ -554,9 +551,7 @@ def test_rescan_passes_changed_admission_and_recomputes_default_meetings(
     app.episode.final_meeting_at = datetime(2026, 8, 20, 11)
     app._current_kind = MdrkKind.INITIAL
     app._scanning = False
-    app._scan_results = queue.Queue()
-    app._scan_thread = None
-    app._scan_folder = None
+    app._active_job_folder = None
     app._entry_variables = {
         "record_number": _Variable("123/26"),
         "admission": _Variable("08.08.2026 12:00"),

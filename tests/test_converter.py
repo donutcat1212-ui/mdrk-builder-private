@@ -57,18 +57,34 @@ def test_legacy_converter_is_resolved_once_and_closed(monkeypatch, tmp_path: Pat
     assert calls == {"factory": 1, "close": 1}
 
 
-def test_word_start_suppresses_default_app_warning(monkeypatch) -> None:
+def test_word_start_secures_word_before_open_and_suppresses_default_app_warning(
+    monkeypatch, tmp_path: Path
+) -> None:
     calls = {"co_initialize": 0, "dispatch": []}
+    security_at_open: list[int] = []
     pythoncom = ModuleType("pythoncom")
     pythoncom.CoInitialize = lambda: calls.__setitem__(  # type: ignore[attr-defined]
         "co_initialize", calls["co_initialize"] + 1
     )
     pythoncom.CoUninitialize = lambda: None  # type: ignore[attr-defined]
 
+    class FakeDocument:
+        def SaveAs2(self, path: str, **_kwargs) -> None:
+            Path(path).write_bytes(b"normalized")
+
+        def Close(self, **_kwargs) -> None:
+            return None
+
     word = SimpleNamespace(
+        AutomationSecurity=0,
         Visible=True,
         DisplayAlerts=1,
         Options=SimpleNamespace(AlertIfNotDefault=True),
+    )
+    word.Documents = SimpleNamespace(
+        Open=lambda *_args, **_kwargs: (
+            security_at_open.append(word.AutomationSecurity) or FakeDocument()
+        )
     )
     client = ModuleType("win32com.client")
 
@@ -90,8 +106,14 @@ def test_word_start_suppresses_default_app_warning(monkeypatch) -> None:
     )
 
     converter = WindowsWordConverter()
+    source = tmp_path / "source.doc"
+    destination = tmp_path / "destination.docx"
+    source.write_bytes(b"legacy")
 
-    assert converter._start() is word
+    assert converter.convert(source, destination) == destination
+    expected_security = WindowsWordConverter.MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+    assert security_at_open == [expected_security]
+    assert word.AutomationSecurity == expected_security
     assert word.Visible is False
     assert word.DisplayAlerts == 0
     assert word.Options.AlertIfNotDefault is False

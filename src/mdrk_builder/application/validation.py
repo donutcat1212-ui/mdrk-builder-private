@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from mdrk_builder.application.identifiers import normalize_medical_record_number
 from mdrk_builder.application.snapshot import (
     select_findings,
     select_icf_domains,
@@ -52,20 +53,11 @@ ACKNOWLEDGEABLE_CONFLICT_CODES = frozenset(
 )
 
 
-def _normalized_record_number(value: str) -> str:
-    normalized = "".join(
-        character
-        for character in value.casefold().replace("№", "")
-        if character.isalnum() or character == "/"
-    )
-    while normalized.startswith("скп"):
-        normalized = normalized.removeprefix("скп")
-    return normalized
-
-
 def _conflict_fingerprint(episode: Episode, code: str) -> str | None:
     if code == "identity_conflict_medical_record_number":
-        value = _normalized_record_number(episode.identity.medical_record_number)
+        value = normalize_medical_record_number(
+            episode.identity.medical_record_number
+        )
         return value or None
     if code == "mixed_hospitalizations_admission_date":
         value = episode.admission_datetime
@@ -218,8 +210,12 @@ def acknowledge_conflict(episode: Episode, code: str) -> None:
     if (
         code == "identity_conflict_medical_record_number"
         and episode.materialized_medical_record_number
-        and _normalized_record_number(episode.identity.medical_record_number)
-        != _normalized_record_number(episode.materialized_medical_record_number)
+        and normalize_medical_record_number(
+            episode.identity.medical_record_number
+        )
+        != normalize_medical_record_number(
+            episode.materialized_medical_record_number
+        )
     ):
         raise ValueError(
             "Номер ИБ изменён. Нажмите «Сканировать», чтобы заново собрать эпизод "
@@ -340,8 +336,12 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
 
     if (
         episode.materialized_medical_record_number
-        and _normalized_record_number(episode.identity.medical_record_number)
-        != _normalized_record_number(episode.materialized_medical_record_number)
+        and normalize_medical_record_number(
+            episode.identity.medical_record_number
+        )
+        != normalize_medical_record_number(
+            episode.materialized_medical_record_number
+        )
     ):
         issues.append(
             ReviewIssue(

@@ -1,12 +1,18 @@
 from datetime import date, datetime
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
 from mdrk_builder.application.reverse_sheet import scan_reverse_sheet
-from mdrk_builder.domain import PatientIdentity, ReverseSheetDraft, ReverseSheetRow
+from mdrk_builder.domain import (
+    PatientIdentity,
+    ReverseSheetDraft,
+    ReverseSheetRow,
+    ReviewSeverity,
+)
 from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
 from mdrk_builder.ui import reverse_sheet_dialog as reverse_dialog_module
 from mdrk_builder.ui.reverse_sheet_dialog import confirm_incomplete_reverse_dates
@@ -17,6 +23,25 @@ def _write_docx(path: Path, *paragraphs: str) -> None:
     for paragraph in paragraphs:
         document.add_paragraph(paragraph)
     document.save(path)
+
+
+def test_reverse_sheet_preserves_source_read_failure_issue(tmp_path) -> None:
+    broken_path = tmp_path / "broken.docx"
+    with ZipFile(broken_path, "w"):
+        pass
+
+    draft = scan_reverse_sheet(tmp_path)
+
+    read_failure = next(
+        issue for issue in draft.issues if issue.code == "reverse_source_read_failed"
+    )
+    assert read_failure.source == broken_path
+    assert read_failure.severity is ReviewSeverity.WARNING
+    assert broken_path.name in read_failure.message
+    assert any(
+        issue.code == "reverse_primary_neurologist_missing"
+        for issue in draft.issues
+    )
 
 
 def test_reverse_sheet_uses_strict_header_dates_and_consultation_chronology(tmp_path) -> None:

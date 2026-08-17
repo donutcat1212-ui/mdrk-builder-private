@@ -1,5 +1,10 @@
 """Domain model for rehabilitation episodes and MDRK snapshots."""
 
+from .discharge_summary import (
+    DischargeScaleRow,
+    DischargeSummaryDraft,
+    DischargeTeamFinding,
+)
 from .model import (
     ClinicalSections,
     Episode,
@@ -20,6 +25,9 @@ from .model import (
 
 __all__ = [
     "ClinicalSections",
+    "DischargeScaleRow",
+    "DischargeSummaryDraft",
+    "DischargeTeamFinding",
     "Episode",
     "IcfDomain",
     "IcfQualifier",

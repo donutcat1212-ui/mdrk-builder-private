@@ -29,19 +29,27 @@ from mdrk_builder.application.extractors import (
     extract_scale_measurements,
     extract_specialist_name,
 )
+from mdrk_builder.application.identifiers import normalize_medical_record_number
+from mdrk_builder.application.source_scan import (
+    SourceScanResult,
+    SourceReadFailure,
+    discover_source_files,
+    scan_source_documents,
+)
 from mdrk_builder.domain import (
     Episode,
     IcfDomain,
     IcfQualifier,
+    MdrkKind,
     ReviewIssue,
     ReviewSeverity,
     SourceDocument,
     SpecialistFinding,
     SpecialistRole,
 )
-from mdrk_builder.infrastructure.classifier import DocumentClassification, classify_document
+from mdrk_builder.infrastructure.classifier import DocumentClassification
 from mdrk_builder.infrastructure.converter import ConversionError, DocumentNormalizer
-from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, read_docx
+from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument
 
 
 @dataclass(slots=True)
@@ -49,21 +57,6 @@ class ScannedRecord:
     document: ParsedDocument
     classification: DocumentClassification
     clinical_datetime: datetime | None
-
-
-def discover_source_files(folder: Path) -> list[Path]:
-    if not folder.is_dir():
-        raise NotADirectoryError(folder)
-    return sorted(
-        (
-            path
-            for path in folder.rglob("*")
-            if path.is_file()
-            and path.suffix.casefold() in DocumentNormalizer.SUPPORTED
-            and not path.name.startswith("~$")
-        ),
-        key=lambda path: str(path).casefold(),
-    )
 
 
 def _initial_mdrk_day(value: date) -> date:
@@ -112,7 +105,7 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
         setattr(episode.identity, field_name, chosen)
         distinct = {
             (
-                _normalized_record_number(str(value))
+                normalize_medical_record_number(str(value))
                 if field_name == "medical_record_number"
                 else str(value).casefold()
             )
@@ -138,10 +131,10 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
                     for identity, item in identities
                     if getattr(identity, field_name)
                     and (
-                        _normalized_record_number(
+                        normalize_medical_record_number(
                             str(getattr(identity, field_name))
                         )
-                        != _normalized_record_number(str(chosen))
+                        != normalize_medical_record_number(str(chosen))
                         if field_name == "medical_record_number"
                         else getattr(identity, field_name) != chosen
                     )
@@ -159,17 +152,6 @@ def _merge_identity(episode: Episode, records: list[ScannedRecord]) -> None:
             )
 
 
-def _normalized_record_number(value: str) -> str:
-    normalized = "".join(
-        character
-        for character in value.casefold().replace("№", "")
-        if character.isalnum() or character == "/"
-    )
-    while normalized.startswith("скп"):
-        normalized = normalized.removeprefix("скп")
-    return normalized
-
-
 def _records_for_selected_medical_record(
     episode: Episode,
     records: list[ScannedRecord],
@@ -181,13 +163,15 @@ def _records_for_selected_medical_record(
     episode's dates, sections, findings, ICF or procedures.
     """
 
-    selected = _normalized_record_number(episode.identity.medical_record_number)
+    selected = normalize_medical_record_number(
+        episode.identity.medical_record_number
+    )
     if not selected:
         return records
     active: list[ScannedRecord] = []
     for record in records:
         candidate = extract_patient_identity(record.document).medical_record_number
-        if candidate and _normalized_record_number(candidate) != selected:
+        if candidate and normalize_medical_record_number(candidate) != selected:
             source = record.document.source_path
             episode.excluded_source_paths.add(source)
             episode.issues.append(
@@ -211,7 +195,9 @@ def _refresh_record_number_conflict_source(
     episode: Episode,
     records: list[ScannedRecord],
 ) -> None:
-    selected = _normalized_record_number(episode.identity.medical_record_number)
+    selected = normalize_medical_record_number(
+        episode.identity.medical_record_number
+    )
     if not selected:
         return
     conflicting_source = next(
@@ -223,7 +209,7 @@ def _refresh_record_number_conflict_source(
                     record.document
                 ).medical_record_number
             )
-            and _normalized_record_number(candidate) != selected
+            and normalize_medical_record_number(candidate) != selected
         ),
         None,
     )
@@ -1397,11 +1383,12 @@ def scan_patient_folder(
     final_meeting_at: datetime | None = None,
     medical_record_number_override: str | None = None,
     admission_datetime_override: datetime | None = None,
+    source_scan: SourceScanResult | None = None,
 ) -> Episode:
     folder = folder.resolve()
     episode = Episode(folder=folder)
-    source_files = discover_source_files(folder)
-    if not source_files:
+    source_scan = source_scan or scan_source_documents(folder, normalizer=normalizer)
+    if not source_scan.source_files:
         episode.issues.append(
             ReviewIssue(
                 "no_word_sources",
@@ -1412,71 +1399,84 @@ def scan_patient_folder(
         )
         return episode
 
-    owns_normalizer = normalizer is None
-    normalizer = normalizer or DocumentNormalizer()
     records: list[ScannedRecord] = []
     mdrk1_records: list[ScannedRecord] = []
-    failures = 0
-    try:
-        for source_path in source_files:
-            try:
-                normalized = normalizer.normalize(source_path)
-                document = read_docx(normalized, source_path=source_path)
-                classification = classify_document(document)
-                if classification.is_mdrk:
-                    if classification.mdrk_kind == "initial":
-                        mdrk_datetime = extract_mdrk_document_datetime(document)
-                        episode.sources.append(
-                            SourceDocument(
-                                path=source_path,
-                                role=SpecialistRole.OTHER,
-                                clinical_datetime=mdrk_datetime,
-                                document_type="mdrk_initial",
-                                extraction_method=(
-                                    "docx"
-                                    if source_path.suffix.casefold() == ".docx"
-                                    else "converted"
-                                ),
-                                sha256=document.sha256,
-                            )
+    failures = list(source_scan.failures)
+    for scanned in source_scan.documents:
+        document = scanned.document
+        classification = scanned.classification
+        source_path = document.source_path
+        try:
+            if (
+                classification.is_generated_output
+                or classification.is_discharge_summary
+            ):
+                continue
+            if classification.is_mdrk:
+                if classification.mdrk_kind is MdrkKind.INITIAL:
+                    mdrk_datetime = extract_mdrk_document_datetime(document)
+                    episode.sources.append(
+                        SourceDocument(
+                            path=source_path,
+                            role=SpecialistRole.OTHER,
+                            clinical_datetime=mdrk_datetime,
+                            document_type="mdrk_initial",
+                            extraction_method=(
+                                "docx"
+                                if source_path.suffix.casefold() == ".docx"
+                                else "converted"
+                            ),
+                            sha256=document.sha256,
                         )
-                        mdrk1_records.append(
-                            ScannedRecord(document, classification, mdrk_datetime)
-                        )
-                    continue
-                clinical_datetime = (
-                    None
-                    if classification.document_type in {"administrative", "assignment_sheet", "other_consilium"}
-                    else extract_clinical_datetime(document)
-                )
-                episode.sources.append(
-                    SourceDocument(
-                        path=source_path,
-                        role=classification.role,
-                        clinical_datetime=clinical_datetime,
-                        document_type=classification.document_type,
-                        extraction_method="docx" if source_path.suffix.casefold() == ".docx" else "converted",
-                        sha256=document.sha256,
-                        specialist_name=extract_specialist_name(document, classification.role),
                     )
-                )
-                records.append(ScannedRecord(document, classification, clinical_datetime))
-            except (ConversionError, OSError, ValueError, KeyError) as exc:
-                failures += 1
-                episode.issues.append(
-                    ReviewIssue(
-                        "source_read_failed",
-                        f"Не удалось прочитать {source_path.name}: {exc}",
-                        ReviewSeverity.WARNING,
-                        "sources",
-                        source_path,
+                    mdrk1_records.append(
+                        ScannedRecord(document, classification, mdrk_datetime)
                     )
+                continue
+            clinical_datetime = (
+                None
+                if classification.document_type
+                in {"administrative", "assignment_sheet", "other_consilium"}
+                else extract_clinical_datetime(document)
+            )
+            episode.sources.append(
+                SourceDocument(
+                    path=source_path,
+                    role=classification.role,
+                    clinical_datetime=clinical_datetime,
+                    document_type=classification.document_type,
+                    extraction_method=(
+                        "docx"
+                        if source_path.suffix.casefold() == ".docx"
+                        else "converted"
+                    ),
+                    sha256=document.sha256,
+                    specialist_name=extract_specialist_name(
+                        document, classification.role
+                    ),
                 )
-    finally:
-        if owns_normalizer:
-            normalizer.close()
+            )
+            records.append(ScannedRecord(document, classification, clinical_datetime))
+        except (ConversionError, OSError, ValueError, KeyError) as exc:
+            failures.append(SourceReadFailure(source_path=source_path, error=exc))
 
-    if failures and failures >= max(3, len(source_files) // 2):
+    for failure in failures:
+        episode.issues.append(
+            ReviewIssue(
+                "source_read_failed",
+                (
+                    f"Не удалось прочитать {failure.source_path.name}: "
+                    f"{failure.error}"
+                ),
+                ReviewSeverity.WARNING,
+                "sources",
+                failure.source_path,
+            )
+        )
+
+    if failures and len(failures) >= max(
+        3, len(source_scan.source_files) // 2
+    ):
         episode.issues.append(
             ReviewIssue(
                 "systematic_read_failure",
@@ -1495,10 +1495,10 @@ def scan_patient_folder(
                 _refresh_record_number_conflict_source(episode, records)
         episode_records = _records_for_selected_medical_record(episode, records)
         if medical_record_number_override and not any(
-            _normalized_record_number(
+            normalize_medical_record_number(
                 extract_patient_identity(record.document).medical_record_number
             )
-            == _normalized_record_number(medical_record_number_override)
+            == normalize_medical_record_number(medical_record_number_override)
             for record in records
             if extract_patient_identity(record.document).medical_record_number
         ):

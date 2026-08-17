@@ -4,16 +4,24 @@ from PyInstaller.utils.hooks import collect_submodules
 
 
 project_root = Path(SPECPATH)
-template_path = (
+resource_paths = [
     project_root
     / "src"
     / "mdrk_builder"
     / "resources"
-    / "canonical_mdrk_template.docx"
-)
-if not template_path.is_file():
-    raise FileNotFoundError(f"Canonical MDRK template is missing: {template_path}")
-package_data = [(str(template_path), "mdrk_builder/resources")]
+    / filename
+    for filename in (
+        "canonical_mdrk_template.docx",
+        "discharge_summary_template.docx",
+    )
+]
+for resource_path in resource_paths:
+    if not resource_path.is_file():
+        raise FileNotFoundError(f"Runtime template is missing: {resource_path}")
+package_data = [
+    (str(resource_path), "mdrk_builder/resources")
+    for resource_path in resource_paths
+]
 hidden_imports = [
     "pythoncom",
     "pywintypes",

@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from pathlib import Path
+from zipfile import ZipFile
 
 from docx import Document
 
@@ -14,6 +15,12 @@ from mdrk_builder.application.scanner import (
     _records_for_selected_medical_record,
     scan_patient_folder,
 )
+from mdrk_builder.application.source_scan import (
+    ScannedDocument,
+    SourceReadFailure,
+    SourceScanResult,
+    scan_source_documents,
+)
 from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.domain import (
     Episode,
@@ -25,6 +32,7 @@ from mdrk_builder.domain import (
     SpecialistRole,
 )
 from mdrk_builder.infrastructure.classifier import DocumentClassification
+from mdrk_builder.infrastructure.docx_output import save_sanitized_docx_atomically
 from mdrk_builder.infrastructure.ooxml_reader import (
     BodyItem,
     ParsedCell,
@@ -74,6 +82,161 @@ def _row(values: dict[int, str], logical_cols: int = 15) -> ParsedRow:
 
 def _icf_table(*rows: ParsedRow) -> ParsedTable:
     return ParsedTable((_row({0: "МКФ", 13: "Ответственный специалист"}), *rows))
+
+
+def test_source_scan_records_read_failures_and_preserves_caller_normalizer(
+    tmp_path,
+) -> None:
+    good_path = tmp_path / "a-good.docx"
+    document = Document()
+    document.add_paragraph("Первичный осмотр невролога")
+    document.save(good_path)
+    broken_path = tmp_path / "b-broken.docx"
+    with ZipFile(broken_path, "w"):
+        pass
+
+    class TrackingNormalizer:
+        def __init__(self) -> None:
+            self.normalized: list[Path] = []
+            self.closed = False
+
+        def normalize(self, source: Path) -> Path:
+            self.normalized.append(source)
+            return source
+
+        def close(self) -> None:
+            self.closed = True
+
+    normalizer = TrackingNormalizer()
+
+    result = scan_source_documents(tmp_path, normalizer=normalizer)
+
+    assert isinstance(result, SourceScanResult)
+    assert result.source_files == (good_path, broken_path)
+    assert len(result.documents) == 1
+    assert isinstance(result.documents[0], ScannedDocument)
+    assert result.documents[0].document.source_path == good_path
+    assert len(result.failures) == 1
+    assert isinstance(result.failures[0], SourceReadFailure)
+    assert result.failures[0].source_path == broken_path
+    assert normalizer.normalized == [good_path, broken_path]
+    assert not normalizer.closed
+
+
+def test_source_scan_isolates_invalid_zip_and_xml_failures(tmp_path) -> None:
+    good_path = tmp_path / "a-good.docx"
+    document = Document()
+    document.add_paragraph("Первичный осмотр невролога")
+    document.save(good_path)
+
+    bad_zip_path = tmp_path / "b-bad-zip.docx"
+    bad_zip_path.write_bytes(b"not a zip package")
+
+    bad_xml_path = tmp_path / "c-bad-xml.docx"
+    with ZipFile(bad_xml_path, "w") as package:
+        package.writestr("docProps/core.xml", "<coreProperties")
+        package.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+            'wordprocessingml/2006/main"><w:body/></w:document>',
+        )
+
+    result = scan_source_documents(tmp_path)
+
+    assert [item.document.source_path for item in result.documents] == [good_path]
+    assert [failure.source_path for failure in result.failures] == [
+        bad_zip_path,
+        bad_xml_path,
+    ]
+
+
+def test_scan_preserves_source_read_and_systematic_failure_issues(tmp_path) -> None:
+    source_paths = [tmp_path / f"broken-{index}.docx" for index in range(3)]
+    for source_path in source_paths:
+        with ZipFile(source_path, "w"):
+            pass
+
+    episode = scan_patient_folder(tmp_path)
+
+    read_failures = [
+        issue for issue in episode.issues if issue.code == "source_read_failed"
+    ]
+    assert [issue.source for issue in read_failures] == source_paths
+    assert all(issue.severity is ReviewSeverity.WARNING for issue in read_failures)
+    assert any(
+        issue.code == "systematic_read_failure"
+        and issue.severity is ReviewSeverity.BLOCKING
+        for issue in episode.issues
+    )
+
+
+def test_scan_patient_folder_accepts_preloaded_source_scan(tmp_path) -> None:
+    source_path = tmp_path / "neurologist.docx"
+    document = Document()
+    for paragraph in (
+        "Первичный осмотр невролога",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+    ):
+        document.add_paragraph(paragraph)
+    document.save(source_path)
+    source_scan = scan_source_documents(tmp_path)
+    source_path.unlink()
+
+    episode = scan_patient_folder(tmp_path, source_scan=source_scan)
+
+    assert episode.identity.full_name == "АЛЬФА БЕТА ГАММА"
+    assert episode.identity.medical_record_number == "123/26"
+
+
+def test_scan_ignores_generated_outputs_and_canonical_discharge_summaries(
+    tmp_path,
+) -> None:
+    primary_path = tmp_path / "primary.docx"
+    primary = Document()
+    for paragraph in (
+        "Первичный осмотр невролога",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Дата и время поступления: 10.08.2026 10:00",
+        "Клинический диагноз: ИСХОДНЫЙ_ДИАГНОЗ",
+    ):
+        primary.add_paragraph(paragraph)
+    primary.save(primary_path)
+
+    discharge_path = tmp_path / "discharge.docx"
+    discharge = Document()
+    for paragraph in (
+        "Выписной эпикриз",
+        "Сведения о пациенте",
+        "ФИО пациента: ЧУЖОЙ ПАЦИЕНТ ТЕСТОВЫЙ",
+        "Номер медицинской карты пациента №999/26",
+        "Клинический диагноз: НЕ_ИСТОЧНИК",
+    ):
+        discharge.add_paragraph(paragraph)
+    discharge.save(discharge_path)
+
+    generated_path = tmp_path / "generated-mdrk.docx"
+    generated = Document()
+    for paragraph in (
+        "Первичный осмотр невролога",
+        "ФИО пациента: ЧУЖОЙ ПАЦИЕНТ ТЕСТОВЫЙ",
+        "Номер ИБ: 888/26",
+        "Клинический диагноз: НЕ_ИСТОЧНИК",
+    ):
+        generated.add_paragraph(paragraph)
+    save_sanitized_docx_atomically(generated, generated_path)
+
+    episode = scan_patient_folder(tmp_path)
+
+    assert episode.identity.full_name == "АЛЬФА БЕТА ГАММА"
+    assert episode.identity.medical_record_number == "123/26"
+    assert episode.sections.clinical_diagnosis == "ИСХОДНЫЙ_ДИАГНОЗ"
+    assert [source.path for source in episode.sources] == [primary_path]
+    assert not any(
+        issue.code == "identity_conflict_medical_record_number"
+        for issue in episode.issues
+    )
 
 
 def test_initial_mdrk_day_rule_for_each_admission_weekday() -> None:
@@ -1150,7 +1313,7 @@ def test_mdrk1_fills_only_missing_baseline_icf_and_scales() -> None:
             "mdrk",
             is_mdrk=True,
             confidence=1.0,
-            mdrk_kind="initial",
+            mdrk_kind=MdrkKind.INITIAL,
         ),
         mdrk1_at,
     )

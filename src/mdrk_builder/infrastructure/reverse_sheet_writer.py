@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from os import replace
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -14,6 +12,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
 from mdrk_builder.domain import ReverseSheetDraft, ReverseSheetRow
+
+from .docx_output import resolve_docx_output_path, save_sanitized_docx_atomically
 
 
 _GRID_WIDTHS = (2739, 1420, 1826, 81, 1746, 1826)
@@ -221,16 +221,12 @@ def write_reverse_sheet_docx(
     *,
     minimum_data_rows: int = 24,
 ) -> Path:
-    output = output_path.resolve()
-    if output.suffix.casefold() != ".docx":
-        raise ValueError("output_path must use the .docx extension")
     source_paths = {
-        path.resolve()
+        path
         for path in [draft.header_source, *(row.source for row in draft.rows)]
         if path is not None
     }
-    if output in source_paths:
-        raise ValueError("output_path must not overwrite an immutable source document")
+    output = resolve_docx_output_path(output_path, source_paths=source_paths)
 
     document = Document()
     section = document.sections[0]
@@ -333,20 +329,4 @@ def write_reverse_sheet_docx(
             arranged_rows[index] if index < len(arranged_rows) else None,
         )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            prefix=f".{output.stem}-",
-            suffix=".docx",
-            dir=output.parent,
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-        document.save(temporary_path)
-        replace(temporary_path, output)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-    return output
+    return save_sanitized_docx_atomically(document, output)

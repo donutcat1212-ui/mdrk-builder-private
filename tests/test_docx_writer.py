@@ -22,6 +22,7 @@ from mdrk_builder.domain import (
     SpecialistRole,
 )
 from mdrk_builder.infrastructure.docx_layout import TABLE_WIDTH_DXA
+from mdrk_builder.infrastructure.docx_output import resolve_docx_output_path
 from mdrk_builder.infrastructure.docx_writer import (
     DocumentGenerationBlockedError,
     SignatoryRow,
@@ -633,6 +634,21 @@ def test_writer_never_overwrites_an_episode_source(tmp_path) -> None:
         write_mdrk_docx(episode, MdrkKind.INITIAL, source_path)
 
     assert not source_path.exists()
+
+
+def test_shared_output_validation_preserves_docx_path_contract(tmp_path) -> None:
+    template = tmp_path / "canonical.docx"
+    source = tmp_path / "source.docx"
+
+    assert resolve_docx_output_path(tmp_path / "RESULT.DOCX") == (
+        tmp_path / "RESULT.DOCX"
+    ).resolve()
+    with pytest.raises(ValueError, match=r"\.docx extension"):
+        resolve_docx_output_path(tmp_path / "result.txt")
+    with pytest.raises(ValueError, match="canonical template"):
+        resolve_docx_output_path(template, template_path=template)
+    with pytest.raises(ValueError, match="immutable source"):
+        resolve_docx_output_path(source, source_paths=[source])
 
 
 def test_writer_cleans_atomic_temporary_file_on_save_failure(
