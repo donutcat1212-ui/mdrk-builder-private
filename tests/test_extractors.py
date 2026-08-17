@@ -146,6 +146,49 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
     assert sections["instrumental_results"].startswith("ЭКГ")
 
 
+def test_specialist_rehabilitation_plan_extracts_explicit_goal_and_tasks() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Задача на этап МР: через 17 дней пациент ведёт диалог.",
+                "Короткосрочная задача реабилитации №1: Улучшить речевой выдох.",
+                "Короткосрочная задача реабилитации №2: Улучшить артикуляцию.",
+                "На основании данных обследования рекомендовано:",
+                "При выполнении сложных задач использовать самоинструкции.",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["goal"] == "через 17 дней пациент ведёт диалог."
+    assert sections["tasks"].splitlines() == [
+        "Улучшить речевой выдох.",
+        "Улучшить артикуляцию.",
+    ]
+
+
+def test_specialist_rehabilitation_task_block_stops_before_recommendations() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Реабилитационные задачи на этап МР:",
+                "• Развитие силовой выносливости;",
+                "• Улучшение функции равновесия;",
+                "На основании данных обследования рекомендовано:",
+                "• Индивидуальное занятие лечебной физкультурой;",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["tasks"].splitlines() == [
+        "Развитие силовой выносливости;",
+        "Улучшение функции равновесия;",
+    ]
+
+
 def test_section_does_not_absorb_discharge_metadata() -> None:
     document = _document(
         "Анамнез заболевания: АНАМНЕЗ_ТЕСТ.\n"

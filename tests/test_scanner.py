@@ -231,6 +231,65 @@ def test_scan_preserves_specialist_name_for_signature_roster(tmp_path) -> None:
     assert source.specialist_name == "СОТРУДНИК Л.Г."
 
 
+def test_scan_aggregates_goal_and_tasks_from_latest_specialist_plans(tmp_path) -> None:
+    def write_source(path: Path, *paragraphs: str) -> None:
+        document = Document()
+        for paragraph in paragraphs:
+            document.add_paragraph(paragraph)
+        document.save(path)
+
+    write_source(
+        tmp_path / "невролог первичный.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 14.08.2026 09:46",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Дата и время поступления: 14.08.2026 08:40",
+        "Клинический диагноз: ДИАГНОЗ_ТЕСТ",
+    )
+    write_source(
+        tmp_path / "логопед первичный.docx",
+        "Первичная консультация медицинского логопеда",
+        "Дата консультации: 14.08.2026 12:00",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Задача на этап МР: через 17 дней пациент ведёт диалог.",
+        "Короткосрочная задача реабилитации №1: Улучшить артикуляцию.",
+        "Короткосрочная задача реабилитации №2: Увеличить речевой выдох.",
+    )
+    write_source(
+        tmp_path / "фт первичный.docx",
+        "Первичный осмотр специалиста по физической реабилитации",
+        "Дата осмотра: 14.08.2026 16:10",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Реабилитационные задачи на этап МР:",
+        "• Развитие силовой выносливости;",
+        "• Улучшение функции равновесия;",
+        "На основании данных обследования рекомендовано:",
+        "• Индивидуальная лечебная физкультура;",
+    )
+
+    episode = scan_patient_folder(
+        tmp_path,
+        initial_meeting_at=datetime(2026, 8, 17, 8),
+    )
+
+    assert episode.initial_sections.goal == "через 17 дней пациент ведёт диалог."
+    assert episode.initial_sections.tasks.splitlines() == [
+        "Улучшить артикуляцию.",
+        "Увеличить речевой выдох.",
+        "Развитие силовой выносливости;",
+        "Улучшение функции равновесия;",
+    ]
+    assert {
+        path.name
+        for key, path in episode.initial_field_sources.items()
+        if key.startswith("sections.tasks")
+    } == {"логопед первичный.docx", "фт первичный.docx"}
+    assert not any(issue.field == "initial_sections.tasks" for issue in episode.issues)
+
+
 def test_mixed_record_numbers_and_admission_dates_are_blocking() -> None:
     records = [
         _record(

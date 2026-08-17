@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields
 from datetime import date, datetime, time, timedelta
@@ -492,6 +493,70 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
             setattr(target, field_name, value)
             provenance[f"sections.{field_name}"] = record.document.source_path
 
+    def merge_specialist_plan_as_of(
+        target,
+        provenance: dict[str, Path],
+        boundary: datetime | None,
+    ) -> None:
+        eligible = eligible_as_of(clinical_records, boundary)
+        physician_roles = {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+        task_prefix = re.compile(r"^(?:[-•–—]|\d+[.)])\s*")
+        for field_name in ("goal", "tasks"):
+            latest_by_role: dict[SpecialistRole, ScannedRecord] = {}
+            for record in eligible:
+                role = record.classification.role
+                if role is SpecialistRole.OTHER or role in physician_roles:
+                    continue
+                if extracted[id(record)][field_name]:
+                    latest_by_role[role] = record
+            selected = sorted(
+                latest_by_role.values(),
+                key=lambda item: (
+                    item.clinical_datetime or datetime.min,
+                    str(item.document.source_path).casefold(),
+                ),
+            )
+            current = getattr(target, field_name).strip()
+            values = [
+                task_prefix.sub("", line).strip()
+                for line in current.splitlines()
+                if line.strip()
+            ]
+            normalized = {
+                " ".join(value.casefold().replace("ё", "е").strip(" .;").split())
+                for value in values
+            }
+            source_paths = [
+                path
+                for key, path in provenance.items()
+                if key == f"sections.{field_name}"
+                or key.startswith(f"sections.{field_name}.")
+            ]
+            for record in selected:
+                raw_value = extracted[id(record)][field_name]
+                if not raw_value:
+                    continue
+                added = False
+                for line in raw_value.splitlines():
+                    value = task_prefix.sub("", line).strip()
+                    key = " ".join(
+                        value.casefold().replace("ё", "е").strip(" .;").split()
+                    )
+                    if not value or not key or key in normalized:
+                        continue
+                    values.append(value)
+                    normalized.add(key)
+                    added = True
+                if added and record.document.source_path not in source_paths:
+                    source_paths.append(record.document.source_path)
+
+            if not values:
+                continue
+            setattr(target, field_name, "\n".join(values))
+            base_key = f"sections.{field_name}"
+            for index, path in enumerate(source_paths):
+                provenance[base_key if index == 0 else f"{base_key}.{index + 1}"] = path
+
     fill_as_of(
         episode.initial_sections,
         episode.initial_field_sources,
@@ -499,12 +564,22 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         "initial_meeting_at",
         include_updates=False,
     )
+    merge_specialist_plan_as_of(
+        episode.initial_sections,
+        episode.initial_field_sources,
+        episode.initial_meeting_at,
+    )
     fill_as_of(
         episode.sections,
         episode.field_sources,
         episode.final_meeting_at,
         "final_meeting_at",
         include_updates=True,
+    )
+    merge_specialist_plan_as_of(
+        episode.sections,
+        episode.field_sources,
+        episode.final_meeting_at,
     )
     if not episode.initial_sections.rehabilitation_potential.strip():
         episode.initial_sections.rehabilitation_potential = "средний"

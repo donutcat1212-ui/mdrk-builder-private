@@ -451,7 +451,8 @@ SECTION_STOP = re.compile(
     r"инструментальные исследования|результаты осмотров|реабилитационный потенциал|факторы,? ограничивающие|"
     r"дата\s+(?:и\s+время\s+)?выписки|"
     r"факторы риска|диагноз клинический|цель на этап|цель,? поставленная на этап|"
-    r"задачи медицинской|индивидуальный план|двигательный режим|диета|"
+    r"задачи медицинской|реабилитационн\w* задачи? на этап|"
+    r"задача на этап|короткосрочн\w* задача|индивидуальный план|двигательный режим|диета|"
     r"медикаментозная (?:терапия|лечение)|немедикаментозн\w* (?:лечение|терапия)|"
     r"реабилитационные мероприятия|реабилитационный диагноз|функциональный диагноз|динамика|"
     r"логопедический статус|нейропсихологический статус|обоснование диагноза|"
@@ -460,6 +461,64 @@ SECTION_STOP = re.compile(
     r"физикальное исследование|эпидемиологический анамнез|фамилия, имя, отчество)",
     re.IGNORECASE,
 )
+
+_SPECIALIST_STAGE_GOAL_RE = re.compile(
+    r"^(?:реабилитационн\w*\s+)?задача\s+на\s+этап\s+"
+    r"(?:мр|(?:медицинской\s+)?реабилитации)\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_SHORT_TASK_RE = re.compile(
+    r"^(?:коротко|кратко)срочн\w*\s+задача(?:\s+(?:медицинской\s+)?реабилитации)?"
+    r"(?:\s*№\s*\d+)?\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_TASK_BLOCK_RE = re.compile(
+    r"^реабилитационн\w*\s+задачи\s+на\s+этап\s+"
+    r"(?:мр|(?:медицинской\s+)?реабилитации)\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_TASK_BLOCK_STOP_RE = re.compile(
+    r"^(?:на\s+основании\s+данных|рекомендован[оаы]?|рекомендации|заключение|"
+    r"медицинский\s+логопед|специалист\s+по\s+физической\s+реабилитации|"
+    r"[А-ЯЁ][А-ЯЁа-яё-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.(?:\s|$))",
+    re.IGNORECASE,
+)
+_TASK_PREFIX_RE = re.compile(r"^(?:[-•–—]|\d+[.)])\s*")
+
+
+def _clean_task_item(value: str) -> str:
+    return clean_text(_TASK_PREFIX_RE.sub("", value)).strip()
+
+
+def _specialist_rehabilitation_plan(document: ParsedDocument) -> tuple[str, list[str]]:
+    """Read explicit specialist stage goals and rehabilitation-task blocks."""
+
+    lines = _document_lines(document)
+    goals: list[str] = []
+    tasks: list[str] = []
+    for index, line in enumerate(lines):
+        if match := _SPECIALIST_STAGE_GOAL_RE.match(line):
+            if value := clean_text(match.group(1)):
+                goals.append(value)
+            continue
+        if match := _SPECIALIST_SHORT_TASK_RE.match(line):
+            if value := _clean_task_item(match.group(1)):
+                tasks.append(value)
+            continue
+        match = _SPECIALIST_TASK_BLOCK_RE.match(line)
+        if match is None:
+            continue
+        if value := _clean_task_item(match.group(1)):
+            tasks.append(value)
+        for following in lines[index + 1 :]:
+            if SECTION_STOP.search(following) or _SPECIALIST_TASK_BLOCK_STOP_RE.match(following):
+                break
+            if value := _clean_task_item(following):
+                tasks.append(value)
+
+    unique_goals = list(dict.fromkeys(goals))
+    unique_tasks = list(dict.fromkeys(tasks))
+    return "\n".join(unique_goals), unique_tasks
 
 
 def extract_section(
@@ -492,10 +551,20 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
         name: extract_section(
             document,
             patterns,
-            preserve_lines=name == "medication",
+            preserve_lines=name in {"medication", "tasks"},
         )
         for name, patterns in SECTION_STARTS.items()
     }
+    specialist_goal, specialist_tasks = _specialist_rehabilitation_plan(document)
+    if not result["goal"] and specialist_goal:
+        result["goal"] = specialist_goal
+    if specialist_tasks:
+        current_tasks = [
+            _clean_task_item(line)
+            for line in result["tasks"].splitlines()
+            if _clean_task_item(line)
+        ]
+        result["tasks"] = "\n".join(dict.fromkeys((*current_tasks, *specialist_tasks)))
     if not result["clinical_diagnosis"]:
         result["clinical_diagnosis"] = extract_section(document, (r"основное\s+заболевание",))
     if not result["laboratory_results"] or not result["instrumental_results"]:
