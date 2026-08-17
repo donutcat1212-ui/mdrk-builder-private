@@ -86,6 +86,82 @@ PHYSICIAN_NARRATIVE_SCALES = (
     ("Шкала Бартел", r"^Шкала\s+Бартел\w*\s*[:–—-]\s*(.+)$"),
 )
 
+_SPECIALIST_NAME_INITIALS_RE = re.compile(
+    r"\b([А-ЯЁ][А-ЯЁа-яё-]{2,})\s+([А-ЯЁ])\.\s*([А-ЯЁ])\."
+)
+_SPECIALIST_INITIALS_NAME_RE = re.compile(
+    r"\b([А-ЯЁ])\.\s*([А-ЯЁ])\.\s*([А-ЯЁ][А-ЯЁа-яё-]{2,})\b"
+)
+_SIGNATURE_SEPARATOR_RE = re.compile(r"[_/\\|]+")
+_SPECIALIST_ROLE_TOKENS: dict[SpecialistRole, tuple[str, ...]] = {
+    SpecialistRole.FRM: ("врач фрм", "врач физической и реабилитационной медицины"),
+    SpecialistRole.NEUROLOGIST: ("невролог",),
+    SpecialistRole.PHYSICAL_THERAPIST: (
+        "специалист по физической реабилитации",
+        "физический терапевт",
+        "врач лфк",
+    ),
+    SpecialistRole.OCCUPATIONAL_THERAPIST: (
+        "эргореабилитолог",
+        "эрготерапевт",
+        "специалист по эргореабилитации",
+    ),
+    SpecialistRole.LOGOPEDIST: ("логопед", "афазиолог"),
+    SpecialistRole.NEUROPSYCHOLOGIST: ("нейропсихолог",),
+    SpecialistRole.PATHOPSYCHOLOGIST: ("патопсихолог",),
+}
+_GENERIC_SPECIALIST_LABEL_RE = re.compile(
+    r"\b(?:специалист|исполнитель|медицинский\s+работник|лечащий\s+врач)\b",
+    re.IGNORECASE,
+)
+_NON_NAME_SURNAMES = {"фамилия", "пациент", "пациентка"}
+
+
+def _specialist_names_from_line(line: str) -> list[str]:
+    """Return ordered name candidates after neutralizing Word signature rules."""
+
+    text = clean_text(_SIGNATURE_SEPARATOR_RE.sub(" ", line))
+    matches: list[tuple[int, str]] = []
+    for match in _SPECIALIST_NAME_INITIALS_RE.finditer(text):
+        if match.group(1).casefold() not in _NON_NAME_SURNAMES:
+            matches.append(
+                (match.start(), f"{match.group(1)} {match.group(2)}.{match.group(3)}.")
+            )
+    for match in _SPECIALIST_INITIALS_NAME_RE.finditer(text):
+        if match.group(3).casefold() not in _NON_NAME_SURNAMES:
+            matches.append(
+                (match.start(), f"{match.group(3)} {match.group(1)}.{match.group(2)}.")
+            )
+    return [value for _, value in sorted(matches)]
+
+
+def extract_specialist_name(document: ParsedDocument, role: SpecialistRole) -> str:
+    """Read a clinician name only from a professional header or signature.
+
+    Scale names, patient labels, and narrative mentions are deliberately ignored.
+    A combined treating-physician/department-head line belongs to the treating
+    neurologist, so its first name is selected; ordinary signature lines use the
+    last name next to the professional label.
+    """
+
+    lines = [clean_text(line) for line in document.text.splitlines() if clean_text(line)]
+    role_tokens = _SPECIALIST_ROLE_TOKENS.get(role, ())
+    for line in reversed(lines):
+        low = line.casefold().replace("ё", "е")
+        if not role_tokens or not any(token.replace("ё", "е") in low for token in role_tokens):
+            continue
+        names = _specialist_names_from_line(line)
+        if names:
+            if role is SpecialistRole.NEUROLOGIST and "лечащ" in low:
+                return names[0]
+            return names[-1]
+    for line in reversed(lines):
+        if _GENERIC_SPECIALIST_LABEL_RE.search(line):
+            names = _specialist_names_from_line(line)
+            if names:
+                return names[-1]
+    return ""
+
 
 def _canonical_scale_name(value: str) -> str:
     name = clean_text(value)
@@ -223,7 +299,26 @@ def extract_mdrk_document_datetime(document: ParsedDocument) -> datetime | None:
         if title not in clean_text(value).casefold():
             continue
         for candidate in ordered[index : index + 3]:
-            if parsed := parse_first_datetime(clean_text(candidate)):
+            candidate = clean_text(candidate)
+            first = next(_date_matches(candidate), None)
+            if first is None:
+                continue
+            date_match, parsed_date = first
+            # Some approved forms write the meeting time as ``08-46``.  Keep
+            # this deliberately adjacent to a complete date so ``14-05-2026``
+            # can never be mistaken for 14:05.
+            suffix = candidate[date_match.end() : date_match.end() + 40]
+            dash_time = re.match(
+                r"^\s*[,;]?\s*(?:время\s*)?([0-2]?\d)\s*[-–—]\s*([0-5]\d)(?!\d)",
+                suffix,
+                re.IGNORECASE,
+            )
+            if dash_time is not None and int(dash_time.group(1)) <= 23:
+                return datetime.combine(
+                    parsed_date,
+                    time(int(dash_time.group(1)), int(dash_time.group(2))),
+                )
+            if parsed := parse_first_datetime(candidate):
                 return parsed
         return None
     return None
@@ -356,7 +451,8 @@ SECTION_STOP = re.compile(
     r"инструментальные исследования|результаты осмотров|реабилитационный потенциал|факторы,? ограничивающие|"
     r"дата\s+(?:и\s+время\s+)?выписки|"
     r"факторы риска|диагноз клинический|цель на этап|цель,? поставленная на этап|"
-    r"задачи медицинской|индивидуальный план|двигательный режим|диета|"
+    r"задачи медицинской|реабилитационн\w* задачи? на этап|"
+    r"задача на этап|короткосрочн\w* задача|индивидуальный план|двигательный режим|диета|"
     r"медикаментозная (?:терапия|лечение)|немедикаментозн\w* (?:лечение|терапия)|"
     r"реабилитационные мероприятия|реабилитационный диагноз|функциональный диагноз|динамика|"
     r"логопедический статус|нейропсихологический статус|обоснование диагноза|"
@@ -365,6 +461,64 @@ SECTION_STOP = re.compile(
     r"физикальное исследование|эпидемиологический анамнез|фамилия, имя, отчество)",
     re.IGNORECASE,
 )
+
+_SPECIALIST_STAGE_GOAL_RE = re.compile(
+    r"^(?:реабилитационн\w*\s+)?задача\s+на\s+этап\s+"
+    r"(?:мр|(?:медицинской\s+)?реабилитации)\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_SHORT_TASK_RE = re.compile(
+    r"^(?:коротко|кратко)срочн\w*\s+задача(?:\s+(?:медицинской\s+)?реабилитации)?"
+    r"(?:\s*№\s*\d+)?\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_TASK_BLOCK_RE = re.compile(
+    r"^реабилитационн\w*\s+задачи\s+на\s+этап\s+"
+    r"(?:мр|(?:медицинской\s+)?реабилитации)\s*[:–—.-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+_SPECIALIST_TASK_BLOCK_STOP_RE = re.compile(
+    r"^(?:на\s+основании\s+данных|рекомендован[оаы]?|рекомендации|заключение|"
+    r"медицинский\s+логопед|специалист\s+по\s+физической\s+реабилитации|"
+    r"[А-ЯЁ][А-ЯЁа-яё-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.(?:\s|$))",
+    re.IGNORECASE,
+)
+_TASK_PREFIX_RE = re.compile(r"^(?:[-•–—]|\d+[.)])\s*")
+
+
+def _clean_task_item(value: str) -> str:
+    return clean_text(_TASK_PREFIX_RE.sub("", value)).strip()
+
+
+def _specialist_rehabilitation_plan(document: ParsedDocument) -> tuple[str, list[str]]:
+    """Read explicit specialist stage goals and rehabilitation-task blocks."""
+
+    lines = _document_lines(document)
+    goals: list[str] = []
+    tasks: list[str] = []
+    for index, line in enumerate(lines):
+        if match := _SPECIALIST_STAGE_GOAL_RE.match(line):
+            if value := clean_text(match.group(1)):
+                goals.append(value)
+            continue
+        if match := _SPECIALIST_SHORT_TASK_RE.match(line):
+            if value := _clean_task_item(match.group(1)):
+                tasks.append(value)
+            continue
+        match = _SPECIALIST_TASK_BLOCK_RE.match(line)
+        if match is None:
+            continue
+        if value := _clean_task_item(match.group(1)):
+            tasks.append(value)
+        for following in lines[index + 1 :]:
+            if SECTION_STOP.search(following) or _SPECIALIST_TASK_BLOCK_STOP_RE.match(following):
+                break
+            if value := _clean_task_item(following):
+                tasks.append(value)
+
+    unique_goals = list(dict.fromkeys(goals))
+    unique_tasks = list(dict.fromkeys(tasks))
+    return "\n".join(unique_goals), unique_tasks
 
 
 def extract_section(
@@ -397,10 +551,20 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
         name: extract_section(
             document,
             patterns,
-            preserve_lines=name == "medication",
+            preserve_lines=name in {"medication", "tasks"},
         )
         for name, patterns in SECTION_STARTS.items()
     }
+    specialist_goal, specialist_tasks = _specialist_rehabilitation_plan(document)
+    if not result["goal"] and specialist_goal:
+        result["goal"] = specialist_goal
+    if specialist_tasks:
+        current_tasks = [
+            _clean_task_item(line)
+            for line in result["tasks"].splitlines()
+            if _clean_task_item(line)
+        ]
+        result["tasks"] = "\n".join(dict.fromkeys((*current_tasks, *specialist_tasks)))
     if not result["clinical_diagnosis"]:
         result["clinical_diagnosis"] = extract_section(document, (r"основное\s+заболевание",))
     if not result["laboratory_results"] or not result["instrumental_results"]:
@@ -493,12 +657,109 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
     return result
 
 
+def _extract_neuropsych_conclusion(lines: list[str]) -> str:
+    """Return the bounded status and rationale, leaving scale tables structured."""
+
+    heading_re = re.compile(
+        r"^нейропсихологический статус(?:\s+и\s+топический\s+диагноз)?\s*:",
+        re.IGNORECASE,
+    )
+    starts = [index for index, line in enumerate(lines) if heading_re.match(line)]
+    for start in reversed(starts):
+        status: list[str] = [lines[start]]
+        for line in lines[start + 1 :]:
+            if re.match(r"^на основании данных\b", line, re.IGNORECASE):
+                break
+            if re.match(
+                r"^(?:количественная\s+оценка|монреальская\s+шкала|"
+                r"оценка\s+устойчивости|исследование\s+анамнеза|"
+                r"отмечается\b.*\bдинамик|рекомендовано|медицинский\s+психолог|подпись)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+            status.append(line)
+
+        rationale = ""
+        for line in lines[start + 1 :]:
+            if re.match(r"^на основании данных\b", line, re.IGNORECASE):
+                rationale = line
+                break
+            if re.match(
+                r"^(?:отмечается\b.*\bдинамик|рекомендовано|"
+                r"медицинский\s+психолог|подпись)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+        result = [clean_text(line) for line in status if clean_text(line)]
+        if rationale:
+            result.append(clean_text(rationale))
+        if len(result) > 1 or heading_re.sub("", result[0]).strip():
+            return "\n".join(result)
+    return ""
+
+
+def _extract_logopedist_conclusion(lines: list[str]) -> str:
+    """Prefer course dynamics plus the final speech status when available."""
+
+    dynamics = [
+        index for index, line in enumerate(lines) if re.match(r"^динамика\s*:", line, re.IGNORECASE)
+    ]
+    status_re = re.compile(
+        r"^логопедический статус(?:\s+при\s+выписке)?(?:\s+измен[её]н)?\s*:",
+        re.IGNORECASE,
+    )
+    signature_re = re.compile(r"^(?:медицинский\s+логопед|подпись)\b", re.IGNORECASE)
+    if dynamics:
+        start = dynamics[-1]
+        result = [lines[start]]
+        status_index = next(
+            (index for index in range(start + 1, len(lines)) if status_re.match(lines[index])),
+            None,
+        )
+        if status_index is not None:
+            result.append(lines[status_index])
+            for line in lines[status_index + 1 :]:
+                if signature_re.match(line) or re.match(
+                    r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
+                    r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
+                    line,
+                    re.IGNORECASE,
+                ):
+                    break
+                result.append(line)
+        return "\n".join(clean_text(line) for line in result if clean_text(line))
+
+    status_indices = [index for index, line in enumerate(lines) if status_re.match(line)]
+    if status_indices:
+        start = status_indices[-1]
+        result = [lines[start]]
+        for line in lines[start + 1 :]:
+            if signature_re.match(line) or re.match(
+                r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
+                r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                break
+            result.append(line)
+        return "\n".join(clean_text(line) for line in result if clean_text(line))
+    return ""
+
+
 def extract_conclusion(
     document: ParsedDocument,
     role: SpecialistRole | None = None,
 ) -> str:
     blocks: list[str] = []
     lines = _document_lines(document)
+    if role is SpecialistRole.NEUROPSYCHOLOGIST:
+        if value := _extract_neuropsych_conclusion(lines):
+            return value
+    if role is SpecialistRole.LOGOPEDIST:
+        if value := _extract_logopedist_conclusion(lines):
+            return value
     for index, line in enumerate(lines):
         match = re.match(r"^заключение(?:[^:\n]{0,180})?\s*:\s*", line, re.IGNORECASE)
         if not match:

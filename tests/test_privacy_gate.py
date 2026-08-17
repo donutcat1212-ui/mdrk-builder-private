@@ -25,6 +25,22 @@ def test_source_gate_rejects_identity_and_local_user_path(tmp_path) -> None:
     assert "реалистичное ФИО после идентифицирующей метки" in reasons
 
 
+def test_source_gate_allows_only_fixed_department_head_name(tmp_path) -> None:
+    allowed = tmp_path / "allowed.py"
+    allowed.write_text('DEPARTMENT_HEAD = "Поляев Б.Б."\n', encoding="utf-8")
+
+    assert audit_source_tree(tmp_path) == []
+
+    blocked = tmp_path / "blocked.py"
+    blocked_name = "Ива" + "нов И.И."
+    blocked.write_text(f'SPECIALIST = "{blocked_name}"\n', encoding="utf-8")
+
+    assert any(
+        finding.reason == "реалистичная фамилия с инициалами"
+        for finding in audit_source_tree(tmp_path)
+    )
+
+
 def test_release_gate_rejects_patient_source_format(tmp_path) -> None:
     candidate = tmp_path / "MDRK_Builder_1.0.0_Internal"
     candidate.mkdir()

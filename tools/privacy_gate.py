@@ -12,6 +12,7 @@ from zipfile import BadZipFile, ZipFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_TEMPLATE = Path("src/mdrk_builder/resources/canonical_mdrk_template.docx")
+ALLOWED_STAFF_NAMES = ("Поляев Б.Б.",)
 
 EXCLUDED_PARTS = {
     ".git",
@@ -184,10 +185,17 @@ def _read_text(path: Path) -> str | None:
     return None
 
 
+def _without_allowed_staff_names(text: str) -> str:
+    for full_name in ALLOWED_STAFF_NAMES:
+        text = text.replace(full_name, "РАЗРЕШЕННЫЙ_СОТРУДНИК")
+    return text
+
+
 def _scan_text(path: Path, display_path: Path) -> list[Finding]:
     text = _read_text(path)
     if text is None:
         return []
+    text = _without_allowed_staff_names(text)
     findings: list[Finding] = []
     for reason, pattern in _risky_text_patterns():
         for match in pattern.finditer(text):
@@ -239,7 +247,7 @@ def audit_docx(path: Path, display_path: Path | None = None) -> list[Finding]:
                     for attribute in element.attrib:
                         if attribute.rsplit("}", 1)[-1].casefold().startswith("rsid"):
                             findings.append(Finding(shown, f"атрибут сессии редактирования в {name}"))
-                decoded = data.decode("utf-8", errors="ignore")
+                decoded = _without_allowed_staff_names(data.decode("utf-8", errors="ignore"))
                 for reason, pattern in _risky_text_patterns():
                     if pattern.search(decoded):
                         findings.append(Finding(shown, f"{reason} внутри {name}"))

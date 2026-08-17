@@ -77,6 +77,15 @@ def _representative_episode(folder: Path) -> Episode:
             folder / "невролог.docx",
             role=SpecialistRole.NEUROLOGIST,
             clinical_datetime=initial_at,
+            specialist_name="СОТРУДНИК_ВРАЧ В.В.",
+        )
+    )
+    episode.sources.append(
+        SourceDocument(
+            folder / "логопед первичный.docx",
+            role=SpecialistRole.LOGOPEDIST,
+            clinical_datetime=datetime(2026, 6, 10, 11),
+            specialist_name="СОТРУДНИК_ЛОГО Л.Г.",
         )
     )
 
@@ -150,6 +159,12 @@ def _representative_episode(folder: Path) -> Episode:
                 final=IcfQualifier(2),
             ),
             IcfDomain(
+                "b130",
+                "Волевые и побудительные функции",
+                SpecialistRole.NEUROLOGIST,
+                initial=IcfQualifier(3),
+            ),
+            IcfDomain(
                 "Pf",
                 "ПЕРСОНАЛЬНЫЙ_ФАКТОР_ТЕСТ",
                 SpecialistRole.OTHER,
@@ -175,6 +190,13 @@ def _find_table(document, first_cell_text: str):
 
 def _find_domain_row(table, code: str):
     return next(row for row in table.rows if row.cells[0].text == code)
+
+
+def _body_text_blocks(document: DocxDocument) -> list[str]:
+    return [
+        "".join(node.text or "" for node in child.iter(qn("w:t")))
+        for child in document.element.body
+    ]
 
 
 def _assert_signature_table_page_separator(document) -> None:
@@ -367,6 +389,12 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         "1",
         "+",
     )
+    initial_only_b130 = _find_domain_row(final_mcf, "b130")
+    assert (
+        initial_only_b130.cells[11].text,
+        initial_only_b130.cells[12].text,
+        initial_only_b130.cells[14].text,
+    ) == ("3", "3", "")
     assert [_cell_fill(initial_b730.cells[index]) for index in range(2, 11)] == [
         None,
         None,
@@ -459,6 +487,23 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         "(05 июня 2026 16:00):"
     )
     assert not physician_heading.runs[0].bold
+    final_physician_table = next(
+        table
+        for table in final.tables
+        if any(row.cells[0].text == "СКФ" for row in table.rows[1:])
+    )
+    assert "19.06.2026 13:00" in final_physician_table.rows[0].cells[2].text
+    assert final_physician_table.rows[1].cells[1].text == "63,73"
+    assert final_physician_table.rows[1].cells[2].text == "63,73"
+    final_physician_heading = next(
+        paragraph
+        for paragraph in final.paragraphs
+        if paragraph.text.startswith("Результат осмотра врача физической")
+    )
+    assert final_physician_heading.text == (
+        "Результат осмотра врача физической и реабилитационной медицины "
+        "(19 июня 2026 13:00):"
+    )
 
     procedures = _find_table(initial, "Реабилитационные процедуры")
     _assert_compact_header_cell(procedures.rows[0].cells[2])
@@ -482,7 +527,13 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     assert signatures.rows[1].cells[1].text == "СОТРУДНИК_1"
     assert signatures.rows[2].cells[1].text == "СОТРУДНИК_2"
     assert signatures.rows[1].cells[2].text == ""
-    assert all(row.cells[1].text == "" for row in final_signatures.rows[1:])
+    final_names = {
+        row.cells[0].text: row.cells[1].text for row in final_signatures.rows[1:]
+    }
+    assert final_names["Врач ФРМ"] == "СОТРУДНИК_ВРАЧ В.В."
+    assert final_names["Медицинский логопед"] == "СОТРУДНИК_ЛОГО Л.Г."
+    assert final_names["Заведующий отделением"] == "Поляев Б.Б."
+    assert signatures.rows[-1].cells[1].text == "Поляев Б.Б."
     _assert_signature_table_page_separator(initial)
     _assert_signature_table_page_separator(final)
     conclusion_labels = [
@@ -511,9 +562,41 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert "ТЕРАПИЯ_СТРОКА_1" in [p.text for p in initial.paragraphs]
     assert "ТЕРАПИЯ_СТРОКА_2" in [p.text for p in initial.paragraphs]
+    assert "12. Индивидуальный план медицинской реабилитации:" in initial_text
+    assert "12. Выполненная программа медицинской реабилитации:" in final_text
 
     _assert_table_geometry_and_pagination(initial)
     _assert_table_geometry_and_pagination(final)
+
+
+def test_neuropsych_status_precedes_scales_and_basis_follows_them(tmp_path) -> None:
+    episode = _representative_episode(tmp_path)
+    measured_at = episode.final_meeting_at
+    assert measured_at is not None
+    episode.findings.append(
+        SpecialistFinding(
+            SpecialistRole.NEUROPSYCHOLOGIST,
+            "Нейропсихологический статус:\nСТАТУС_НЕЙРО_ТЕСТ.\n"
+            "На основании данных ОБОСНОВАНИЕ_НЕЙРО_ТЕСТ.",
+            measured_at,
+            scales=[
+                ScaleMeasurement(
+                    "ШКАЛА_НЕЙРО_ТЕСТ",
+                    "3",
+                    measured_at,
+                    SpecialistRole.NEUROPSYCHOLOGIST,
+                )
+            ],
+        )
+    )
+
+    output = write_mdrk_docx(episode, MdrkKind.FINAL, tmp_path / "neuro-order.docx")
+    blocks = _body_text_blocks(Document(output))
+    status_index = next(index for index, text in enumerate(blocks) if "СТАТУС_НЕЙРО_ТЕСТ" in text)
+    table_index = next(index for index, text in enumerate(blocks) if "ШКАЛА_НЕЙРО_ТЕСТ" in text)
+    basis_index = next(index for index, text in enumerate(blocks) if "ОБОСНОВАНИЕ_НЕЙРО_ТЕСТ" in text)
+
+    assert status_index < table_index < basis_index
 
 
 def test_writer_recomputes_blockers_after_manual_fill(tmp_path) -> None:

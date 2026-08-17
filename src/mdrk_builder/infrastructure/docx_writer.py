@@ -110,7 +110,7 @@ SIGNATORY_ROSTER: tuple[SignatoryRow, ...] = (
     SignatoryRow(SpecialistRole.LOGOPEDIST),
     SignatoryRow(SpecialistRole.OCCUPATIONAL_THERAPIST),
     SignatoryRow("Консультанты"),
-    SignatoryRow("Заведующий отделением"),
+    SignatoryRow("Заведующий отделением", "Поляев Б.Б."),
 )
 
 
@@ -364,6 +364,12 @@ class _DocumentRenderer:
     ) -> None:
         physician = role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
         source_datetime = finding.source_datetime if finding is not None else None
+        if (
+            physician
+            and self.snapshot.kind is MdrkKind.FINAL
+            and self.snapshot.meeting_at is not None
+        ):
+            source_datetime = self.snapshot.meeting_at
         if source_datetime is None:
             source_datetime = _first_scale_datetime(scale_rows, self.snapshot.kind)
         heading = _specialist_result_heading(role, source_datetime)
@@ -373,19 +379,49 @@ class _DocumentRenderer:
         if physician:
             self._add_blank_paragraph(keep_with_next=True)
 
+        conclusion_text = finding.conclusion.strip() if finding is not None else ""
+        if (
+            role is SpecialistRole.NEUROPSYCHOLOGIST
+            and re.match(r"^нейропсихологический статус\b", conclusion_text, re.IGNORECASE)
+        ):
+            rationale_match = re.search(
+                r"(?im)^на основании данных\b",
+                conclusion_text,
+            )
+            status = (
+                conclusion_text[: rationale_match.start()].strip()
+                if rationale_match is not None
+                else conclusion_text
+            )
+            rationale = (
+                conclusion_text[rationale_match.start() :].strip()
+                if rationale_match is not None
+                else ""
+            )
+            if status:
+                self._add_multiline(status)
+            if scale_rows:
+                self._render_scale_table(scale_rows)
+            if rationale:
+                self._add_multiline(rationale)
+            return
+
         if scale_rows:
             if physician and self.snapshot.kind is MdrkKind.INITIAL:
                 self._render_initial_physician_scale_table(scale_rows)
             else:
+                if physician and self.snapshot.kind is MdrkKind.FINAL:
+                    scale_rows = _physician_final_scale_rows(
+                        scale_rows,
+                        self.snapshot.meeting_at,
+                    )
                 self._render_scale_table(scale_rows)
 
         conclusion = self.document.add_paragraph(style=STYLE_BODY)
-        conclusion.paragraph_format.keep_with_next = bool(
-            finding is not None and finding.conclusion.strip()
-        )
+        conclusion.paragraph_format.keep_with_next = bool(conclusion_text)
         conclusion.add_run("Заключение: ")
-        if finding is not None and finding.conclusion.strip():
-            conclusion.add_run(finding.conclusion.strip())
+        if conclusion_text:
+            conclusion.add_run(conclusion_text)
 
     def _render_outcomes(self) -> None:
         self._add_section_value(
@@ -416,8 +452,13 @@ class _DocumentRenderer:
                 self.document.add_paragraph(task, style=STYLE_TASK)
 
     def _render_plan(self) -> None:
+        title = (
+            "Выполненная программа медицинской реабилитации"
+            if self.snapshot.kind is MdrkKind.FINAL
+            else "Индивидуальный план медицинской реабилитации"
+        )
         self.document.add_paragraph(
-            "12. Индивидуальный план медицинской реабилитации:",
+            f"12. {title}:",
             style=STYLE_BODY,
         )
         self._add_blank_paragraph()
@@ -740,9 +781,12 @@ class _DocumentRenderer:
             set_cell_text(cell, "", style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.CENTER)
         _shade_initial_qualifier(cells, domain.initial)
         initial = domain.initial.display() if domain.initial is not None else ""
+        final_qualifier = domain.final
+        if self.snapshot.kind is MdrkKind.FINAL and final_qualifier is None:
+            final_qualifier = domain.initial
         final = (
-            domain.final.display()
-            if self.snapshot.kind is MdrkKind.FINAL and domain.final is not None
+            final_qualifier.display()
+            if self.snapshot.kind is MdrkKind.FINAL and final_qualifier is not None
             else ""
         )
         marker = domain.dynamic_marker if self.snapshot.kind is MdrkKind.FINAL else ""
@@ -864,14 +908,48 @@ class _DocumentRenderer:
         rows = list(SIGNATORY_ROSTER)
         positions = {_signatory_role_key(row): index for index, row in enumerate(rows)}
         extras: list[SignatoryRow] = []
+        boundary = self.snapshot.meeting_at
+        source_names: dict[str, tuple[datetime, str, str]] = {}
+        for source in self.episode.sources:
+            full_name = source.specialist_name.strip()
+            if (
+                not self.episode.source_is_active(source)
+                or not full_name
+                or source.role is SpecialistRole.OTHER
+                or (
+                    boundary is not None
+                    and source.clinical_datetime is not None
+                    and source.clinical_datetime > boundary
+                )
+            ):
+                continue
+            key = _signatory_role_key(SignatoryRow(source.role))
+            candidate = (
+                source.clinical_datetime or datetime.min,
+                str(source.path).casefold(),
+                full_name,
+            )
+            if key not in source_names or candidate[:2] > source_names[key][:2]:
+                source_names[key] = candidate
+        for key, (_source_at, _source_path, full_name) in source_names.items():
+            if key in positions:
+                index = positions[key]
+                rows[index] = SignatoryRow(rows[index].role, full_name)
+
         for supplied in self.signatories:
             key = _signatory_role_key(supplied)
             if key not in positions:
                 extras.append(supplied)
                 continue
-            if supplied.full_name.strip():
+            if key != "department_head" and supplied.full_name.strip():
                 index = positions[key]
                 rows[index] = SignatoryRow(rows[index].role, supplied.full_name.strip())
+
+        department_head_index = positions["department_head"]
+        rows[department_head_index] = SignatoryRow(
+            rows[department_head_index].role,
+            "Поляев Б.Б.",
+        )
 
         consultant_index = positions["consultants"]
         return tuple((*rows[:consultant_index], *extras, *rows[consultant_index:]))
@@ -1013,6 +1091,28 @@ def _first_scale_datetime(
         if measurement is not None and measurement.measured_at is not None:
             return measurement.measured_at
     return None
+
+
+def _physician_final_scale_rows(
+    rows: Sequence[ScaleRow],
+    meeting_at: datetime | None,
+) -> tuple[ScaleRow, ...]:
+    """Build the editable MDRK2 physician view without changing source facts."""
+
+    result: list[ScaleRow] = []
+    for row in rows:
+        source = row.current or row.initial
+        current = None
+        if source is not None:
+            current = ScaleMeasurement(
+                name=source.name,
+                value=source.value,
+                measured_at=meeting_at,
+                specialist=source.specialist,
+                source=source.source,
+            )
+        result.append(ScaleRow(row.role, row.name, row.initial, current))
+    return tuple(result)
 
 
 def _specialist_result_heading(

@@ -49,6 +49,7 @@ class SourceDocument:
     document_type: str = "unknown"
     extraction_method: str = "docx"
     sha256: str = ""
+    specialist_name: str = ""
 
 
 @dataclass(slots=True)
@@ -57,6 +58,25 @@ class PatientIdentity:
     birth_date: date | None = None
     sex: str = ""
     medical_record_number: str = ""
+
+
+@dataclass(slots=True)
+class ReverseSheetRow:
+    intervention: str
+    appointment_date: date | None = None
+    performed_at: datetime | None = None
+    performer: str = ""
+    source: Path | None = None
+
+
+@dataclass(slots=True)
+class ReverseSheetDraft:
+    folder: Path
+    identity: PatientIdentity = field(default_factory=PatientIdentity)
+    admission_datetime: datetime | None = None
+    header_source: Path | None = None
+    rows: list[ReverseSheetRow] = field(default_factory=list)
+    issues: list[ReviewIssue] = field(default_factory=list)
 
 
 @dataclass(slots=True)

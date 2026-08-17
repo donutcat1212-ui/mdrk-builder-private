@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields
 from datetime import date, datetime, time, timedelta
@@ -26,6 +27,7 @@ from mdrk_builder.application.extractors import (
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
+    extract_specialist_name,
 )
 from mdrk_builder.domain import (
     Episode,
@@ -491,6 +493,70 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
             setattr(target, field_name, value)
             provenance[f"sections.{field_name}"] = record.document.source_path
 
+    def merge_specialist_plan_as_of(
+        target,
+        provenance: dict[str, Path],
+        boundary: datetime | None,
+    ) -> None:
+        eligible = eligible_as_of(clinical_records, boundary)
+        physician_roles = {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+        task_prefix = re.compile(r"^(?:[-•–—]|\d+[.)])\s*")
+        for field_name in ("goal", "tasks"):
+            latest_by_role: dict[SpecialistRole, ScannedRecord] = {}
+            for record in eligible:
+                role = record.classification.role
+                if role is SpecialistRole.OTHER or role in physician_roles:
+                    continue
+                if extracted[id(record)][field_name]:
+                    latest_by_role[role] = record
+            selected = sorted(
+                latest_by_role.values(),
+                key=lambda item: (
+                    item.clinical_datetime or datetime.min,
+                    str(item.document.source_path).casefold(),
+                ),
+            )
+            current = getattr(target, field_name).strip()
+            values = [
+                task_prefix.sub("", line).strip()
+                for line in current.splitlines()
+                if line.strip()
+            ]
+            normalized = {
+                " ".join(value.casefold().replace("ё", "е").strip(" .;").split())
+                for value in values
+            }
+            source_paths = [
+                path
+                for key, path in provenance.items()
+                if key == f"sections.{field_name}"
+                or key.startswith(f"sections.{field_name}.")
+            ]
+            for record in selected:
+                raw_value = extracted[id(record)][field_name]
+                if not raw_value:
+                    continue
+                added = False
+                for line in raw_value.splitlines():
+                    value = task_prefix.sub("", line).strip()
+                    key = " ".join(
+                        value.casefold().replace("ё", "е").strip(" .;").split()
+                    )
+                    if not value or not key or key in normalized:
+                        continue
+                    values.append(value)
+                    normalized.add(key)
+                    added = True
+                if added and record.document.source_path not in source_paths:
+                    source_paths.append(record.document.source_path)
+
+            if not values:
+                continue
+            setattr(target, field_name, "\n".join(values))
+            base_key = f"sections.{field_name}"
+            for index, path in enumerate(source_paths):
+                provenance[base_key if index == 0 else f"{base_key}.{index + 1}"] = path
+
     fill_as_of(
         episode.initial_sections,
         episode.initial_field_sources,
@@ -498,12 +564,22 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         "initial_meeting_at",
         include_updates=False,
     )
+    merge_specialist_plan_as_of(
+        episode.initial_sections,
+        episode.initial_field_sources,
+        episode.initial_meeting_at,
+    )
     fill_as_of(
         episode.sections,
         episode.field_sources,
         episode.final_meeting_at,
         "final_meeting_at",
         include_updates=True,
+    )
+    merge_specialist_plan_as_of(
+        episode.sections,
+        episode.field_sources,
+        episode.final_meeting_at,
     )
     if not episode.initial_sections.rehabilitation_potential.strip():
         episode.initial_sections.rehabilitation_potential = "средний"
@@ -618,6 +694,21 @@ def _normalized_icf_code(value: str) -> str:
     return value.casefold().replace(" ", "")
 
 
+def _allowed_from_initial_neurologist(
+    record: ScannedRecord,
+    observation: IcfObservation,
+) -> bool:
+    """Keep only the neurologist-owned slice of a copied primary SHRM table."""
+
+    if not (
+        record.classification.role is SpecialistRole.NEUROLOGIST
+        and record.classification.document_type == "initial"
+    ):
+        return True
+    code = _normalized_icf_code(observation.code)
+    return code.startswith(("b", "s", "pf")) or code == "e1101"
+
+
 def _normalized_personal_factor_description(value: str) -> str:
     return " ".join(value.casefold().replace("ё", "е").split()).strip(" .,:;")
 
@@ -634,6 +725,8 @@ def _personal_factor_records(
         if source_role not in _PERSONAL_FACTOR_ROLE_PRIORITY:
             continue
         for observation in extract_icf_observations(record.document):
+            if not _allowed_from_initial_neurologist(record, observation):
+                continue
             code = _normalized_icf_code(observation.code)
             if not code.startswith("pf") or not observation.description.strip():
                 continue
@@ -742,6 +835,8 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
         physician_roles = {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
         by_owner: dict[SpecialistRole, list[IcfObservation]] = defaultdict(list)
         for observation in observations:
+            if not _allowed_from_initial_neurologist(record, observation):
+                continue
             is_personal_factor = observation.code.casefold().startswith("pf")
             if is_personal_factor:
                 # Pf is episode-level descriptive data and is merged separately
@@ -1362,6 +1457,7 @@ def scan_patient_folder(
                         document_type=classification.document_type,
                         extraction_method="docx" if source_path.suffix.casefold() == ".docx" else "converted",
                         sha256=document.sha256,
+                        specialist_name=extract_specialist_name(document, classification.role),
                     )
                 )
                 records.append(ScannedRecord(document, classification, clinical_datetime))

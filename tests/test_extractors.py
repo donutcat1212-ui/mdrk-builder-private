@@ -12,6 +12,7 @@ from mdrk_builder.application.extractors import (
     extract_patient_identity,
     extract_procedures,
     extract_scale_measurements,
+    extract_specialist_name,
 )
 from mdrk_builder.domain import SpecialistRole
 from mdrk_builder.infrastructure.ooxml_reader import (
@@ -73,6 +74,31 @@ def test_clinical_datetime_accepts_space_inside_numeric_date() -> None:
     assert extract_clinical_datetime(document) == datetime(2026, 8, 3, 16)
 
 
+def test_specialist_name_comes_from_role_signature_not_scale_attribution() -> None:
+    document = _document(
+        "Оценка по шкале КОЗЫРЕВОЙ: 12 баллов\n"
+        "ФАМИЛИЯ А.Д.\n"
+        "Медицинский психолог (нейропсихолог)__________СОТРУДНИК А.Д."
+    )
+
+    assert (
+        extract_specialist_name(document, SpecialistRole.NEUROPSYCHOLOGIST)
+        == "СОТРУДНИК А.Д."
+    )
+
+
+def test_treating_neurologist_wins_over_department_head_on_shared_line() -> None:
+    document = _document(
+        "СОТРУДНИК А.А., лечащий врач, врач-невролог /___/ "
+        "РУКОВОДИТЕЛЬ Б.Б., заведующий отделением"
+    )
+
+    assert (
+        extract_specialist_name(document, SpecialistRole.NEUROLOGIST)
+        == "СОТРУДНИК А.А."
+    )
+
+
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:
     document = _document(
         "Фамилия, имя, отчество: АЛЬФА БЕТА ГАММА\n"
@@ -118,6 +144,49 @@ def test_sections_stop_at_neighbor_headings_and_split_diagnostics() -> None:
     assert sections["diet"] == "ОВД"
     assert "Клинический анализ" in sections["laboratory_results"]
     assert sections["instrumental_results"].startswith("ЭКГ")
+
+
+def test_specialist_rehabilitation_plan_extracts_explicit_goal_and_tasks() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Задача на этап МР: через 17 дней пациент ведёт диалог.",
+                "Короткосрочная задача реабилитации №1: Улучшить речевой выдох.",
+                "Короткосрочная задача реабилитации №2: Улучшить артикуляцию.",
+                "На основании данных обследования рекомендовано:",
+                "При выполнении сложных задач использовать самоинструкции.",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["goal"] == "через 17 дней пациент ведёт диалог."
+    assert sections["tasks"].splitlines() == [
+        "Улучшить речевой выдох.",
+        "Улучшить артикуляцию.",
+    ]
+
+
+def test_specialist_rehabilitation_task_block_stops_before_recommendations() -> None:
+    document = _document(
+        "\n".join(
+            (
+                "Реабилитационные задачи на этап МР:",
+                "• Развитие силовой выносливости;",
+                "• Улучшение функции равновесия;",
+                "На основании данных обследования рекомендовано:",
+                "• Индивидуальное занятие лечебной физкультурой;",
+            )
+        )
+    )
+
+    sections = extract_clinical_sections(document)
+
+    assert sections["tasks"].splitlines() == [
+        "Развитие силовой выносливости;",
+        "Улучшение функции равновесия;",
+    ]
 
 
 def test_section_does_not_absorb_discharge_metadata() -> None:
@@ -231,25 +300,29 @@ def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> Non
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА."
+        "Нейропсихологический статус:\n1. ЗАКЛЮЧЕНИЕ_НЕЙРОПСИХОЛОГА."
     )
 
 
-def test_conclusion_accepts_topical_neuropsych_heading_and_stops_at_recommendations() -> None:
+def test_conclusion_keeps_neuropsych_status_and_basis_but_not_later_dynamics() -> None:
     document = _document(
         "\n".join(
             (
                 "Нейропсихологический статус и топический диагноз :",
                 "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.",
                 "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.",
-                "На основании данных рекомендован курс: не включать",
+                "Количественная оценка данных обследования:",
+                "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ",
+                "Отмечается положительная динамика: НЕ_ВКЛЮЧАТЬ",
             )
         )
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1. "
-        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2."
+        "Нейропсихологический статус и топический диагноз :\n"
+        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.\n"
+        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.\n"
+        "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ"
     )
 
 
@@ -259,7 +332,26 @@ def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:
         "Рекомендовано: занятия"
     )
 
-    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == "ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
+    assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
+        "Нейропсихологический статус и топический диагноз: ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
+    )
+
+
+def test_logopedist_final_conclusion_is_dynamics_plus_discharge_status() -> None:
+    document = _document(
+        "На основании данных: НЕ_ВКЛЮЧАТЬ\n"
+        "Динамика: ДИНАМИКА_ЛОГОПЕДА.\n"
+        "Логопедический статус при выписке изменен:\n"
+        "СТАТУС_СТРОКА_1.\nСТАТУС_СТРОКА_2.\n"
+        "Медицинский логопед АЛЬФА А.А."
+    )
+
+    assert extract_conclusion(document, SpecialistRole.LOGOPEDIST).splitlines() == [
+        "Динамика: ДИНАМИКА_ЛОГОПЕДА.",
+        "Логопедический статус при выписке изменен:",
+        "СТАТУС_СТРОКА_1.",
+        "СТАТУС_СТРОКА_2.",
+    ]
 
 
 def test_logopedist_summary_paragraphs_are_used_as_conclusion() -> None:
@@ -541,6 +633,15 @@ def test_scheduled_mdrk_rows_prefer_explicit_execution_time() -> None:
     values = extract_mdrk_meeting_datetimes(_document(tables=[table]))
 
     assert values[-1] == datetime(2026, 6, 19, 15, 30)
+
+
+def test_mdrk_datetime_accepts_dash_separated_time_only_after_full_date() -> None:
+    document = _document(
+        "Консилиум мультидисциплинарной реабилитационной команды\n"
+        "14.05.2026 08-46"
+    )
+
+    assert extract_mdrk_document_datetime(document) == datetime(2026, 5, 14, 8, 46)
 
 
 def test_mdrk_datetime_and_scale_roles_are_read_from_local_headings() -> None:

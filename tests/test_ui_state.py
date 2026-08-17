@@ -646,6 +646,19 @@ def test_russian_and_windows_layout_shortcuts_generate_native_virtual_events(
     assert widget.generated_events == ["<<Cut>>"]
 
 
+def test_edit_controls_install_keyboard_and_right_click_dispatchers() -> None:
+    bindings: list[tuple[str, object, str]] = []
+
+    class Root:
+        def bind_all(self, sequence: str, callback, *, add: str) -> None:
+            bindings.append((sequence, callback, add))
+
+    dialogs_module.install_edit_shortcuts(Root())
+
+    assert [item[0] for item in bindings] == ["<Control-KeyPress>", "<Button-3>"]
+    assert all(item[2] == "+" for item in bindings)
+
+
 def test_latin_clipboard_shortcut_is_left_to_native_tk_binding() -> None:
     widget = _KeyboardWidget()
 

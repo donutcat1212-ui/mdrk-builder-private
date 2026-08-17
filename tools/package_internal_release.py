@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import re
 import shutil
 import tempfile
@@ -22,7 +21,6 @@ ALLOWED_PACKAGE_FILES = {
     "MDRK_Builder.exe",
     "issues.txt",
     "README_ПЕРЕД_ИСПОЛЬЗОВАНИЕМ.txt",
-    "SHA256SUMS.txt",
 }
 
 
@@ -62,14 +60,6 @@ def read_internal_use_text(project_root: Path, version: str) -> str:
     return template.replace(placeholder, version)
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def build_internal_package(
     *,
     project_root: Path,
@@ -77,7 +67,7 @@ def build_internal_package(
     dist_dir: Path,
     replace: bool,
 ) -> Path:
-    """Build and validate a four-file internal distribution directory."""
+    """Build and validate a three-file internal distribution directory."""
 
     project_root = project_root.resolve()
     executable = executable.resolve()
@@ -108,16 +98,6 @@ def build_internal_package(
             newline="\r\n",
         )
         issues_path.write_bytes(b"\xef\xbb\xbf")
-
-        # issues.txt is intentionally mutable, and the Russian README name is not
-        # portable in the traditional ASCII SHA256SUMS format. The executable is
-        # the only runtime artifact whose integrity operators need to compare.
-        checksums = [f"{sha256(packaged_executable)}  {packaged_executable.name}"]
-        (staging_dir / "SHA256SUMS.txt").write_text(
-            "\r\n".join(checksums) + "\r\n",
-            encoding="ascii",
-            newline="",
-        )
 
         actual_files = {path.name for path in staging_dir.iterdir() if path.is_file()}
         if actual_files != ALLOWED_PACKAGE_FILES:

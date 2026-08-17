@@ -213,6 +213,83 @@ def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
     assert {domain.code for domain in episode.icf_domains} == {"s110"}
 
 
+def test_scan_preserves_specialist_name_for_signature_roster(tmp_path) -> None:
+    document = Document()
+    for value in (
+        "Первичная консультация медицинского логопеда",
+        "Дата консультации: 05.06.2026 14:00",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Медицинский логопед /________/ СОТРУДНИК Л.Г.",
+    ):
+        document.add_paragraph(value)
+    document.save(tmp_path / "логопед первичный.docx")
+
+    episode = scan_patient_folder(tmp_path)
+
+    source = next(item for item in episode.sources if item.role is SpecialistRole.LOGOPEDIST)
+    assert source.specialist_name == "СОТРУДНИК Л.Г."
+
+
+def test_scan_aggregates_goal_and_tasks_from_latest_specialist_plans(tmp_path) -> None:
+    def write_source(path: Path, *paragraphs: str) -> None:
+        document = Document()
+        for paragraph in paragraphs:
+            document.add_paragraph(paragraph)
+        document.save(path)
+
+    write_source(
+        tmp_path / "невролог первичный.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 14.08.2026 09:46",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Дата и время поступления: 14.08.2026 08:40",
+        "Клинический диагноз: ДИАГНОЗ_ТЕСТ",
+    )
+    write_source(
+        tmp_path / "логопед первичный.docx",
+        "Первичная консультация медицинского логопеда",
+        "Дата консультации: 14.08.2026 12:00",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Задача на этап МР: через 17 дней пациент ведёт диалог.",
+        "Короткосрочная задача реабилитации №1: Улучшить артикуляцию.",
+        "Короткосрочная задача реабилитации №2: Увеличить речевой выдох.",
+    )
+    write_source(
+        tmp_path / "фт первичный.docx",
+        "Первичный осмотр специалиста по физической реабилитации",
+        "Дата осмотра: 14.08.2026 16:10",
+        "ФИО пациента: АЛЬФА БЕТА ГАММА",
+        "Номер ИБ: 123/26",
+        "Реабилитационные задачи на этап МР:",
+        "• Развитие силовой выносливости;",
+        "• Улучшение функции равновесия;",
+        "На основании данных обследования рекомендовано:",
+        "• Индивидуальная лечебная физкультура;",
+    )
+
+    episode = scan_patient_folder(
+        tmp_path,
+        initial_meeting_at=datetime(2026, 8, 17, 8),
+    )
+
+    assert episode.initial_sections.goal == "через 17 дней пациент ведёт диалог."
+    assert episode.initial_sections.tasks.splitlines() == [
+        "Улучшить артикуляцию.",
+        "Увеличить речевой выдох.",
+        "Развитие силовой выносливости;",
+        "Улучшение функции равновесия;",
+    ]
+    assert {
+        path.name
+        for key, path in episode.initial_field_sources.items()
+        if key.startswith("sections.tasks")
+    } == {"логопед первичный.docx", "фт первичный.docx"}
+    assert not any(issue.field == "initial_sections.tasks" for issue in episode.issues)
+
+
 def test_mixed_record_numbers_and_admission_dates_are_blocking() -> None:
     records = [
         _record(
@@ -731,8 +808,10 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
         "",
         clinical_datetime=datetime(2026, 8, 3, 8, 39),
         tables=[
-            _icf_table(
-                _row({0: "e310", 1: "Семья и ближайшие родственники", 11: "4+"}),
+                _icf_table(
+                    _row({0: "b730", 1: "Мышечная сила", 11: "3"}),
+                    _row({0: "e1101", 1: "Лекарственные препараты", 11: "4+"}),
+                    _row({0: "e310", 1: "Семья и ближайшие родственники", 11: "4+"}),
                 _row({0: "d550", 1: "Приём пищи", 11: "2"}),
                 ParsedRow(
                     (
@@ -756,13 +835,8 @@ def test_pf_uses_physician_source_when_no_psychologist_source_exists() -> None:
     assert personal.initial is None and personal.final is None
     assert personal.initial_source == Path("/patient/physician-initial.docx")
     assert personal.final_source is None
-    environment = next(item for item in episode.icf_domains if item.code == "e310")
-    assert environment.initial and environment.initial.display() == "4+"
-    assert environment.specialist is SpecialistRole.OTHER
-    assert environment.initial_source == Path("/patient/physician-initial.docx")
-    activity = next(item for item in episode.icf_domains if item.code == "d550")
-    assert activity.initial and activity.initial.display() == "2"
-    assert activity.specialist is SpecialistRole.OTHER
+    # Copied FT/FZT domains from a neurologist's primary SHRM table are excluded.
+    assert {item.code for item in episode.icf_domains} == {"b730", "e1101", "Pf"}
 
 
 def test_pf_is_merged_once_across_roles_and_prefers_authoritative_source() -> None:
