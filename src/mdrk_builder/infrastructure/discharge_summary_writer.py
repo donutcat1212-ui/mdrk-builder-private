@@ -62,9 +62,10 @@ def write_discharge_summary_docx(
     output_path: Path,
     *,
     template_path: Path | None = None,
+    ignore_issues: bool = False,
 ) -> Path:
     blocking = list(draft.blocking_issues())
-    if blocking:
+    if blocking and not ignore_issues:
         raise DischargeSummaryGenerationBlockedError(blocking)
 
     template = (template_path or discharge_summary_template_path()).resolve()

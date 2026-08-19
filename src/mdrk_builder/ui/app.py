@@ -24,7 +24,6 @@ from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.application.validation import (
     acknowledge_issue,
-    can_generate,
     clear_issue_acknowledgements,
     current_issues,
     has_issue_acknowledgements,
@@ -67,6 +66,7 @@ from mdrk_builder.ui.episode_adapter import (
     parse_optional_meeting_datetime,
     sections_for,
 )
+from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
 from mdrk_builder.ui.reverse_sheet_dialog import ReverseSheetDialog
 
 
@@ -882,20 +882,16 @@ class MdrkBuilderApp:
             return
         kind = self._current_kind
         self._refresh_issues()
-        if not can_generate(self.episode, kind):
-            self.notebook.select(self.issues_tab)
-            messagebox.showerror(
-                "Документ не создан",
-                "Остались блокирующие проблемы. Исправьте обязательные поля на вкладке "
-                "«Предупреждения».",
-            )
-            return
-        warnings = [
-            issue for issue in current_issues(self.episode, kind) if issue.severity is ReviewSeverity.WARNING
+        review_issues = [
+            issue
+            for issue in current_issues(self.episode, kind)
+            if issue.severity in {ReviewSeverity.BLOCKING, ReviewSeverity.WARNING}
         ]
-        if warnings and not messagebox.askyesno(
-            "Требуется проверка",
-            f"Осталось предупреждений: {len(warnings)}. Создать редактируемый DOCX с этими данными?",
+        document_name = "МДРК 1" if kind is MdrkKind.INITIAL else "МДРК 2"
+        if not confirm_generation_with_issues(
+            self.root,
+            review_issues,
+            document_name=document_name,
         ):
             return
         default_name = self._default_output_name(kind)
@@ -908,7 +904,12 @@ class MdrkBuilderApp:
         if not output:
             return
         try:
-            created = write_mdrk_docx(self.episode, kind, Path(output))
+            created = write_mdrk_docx(
+                self.episode,
+                kind,
+                Path(output),
+                ignore_issues=bool(review_issues),
+            )
         except Exception as exc:
             messagebox.showerror("Не удалось создать DOCX", str(exc))
             self.status_var.set("Ошибка генерации DOCX")

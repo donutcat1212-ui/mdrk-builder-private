@@ -14,8 +14,7 @@ from mdrk_builder.domain import (
     ReviewSeverity,
 )
 from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
-from mdrk_builder.ui import reverse_sheet_dialog as reverse_dialog_module
-from mdrk_builder.ui.reverse_sheet_dialog import confirm_incomplete_reverse_dates
+from mdrk_builder.ui.reverse_sheet_dialog import incomplete_reverse_date_issues
 
 
 def _write_docx(path: Path, *paragraphs: str) -> None:
@@ -298,30 +297,18 @@ def test_writer_places_manual_fill_rows_between_appointment_blocks(tmp_path) -> 
     assert table.cell(7, 0).text == "Третья"
 
 
-def test_missing_reverse_dates_can_be_accepted_globally(monkeypatch) -> None:
-    calls: list[str] = []
-
-    def accept(_title: str, message: str, **_kwargs) -> bool:
-        calls.append(message)
-        return True
-
-    monkeypatch.setattr(reverse_dialog_module.messagebox, "askyesno", accept)
+def test_missing_reverse_dates_are_reported_for_generation_review() -> None:
     rows = [ReverseSheetRow("КОНСУЛЬТАЦИЯ_ТЕСТ", None, None)]
 
-    assert confirm_incomplete_reverse_dates(object(), rows)
-    assert len(calls) == 1
-    assert "дата назначения" in calls[0]
-    assert "дата исполнения" in calls[0]
+    issues = incomplete_reverse_date_issues(rows)
+
+    assert len(issues) == 1
+    assert "дата назначения" in issues[0].message
+    assert "дата исполнения" in issues[0].message
+    assert issues[0].severity is ReviewSeverity.WARNING
 
 
-def test_complete_reverse_dates_need_no_confirmation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        reverse_dialog_module.messagebox,
-        "askyesno",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected dialog")),
-    )
-
-    assert confirm_incomplete_reverse_dates(
-        object(),
+def test_complete_reverse_dates_need_no_review_issue() -> None:
+    assert not incomplete_reverse_date_issues(
         [ReverseSheetRow("КОНСУЛЬТАЦИЯ_ТЕСТ", date(2026, 8, 5), datetime(2026, 8, 5, 9))],
     )

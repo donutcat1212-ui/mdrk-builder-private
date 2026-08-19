@@ -6,7 +6,12 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from mdrk_builder.domain import ReverseSheetDraft, ReverseSheetRow
+from mdrk_builder.domain import (
+    ReverseSheetDraft,
+    ReverseSheetRow,
+    ReviewIssue,
+    ReviewSeverity,
+)
 from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
 from mdrk_builder.ui.episode_adapter import (
     format_date,
@@ -14,13 +19,13 @@ from mdrk_builder.ui.episode_adapter import (
     parse_optional_date,
     parse_optional_datetime,
 )
+from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
 
 
-def confirm_incomplete_reverse_dates(
-    parent: tk.Misc,
+def incomplete_reverse_date_issues(
     rows: list[ReverseSheetRow],
-) -> bool:
-    missing: list[str] = []
+) -> tuple[ReviewIssue, ...]:
+    issues: list[ReviewIssue] = []
     for row in rows:
         fields: list[str] = []
         if row.appointment_date is None:
@@ -28,16 +33,16 @@ def confirm_incomplete_reverse_dates(
         if row.performed_at is None:
             fields.append("дата исполнения")
         if fields:
-            missing.append(f"• {row.intervention}: {', '.join(fields)}")
-    if not missing:
-        return True
-    return messagebox.askyesno(
-        "Создать с пустыми датами?",
-        "В оборотном листе не заполнены даты:\n\n"
-        + "\n".join(missing)
-        + "\n\nПродолжить и оставить эти ячейки пустыми?",
-        parent=parent,
-    )
+            issues.append(
+                ReviewIssue(
+                    code="reverse_row_dates_missing",
+                    message=f"{row.intervention}: {', '.join(fields)}",
+                    severity=ReviewSeverity.WARNING,
+                    field="rows",
+                    source=row.source,
+                )
+            )
+    return tuple(issues)
 
 
 class ReverseSheetRowDialog(simpledialog.Dialog):
@@ -274,7 +279,15 @@ class ReverseSheetDialog(tk.Toplevel):
     def _generate(self) -> None:
         if not self._apply_header():
             return
-        if not confirm_incomplete_reverse_dates(self, self.draft.rows):
+        review_issues = (
+            *self.draft.issues,
+            *incomplete_reverse_date_issues(self.draft.rows),
+        )
+        if not confirm_generation_with_issues(
+            self,
+            review_issues,
+            document_name="Оборотный лист",
+        ):
             return
         patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", self.draft.identity.full_name).strip("_")
         output = filedialog.asksaveasfilename(

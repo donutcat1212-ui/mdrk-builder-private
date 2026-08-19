@@ -144,6 +144,7 @@ def write_mdrk_docx(
     *,
     signatories: Sequence[SignatoryRow] = (),
     template_path: Path | None = None,
+    ignore_issues: bool = False,
 ) -> Path:
     """Create one editable MDRK snapshot without changing any source document."""
 
@@ -152,7 +153,7 @@ def write_mdrk_docx(
         for issue in current_issues(episode, kind)
         if issue.severity is ReviewSeverity.BLOCKING
     ]
-    if blocking:
+    if blocking and not ignore_issues:
         raise DocumentGenerationBlockedError(blocking)
 
     template = (template_path or canonical_template_path()).resolve()

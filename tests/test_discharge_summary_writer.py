@@ -151,7 +151,7 @@ def test_writer_refuses_to_overwrite_template_or_source(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("acknowledged", [False, True])
-def test_writer_never_allows_blocking_issue(
+def test_writer_requires_explicit_override_for_blocking_issue(
     tmp_path,
     acknowledged: bool,
 ) -> None:
@@ -167,3 +167,9 @@ def test_writer_never_allows_blocking_issue(
 
     with pytest.raises(DischargeSummaryGenerationBlockedError):
         write_discharge_summary_docx(draft, tmp_path / "blocked.docx")
+
+    assert write_discharge_summary_docx(
+        draft,
+        tmp_path / f"overridden-{acknowledged}.docx",
+        ignore_issues=True,
+    ).is_file()

@@ -15,6 +15,7 @@ from mdrk_builder.ui.episode_adapter import (
     format_date,
     format_datetime,
 )
+from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,9 +27,8 @@ class DischargeTextField:
 
 DISCHARGE_FIELD_GROUPS: tuple[tuple[str, tuple[DischargeTextField, ...]], ...] = (
     (
-        "Шапка и диагноз",
+        "Диагноз",
         (
-            DischargeTextField("header_text", "Шапка из действующего выписного эпикриза", 7),
             DischargeTextField("clinical_diagnosis", "Заключительный клинический диагноз", 7),
         ),
     ),
@@ -101,18 +101,6 @@ def warning_discharge_issues(draft: DischargeSummaryDraft) -> tuple[ReviewIssue,
     )
 
 
-def confirm_discharge_warnings(parent: tk.Misc, draft: DischargeSummaryDraft) -> bool:
-    warnings = warning_discharge_issues(draft)
-    if not warnings:
-        return True
-    return messagebox.askyesno(
-        "Требуется проверка",
-        f"Осталось предупреждений: {len(warnings)}. "
-        "Создать редактируемый выписной эпикриз с этими данными?",
-        parent=parent,
-    )
-
-
 def apply_discharge_form(
     draft: DischargeSummaryDraft,
     text_values: Mapping[str, str],
@@ -158,8 +146,8 @@ class DischargeSummaryDialog(tk.Toplevel):
         ttk.Label(
             shell,
             text=(
-                "Проверьте автоматически перенесённые данные. Реквизиты и даты ниже "
-                "зафиксированы по выбранным источникам и формируют шапку и колонтитул; "
+                "Проверьте автоматически перенесённые данные. ФИО, номер карты и даты ниже "
+                "автоматически формируют шапку и колонтитул и не редактируются здесь; "
                 "текстовые блоки редактируются здесь. МКФ, шкалы и программа "
                 "переносятся структурно и окончательно проверяются в созданном DOCX."
             ),
@@ -411,19 +399,16 @@ class DischargeSummaryDialog(tk.Toplevel):
         if not self._apply_form():
             return
 
-        blocking = blocking_discharge_issues(self.draft)
-        if blocking:
-            messages = "\n".join(f"• {issue.message}" for issue in blocking[:8])
-            if len(blocking) > 8:
-                messages += f"\n• …и ещё {len(blocking) - 8}"
-            messagebox.showerror(
-                "Документ не создан",
-                "Остались блокирующие проблемы исходных данных:\n\n"
-                f"{messages}\n\nИсправьте источники и выполните сканирование заново.",
-                parent=self,
-            )
-            return
-        if not confirm_discharge_warnings(self, self.draft):
+        review_issues = tuple(
+            issue
+            for issue in self.draft.issues
+            if issue.severity in {ReviewSeverity.BLOCKING, ReviewSeverity.WARNING}
+        )
+        if not confirm_generation_with_issues(
+            self,
+            review_issues,
+            document_name="Выписной эпикриз",
+        ):
             return
 
         patient = re.sub(
@@ -439,7 +424,11 @@ class DischargeSummaryDialog(tk.Toplevel):
         if not output:
             return
         try:
-            created = write_discharge_summary_docx(self.draft, Path(output))
+            created = write_discharge_summary_docx(
+                self.draft,
+                Path(output),
+                ignore_issues=bool(review_issues),
+            )
         except Exception as exc:
             messagebox.showerror("Не удалось создать DOCX", str(exc), parent=self)
             return

@@ -624,6 +624,12 @@ def test_writer_blocks_on_current_required_issue(tmp_path) -> None:
         write_mdrk_docx(episode, MdrkKind.FINAL, tmp_path / "blocked.docx")
 
     assert any(issue.code == "required_physician_source" for issue in error.value.issues)
+    assert write_mdrk_docx(
+        episode,
+        MdrkKind.FINAL,
+        tmp_path / "explicitly-overridden.docx",
+        ignore_issues=True,
+    ).is_file()
 
 
 def test_writer_never_overwrites_an_episode_source(tmp_path) -> None:
