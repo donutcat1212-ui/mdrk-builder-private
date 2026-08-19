@@ -11,6 +11,7 @@ from mdrk_builder.application.episode_identity import (
 )
 from mdrk_builder.application.episode_source_facts import (
     episode_facts_from_document,
+    is_admission_department_document,
 )
 from mdrk_builder.application.extractors import (
     extract_clinical_datetime,
@@ -81,7 +82,7 @@ def select_discharge_sources(source_scan: SourceScanResult) -> SourceSelection:
         and item.classification.document_type == "initial"
         and not item.classification.is_discharge_summary
         and not item.classification.is_generated_output
-        and not _is_admission_department_source(item)
+        and not is_admission_department_document(item.document)
     ]
     pairs = [
         _SourcePair(discharge, primary, match)
@@ -399,19 +400,3 @@ def _narrow_pairs(pairs: list[_SourcePair]) -> list[_SourcePair]:
         pairs = medical_record_pairs
     admission_pairs = [pair for pair in pairs if pair.match.admission is True]
     return admission_pairs or pairs
-
-
-def _is_admission_department_source(scanned: ScannedDocument) -> bool:
-    document = scanned.document
-    source_name = document.source_path.name.casefold().replace("ё", "е")
-    if "приемн" in source_name:
-        return True
-    for line in document.text.splitlines()[:12]:
-        heading = line.casefold().replace("ё", "е")
-        if (
-            ":" not in heading
-            and "приемн" in heading
-            and ("первичн" in heading or "осмотр" in heading)
-        ):
-            return True
-    return False

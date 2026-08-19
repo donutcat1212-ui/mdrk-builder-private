@@ -61,3 +61,16 @@ def episode_facts_from_document(
         discharge_at=discharge_at,
         episode_key=episode_key,
     )
+
+
+def is_admission_department_document(document: ParsedDocument) -> bool:
+    source_name = document.source_path.name.casefold().replace("ё", "е")
+    if "приемн" in source_name:
+        return True
+    return any(
+        ":" not in heading
+        and "приемн" in heading
+        and ("первичн" in heading or "осмотр" in heading)
+        for line in document.text.splitlines()[:12]
+        if (heading := line.casefold().replace("ё", "е"))
+    )

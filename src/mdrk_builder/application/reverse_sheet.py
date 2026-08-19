@@ -12,6 +12,9 @@ from mdrk_builder.application.extractors import (
     extract_specialist_name,
     parse_first_datetime,
 )
+from mdrk_builder.application.episode_source_facts import (
+    is_admission_department_document,
+)
 from mdrk_builder.application.source_scan import scan_source_documents
 from mdrk_builder.domain import (
     ReverseSheetDraft,
@@ -116,10 +119,21 @@ def _planned_dates(document: ParsedDocument) -> dict[str, date]:
     return result
 
 
-def _is_primary_neurologist(classification: DocumentClassification) -> bool:
-    return (
-        classification.role is SpecialistRole.NEUROLOGIST
-        and classification.document_type == "initial"
+_PRIMARY_CLINICIAN_PRIORITY = {
+    SpecialistRole.NEUROLOGIST: 0,
+    SpecialistRole.FRM: 1,
+}
+
+
+def _header_completeness(document: ParsedDocument) -> int:
+    identity = extract_patient_identity(document)
+    return sum(
+        (
+            bool(identity.full_name),
+            identity.birth_date is not None,
+            bool(identity.medical_record_number),
+            extract_admission_datetime(document) is not None,
+        )
     )
 
 
@@ -175,7 +189,15 @@ def scan_reverse_sheet(
             )
         )
 
-    primary_candidates = [item for item in parsed if _is_primary_neurologist(item[1])]
+    primary_candidates = [
+        item
+        for item in parsed
+        if item[1].document_type == "initial"
+        and not is_admission_department_document(item[0])
+    ]
+    clinician_candidates = [
+        item for item in primary_candidates if item[1].role in _PRIMARY_CLINICIAN_PRIORITY
+    ]
     existing_mdrk_rows = [
         row
         for document, classification in parsed
@@ -185,33 +207,76 @@ def scan_reverse_sheet(
     existing_mdrk_rows.sort(
         key=lambda row: (row.performed_at is None, row.performed_at or datetime.max)
     )
-    primary_candidates.sort(
+    clinician_candidates.sort(
         key=lambda item: (
+            _PRIMARY_CLINICIAN_PRIORITY[item[1].role],
             extract_clinical_datetime(item[0]) or datetime.max,
             str(item[0].source_path).casefold(),
         )
     )
-    primary = primary_candidates[0][0] if primary_candidates else None
+    primary = clinician_candidates[0] if clinician_candidates else None
+    header_candidates = [item for item in primary_candidates if _header_completeness(item[0])]
+    header_candidates.sort(
+        key=lambda item: (
+            -_header_completeness(item[0]),
+            _PRIMARY_CLINICIAN_PRIORITY.get(item[1].role, 2),
+            extract_clinical_datetime(item[0]) or datetime.max,
+            str(item[0].source_path).casefold(),
+        )
+    )
+    header = header_candidates[0] if header_candidates else None
     planned: dict[str, date] = {}
     primary_performer = ""
     primary_clinical_date: date | None = None
     if primary is None:
         draft.issues.append(
             ReviewIssue(
-                "reverse_primary_neurologist_missing",
-                "Не найдена первичная консультация невролога: шапка оставлена пустой.",
+                "reverse_primary_clinician_missing",
+                (
+                    "Не найден первичный осмотр невролога или врача ФРМ: "
+                    "плановые даты и исполнитель МДРК могут остаться пустыми."
+                ),
+                ReviewSeverity.WARNING,
+                "rows",
+            )
+        )
+    else:
+        primary_document, primary_classification = primary
+        planned = _planned_dates(primary_document)
+        primary_performer = extract_specialist_name(
+            primary_document,
+            primary_classification.role,
+        )
+        primary_datetime = extract_clinical_datetime(primary_document)
+        primary_clinical_date = primary_datetime.date() if primary_datetime is not None else None
+
+    if header is None:
+        draft.issues.append(
+            ReviewIssue(
+                "reverse_header_source_missing",
+                "В первичных осмотрах не найдены реквизиты для шапки оборотного листа.",
                 ReviewSeverity.BLOCKING,
                 "header",
             )
         )
     else:
-        draft.header_source = primary.source_path
-        draft.identity = extract_patient_identity(primary)
-        draft.admission_datetime = extract_admission_datetime(primary)
-        planned = _planned_dates(primary)
-        primary_performer = extract_specialist_name(primary, SpecialistRole.NEUROLOGIST)
-        primary_datetime = extract_clinical_datetime(primary)
-        primary_clinical_date = primary_datetime.date() if primary_datetime is not None else None
+        header_document, header_classification = header
+        draft.header_source = header_document.source_path
+        draft.identity = extract_patient_identity(header_document)
+        draft.admission_datetime = extract_admission_datetime(header_document)
+        if header_classification.role not in _PRIMARY_CLINICIAN_PRIORITY:
+            draft.issues.append(
+                ReviewIssue(
+                    "reverse_header_specialist_fallback",
+                    (
+                        "Шапка взята из первичного осмотра специалиста «"
+                        f"{header_classification.role.display_name}»: проверьте реквизиты."
+                    ),
+                    ReviewSeverity.WARNING,
+                    "header",
+                    header_document.source_path,
+                )
+            )
 
     rows: list[ReverseSheetRow] = []
     mdrk_index = 0
@@ -262,8 +327,7 @@ def scan_reverse_sheet(
                 )
             )
             continue
-        # Neurologist documents supply the episode header and clinical MDRK
-        # content, but are never separate interventions on the reverse sheet.
+        # Neurologist documents are never separate interventions on the reverse sheet.
         if classification.role is SpecialistRole.NEUROLOGIST:
             continue
         if classification.document_type in {

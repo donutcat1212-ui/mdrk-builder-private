@@ -38,9 +38,65 @@ def test_reverse_sheet_preserves_source_read_failure_issue(tmp_path) -> None:
     assert read_failure.severity is ReviewSeverity.WARNING
     assert broken_path.name in read_failure.message
     assert any(
-        issue.code == "reverse_primary_neurologist_missing"
+        issue.code == "reverse_primary_clinician_missing"
         for issue in draft.issues
     )
+    assert any(issue.code == "reverse_header_source_missing" for issue in draft.issues)
+
+
+def test_reverse_sheet_uses_complete_frm_header_from_patient_root(tmp_path) -> None:
+    _write_docx(
+        tmp_path / "первичный осмотр невролога.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 05.08.2026 09:00",
+        "Врач-невролог: АЛЬФА А.А.",
+    )
+    frm_path = tmp_path / "первичный осмотр врача ФРМ.docx"
+    _write_docx(
+        frm_path,
+        "Первичный осмотр врача ФРМ",
+        "Дата осмотра: 05.08.2026 09:15",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Дата рождения: 01.02.1970",
+        "Номер ИБ: 123/26",
+        "Дата и время поступления: 05.08.2026 08:15",
+        "Врач ФРМ: БЕТА Б.Б.",
+    )
+
+    draft = scan_reverse_sheet(tmp_path)
+
+    assert draft.header_source == frm_path
+    assert draft.identity.full_name == "ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР"
+    assert draft.identity.medical_record_number == "123/26"
+    assert draft.identity.birth_date == date(1970, 2, 1)
+    assert draft.admission_datetime == datetime(2026, 8, 5, 8, 15)
+
+
+def test_reverse_sheet_falls_back_to_other_specialist_primary(tmp_path) -> None:
+    specialist_path = tmp_path / "первичный осмотр логопеда.docx"
+    _write_docx(
+        specialist_path,
+        "Первичная консультация медицинского логопеда",
+        "Дата приема: 05.08.2026 10:00",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Дата рождения: 01.02.1970",
+        "Номер ИБ: 123/26",
+        "Дата и время поступления: 05.08.2026 08:15",
+        "Медицинский логопед: БЕТА Б.Б.",
+    )
+
+    draft = scan_reverse_sheet(tmp_path)
+
+    assert draft.header_source == specialist_path
+    assert draft.identity.full_name == "ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР"
+    assert draft.identity.medical_record_number == "123/26"
+    assert draft.admission_datetime == datetime(2026, 8, 5, 8, 15)
+    assert any(
+        issue.code == "reverse_header_specialist_fallback"
+        and issue.source == specialist_path
+        for issue in draft.issues
+    )
+    assert not any(issue.code == "reverse_header_source_missing" for issue in draft.issues)
 
 
 def test_reverse_sheet_uses_strict_header_dates_and_consultation_chronology(tmp_path) -> None:
