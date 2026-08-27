@@ -41,6 +41,39 @@ class ReviewSeverity(StrEnum):
     BLOCKING = "blocking"
 
 
+class IcfSection(StrEnum):
+    BODY_FUNCTIONS = "body_functions"
+    BODY_STRUCTURES = "body_structures"
+    ACTIVITIES_PARTICIPATION = "activities_participation"
+    ENVIRONMENTAL_FACTORS = "environmental_factors"
+    PERSONAL_FACTORS = "personal_factors"
+
+    @property
+    def display_name(self) -> str:
+        return {
+            self.BODY_FUNCTIONS: "Функции организма",
+            self.BODY_STRUCTURES: "Структуры организма",
+            self.ACTIVITIES_PARTICIPATION: "Активность и участие",
+            self.ENVIRONMENTAL_FACTORS: "Факторы окружающей среды",
+            self.PERSONAL_FACTORS: "Персональные факторы",
+        }[self]
+
+
+def infer_icf_section(code: str) -> IcfSection:
+    normalized = "".join(code.casefold().replace("ё", "е").split()).replace("е", "e")
+    if normalized.startswith("pf"):
+        return IcfSection.PERSONAL_FACTORS
+    if normalized.startswith("b"):
+        return IcfSection.BODY_FUNCTIONS
+    if normalized.startswith("s"):
+        return IcfSection.BODY_STRUCTURES
+    if normalized.startswith("d"):
+        return IcfSection.ACTIVITIES_PARTICIPATION
+    if normalized.startswith("e"):
+        return IcfSection.ENVIRONMENTAL_FACTORS
+    return IcfSection.PERSONAL_FACTORS
+
+
 @dataclass(frozen=True, slots=True)
 class SourceDocument:
     path: Path
@@ -121,6 +154,11 @@ class IcfDomain:
     final_source: Path | None = None
     initial_measured_at: datetime | None = None
     final_measured_at: datetime | None = None
+    section_override: IcfSection | None = None
+
+    @property
+    def section(self) -> IcfSection:
+        return self.section_override or infer_icf_section(self.code)
 
     @property
     def key(self) -> tuple[str, str, SpecialistRole]:
@@ -136,6 +174,32 @@ class IcfDomain:
         if self.final.value > self.initial.value:
             return "-"
         return ""
+
+
+def move_icf_domain(
+    domains: list[IcfDomain],
+    source_index: int,
+    section: IcfSection,
+    *,
+    before_index: int | None = None,
+) -> int:
+    """Move one domain into a section and return its new list index."""
+    if not 0 <= source_index < len(domains):
+        raise IndexError("ICF source index is outside the domain list")
+    if before_index is not None and not 0 <= before_index < len(domains):
+        raise IndexError("ICF target index is outside the domain list")
+
+    domain = domains.pop(source_index)
+    domain.section_override = section
+    if before_index is None:
+        insert_at = len(domains)
+        for index, item in enumerate(domains):
+            if item.section is section:
+                insert_at = index + 1
+    else:
+        insert_at = before_index - (1 if source_index < before_index else 0)
+    domains.insert(max(0, insert_at), domain)
+    return domains.index(domain)
 
 
 @dataclass(slots=True)

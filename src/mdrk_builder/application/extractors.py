@@ -154,7 +154,13 @@ def extract_specialist_name(document: ParsedDocument, role: SpecialistRole) -> s
             continue
         names = _specialist_names_from_line(line)
         if names:
-            if role is SpecialistRole.NEUROLOGIST and "лечащ" in low:
+            if (
+                role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+                and "заведующ" in low
+                and "лечащ" not in low
+            ):
+                continue
+            if role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM} and "лечащ" in low:
                 return names[0]
             return names[-1]
     for line in reversed(lines):

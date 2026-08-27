@@ -99,6 +99,37 @@ def test_reverse_sheet_falls_back_to_other_specialist_primary(tmp_path) -> None:
     assert not any(issue.code == "reverse_header_source_missing" for issue in draft.issues)
 
 
+def test_reverse_sheet_excludes_frm_and_keeps_explicit_reflexotherapist(
+    tmp_path,
+) -> None:
+    _write_docx(
+        tmp_path / "первичный невролог.docx",
+        "Первичный осмотр невролога",
+        "Дата осмотра: 01.08.2026 09:00",
+        "ФИО пациента: ПАЦИЕНТ ТЕСТОВЫЙ ПРИМЕР",
+        "Номер ИБ: 123/26",
+    )
+    _write_docx(
+        tmp_path / "рефлексотерапевт.docx",
+        "Первичная консультация врача-рефлексотерапевта",
+        "Дата консультации: 02.08.2026 10:00",
+        "Врач-рефлексотерапевт: АЛЬФА А.А.",
+        "Согласовано: врач ФРМ.",
+    )
+    _write_docx(
+        tmp_path / "врач ФРМ.docx",
+        "Повторная консультация врача ФРМ",
+        "Дата консультации: 03.08.2026 10:00",
+        "Врач ФРМ: БЕТА Б.Б.",
+    )
+
+    draft = scan_reverse_sheet(tmp_path)
+
+    assert [row.intervention for row in draft.rows] == [
+        "Консультация рефлексотерапевта"
+    ]
+
+
 def test_reverse_sheet_uses_strict_header_dates_and_consultation_chronology(tmp_path) -> None:
     _write_docx(
         tmp_path / "невролог первичный.docx",

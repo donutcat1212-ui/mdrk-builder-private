@@ -56,6 +56,21 @@ _CONSULTATION_HEADING_RE = re.compile(
     r"(?:консультаци\w*|осмотр\w*|обследован\w*)\b",
     re.IGNORECASE,
 )
+
+
+def _generic_intervention(text: str) -> str | None:
+    normalized = text.casefold().replace("ё", "е")
+    for tokens, intervention in GENERIC_SPECIALTIES:
+        for token in tokens:
+            normalized_token = token.casefold().replace("ё", "е")
+            if re.search(
+                rf"(?<![0-9a-zа-я]){re.escape(normalized_token)}(?![0-9a-zа-я])",
+                normalized,
+            ):
+                return intervention
+    return None
+
+
 def _leading_text(document: ParsedDocument) -> str:
     return clean_text(" ".join(document.paragraphs[:24]))[:5000]
 
@@ -67,13 +82,15 @@ def _consultation_intervention(
     leading = _leading_text(document)
     if not _CONSULTATION_HEADING_RE.search(leading):
         return None
+    explicit_specialty = clean_text(
+        f"{document.source_path.stem} {' '.join(document.paragraphs[:8])}"
+    ).casefold().replace("ё", "е")
+    if generic_intervention := _generic_intervention(explicit_specialty):
+        return generic_intervention
     if classification.role in ROLE_INTERVENTIONS:
         return ROLE_INTERVENTIONS[classification.role]
     low = leading.casefold().replace("ё", "е")
-    for tokens, intervention in GENERIC_SPECIALTIES:
-        if any(token.replace("ё", "е") in low for token in tokens):
-            return intervention
-    return None
+    return _generic_intervention(low)
 
 
 def _planned_dates(document: ParsedDocument) -> dict[str, date]:
@@ -97,9 +114,6 @@ def _planned_dates(document: ParsedDocument) -> dict[str, date]:
             (SpecialistRole.PATHOPSYCHOLOGIST, ("патопсих",)),
         )
     ]
-    intervention_tokens.extend(
-        (intervention, tokens) for tokens, intervention in GENERIC_SPECIALTIES
-    )
     intervention_tokens.append(("Консилиум МДРК", ("консилиум мдрк", "консилиум мультидисциплинар")))
 
     for line in lines:
@@ -116,6 +130,8 @@ def _planned_dates(document: ParsedDocument) -> dict[str, date]:
             normalized_tokens = tuple(token.replace("ё", "е") for token in tokens)
             if any(token in low for token in normalized_tokens):
                 result.setdefault(intervention, parsed.date())
+        if generic_intervention := _generic_intervention(low):
+            result.setdefault(generic_intervention, parsed.date())
     return result
 
 
@@ -327,9 +343,6 @@ def scan_reverse_sheet(
                 )
             )
             continue
-        # Neurologist documents are never separate interventions on the reverse sheet.
-        if classification.role is SpecialistRole.NEUROLOGIST:
-            continue
         if classification.document_type in {
             "administrative",
             "assignment_sheet",
@@ -340,7 +353,10 @@ def scan_reverse_sheet(
         }:
             continue
         intervention = _consultation_intervention(document, classification)
-        if intervention is None:
+        if intervention is None or intervention in {
+            ROLE_INTERVENTIONS[SpecialistRole.NEUROLOGIST],
+            ROLE_INTERVENTIONS[SpecialistRole.FRM],
+        }:
             continue
         performed_at = extract_clinical_datetime(document)
         is_repeat = classification.document_type in {"follow_up", "final"}

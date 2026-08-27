@@ -34,6 +34,8 @@ _LATIN_CONTROL_SHORTCUTS = {
     "c": "copy",
     "v": "paste",
     "x": "cut",
+    "y": "redo",
+    "z": "undo",
 }
 
 _RUSSIAN_CONTROL_SHORTCUTS = {
@@ -46,6 +48,10 @@ _RUSSIAN_CONTROL_SHORTCUTS = {
     "с": "copy",
     "м": "paste",
     "ч": "cut",
+    "н": "redo",
+    "я": "undo",
+    "cyrillic_en": "redo",
+    "cyrillic_ya": "undo",
 }
 
 _WINDOWS_VIRTUAL_KEY_SHORTCUTS = {
@@ -53,12 +59,20 @@ _WINDOWS_VIRTUAL_KEY_SHORTCUTS = {
     67: "copy",
     86: "paste",
     88: "cut",
+    89: "redo",
+    90: "undo",
 }
 
 _CLIPBOARD_VIRTUAL_EVENTS = {
     "copy": "<<Copy>>",
     "paste": "<<Paste>>",
     "cut": "<<Cut>>",
+}
+
+_EDIT_VIRTUAL_EVENTS = {
+    **_CLIPBOARD_VIRTUAL_EVENTS,
+    "undo": "<<Undo>>",
+    "redo": "<<Redo>>",
 }
 
 
@@ -186,7 +200,7 @@ def _dispatch_control_shortcut(event: Any) -> str | None:
     if is_native_latin:
         return None
     try:
-        widget.event_generate(_CLIPBOARD_VIRTUAL_EVENTS[action])
+        widget.event_generate(_EDIT_VIRTUAL_EVENTS[action])
     except (AttributeError, tk.TclError):
         return None
     return "break"

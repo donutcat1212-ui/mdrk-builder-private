@@ -10,6 +10,7 @@ from mdrk_builder.domain import (
     Episode,
     IcfDomain,
     IcfQualifier,
+    IcfSection,
     MdrkKind,
     Procedure,
     ReviewIssue,
@@ -398,7 +399,7 @@ def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
     assert app.episode.identity.full_name == "ПАЦИЕНТ_СОХРАНЁННЫЙ"
     assert app.episode.initial_sections.clinical_diagnosis == "сохранённый"
     assert app._text_fields["clinical_diagnosis"].value == "не потерять"
-    assert errors and "Сканировать" in errors[0]
+    assert errors and "повторить сканирование" in errors[0].casefold()
 
 
 def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
@@ -426,7 +427,7 @@ def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
     assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 8)
     assert app.episode.initial_sections.clinical_diagnosis == "сохранённый"
     assert app._text_fields["clinical_diagnosis"].value == "не потерять"
-    assert errors and "Сканировать" in errors[0]
+    assert errors and "повторить сканирование" in errors[0].casefold()
 
 
 def test_selected_issue_can_be_ignored_after_explicit_confirmation(
@@ -493,7 +494,7 @@ def test_reset_issue_acknowledgements_clears_all_kinds(monkeypatch, tmp_path) ->
     assert "сброшено" in app.status_var.get()
 
 
-def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
+def test_rescan_passes_both_meeting_boundaries_without_destructive_confirmation(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -529,12 +530,50 @@ def test_rescan_passes_both_meeting_boundaries_and_replaces_edited_kind(
 
     app._start_scan()
 
-    assert confirmations and "ручные правки" in confirmations[0].casefold()
+    assert confirmations == []
     assert captured == {
         "folder": tmp_path,
         "initial_meeting_at": datetime(2026, 8, 10, 8),
         "final_meeting_at": datetime(2026, 8, 19, 15, 30),
     }
+
+
+def test_rescan_merge_keeps_manual_fields_and_icf_section(tmp_path) -> None:
+    source = tmp_path / "source.docx"
+    previous = Episode(folder=tmp_path)
+    previous.identity.full_name = "Исправлено врачом"
+    previous.initial_sections.clinical_diagnosis = "Ручной диагноз"
+    manual_domain = IcfDomain("b730", "Сила мышц", SpecialistRole.FRM)
+    manual_domain.section_override = IcfSection.ACTIVITIES_PARTICIPATION
+    previous.icf_domains = [manual_domain]
+
+    scanned = Episode(folder=tmp_path)
+    scanned.identity.full_name = "Значение из источника"
+    scanned.initial_sections.clinical_diagnosis = "Диагноз из источника"
+    scanned.field_sources = {
+        "identity.full_name": source,
+        "sections.clinical_diagnosis": source,
+    }
+    scanned.initial_field_sources = dict(scanned.field_sources)
+
+    app = object.__new__(MdrkBuilderApp)
+    app._pending_manual_state = {
+        "episode": previous,
+        "entry_fields": {"full_name"},
+        "section_fields": {
+            MdrkKind.INITIAL: {"clinical_diagnosis"},
+            MdrkKind.FINAL: set(),
+        },
+        "collections": {"icf"},
+    }
+
+    app._merge_manual_state(scanned)
+
+    assert scanned.identity.full_name == "Исправлено врачом"
+    assert scanned.initial_sections.clinical_diagnosis == "Ручной диагноз"
+    assert scanned.icf_domains[0].section is IcfSection.ACTIVITIES_PARTICIPATION
+    assert "identity.full_name" not in scanned.field_sources
+    assert "sections.clinical_diagnosis" not in scanned.initial_field_sources
 
 
 def test_rescan_passes_changed_admission_and_recomputes_default_meetings(
@@ -639,6 +678,14 @@ def test_russian_and_windows_layout_shortcuts_generate_native_virtual_events(
 
     assert result == "break"
     assert widget.generated_events == ["<<Cut>>"]
+
+    widget.generated_events.clear()
+    result = dialogs_module._dispatch_control_shortcut(
+        SimpleNamespace(widget=widget, keysym="Cyrillic_ya", keycode=90)
+    )
+
+    assert result == "break"
+    assert widget.generated_events == ["<<Undo>>"]
 
 
 def test_edit_controls_install_keyboard_and_right_click_dispatchers() -> None:

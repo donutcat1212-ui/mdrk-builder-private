@@ -8,7 +8,14 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.table import _Cell, _Row
 
-from mdrk_builder.domain import IcfDomain, IcfQualifier, MdrkKind, Procedure, SpecialistRole
+from mdrk_builder.domain import (
+    IcfDomain,
+    IcfQualifier,
+    IcfSection,
+    MdrkKind,
+    Procedure,
+    SpecialistRole,
+)
 
 from .docx_layout import (
     MCF_FINAL_WIDTHS,
@@ -38,13 +45,13 @@ def render_icf_profile(
     *,
     repeat_missing_final: bool = True,
 ) -> None:
-    grouped: OrderedDict[str, list[IcfDomain]] = OrderedDict()
+    grouped: OrderedDict[IcfSection, list[IcfDomain]] = OrderedDict()
     for domain in domains:
-        grouped.setdefault(_mcf_category(domain.code), []).append(domain)
+        grouped.setdefault(domain.section, []).append(domain)
 
     category_header_rows = sum(
-        1 if _is_personal_factor(items[0].code) else 2
-        for items in grouped.values()
+        1 if section is IcfSection.PERSONAL_FACTORS else 2
+        for section in grouped
     )
     row_count = 2 + category_header_rows + len(domains)
     widths = MCF_FINAL_WIDTHS if kind is MdrkKind.FINAL else MCF_INITIAL_WIDTHS
@@ -99,15 +106,15 @@ def render_icf_profile(
         mark_header_row(row)
 
     row_index = 2
-    for category_name, category_domains in grouped.items():
-        sample_code = category_domains[0].code
-        if _is_personal_factor(sample_code):
+    for section, category_domains in grouped.items():
+        category_name = section.display_name
+        if section is IcfSection.PERSONAL_FACTORS:
             _fill_mcf_personal_factor_header(table.rows[row_index], category_name)
             row_index += 1
         else:
             header_row = table.rows[row_index]
             scale_row = table.rows[row_index + 1]
-            if _is_environment_factor(sample_code):
+            if section is IcfSection.ENVIRONMENTAL_FACTORS:
                 _fill_mcf_environment_headers(
                     header_row,
                     scale_row,
@@ -121,18 +128,19 @@ def render_icf_profile(
                     category_name,
                     data_label=(
                         "Данные"
-                        if sample_code.strip().casefold().startswith("s")
+                        if section is IcfSection.BODY_STRUCTURES
                         else "Ответственный специалист МДРК"
                     ),
                 )
             row_index += 2
-        environment_group = _is_environment_factor(sample_code)
+        environment_group = section is IcfSection.ENVIRONMENTAL_FACTORS
         for domain_index, domain in enumerate(category_domains):
             domain_row = table.rows[row_index]
             _fill_mcf_domain_row(
                 domain_row,
                 domain,
                 kind,
+                personal_factor=section is IcfSection.PERSONAL_FACTORS,
                 repeat_missing_final=repeat_missing_final,
             )
             if environment_group and domain_index < len(category_domains) - 1:
@@ -354,6 +362,7 @@ def _fill_mcf_domain_row(
     domain: IcfDomain,
     kind: MdrkKind,
     *,
+    personal_factor: bool,
     repeat_missing_final: bool,
 ) -> None:
     cells = row.cells
@@ -363,7 +372,7 @@ def _fill_mcf_domain_row(
         style=STYLE_MCF_CODE,
         alignment=WD_ALIGN_PARAGRAPH.CENTER,
     )
-    if _is_personal_factor(domain.code):
+    if personal_factor:
         description = cells[1].merge(cells[-1])
         set_cell_text(
             description,
@@ -426,29 +435,6 @@ def _fill_mcf_domain_row(
         style=STYLE_TABLE,
         alignment=WD_ALIGN_PARAGRAPH.CENTER,
     )
-
-
-def _mcf_category(code: str) -> str:
-    normalized = code.strip().casefold().replace("е", "e")
-    if normalized.startswith("b"):
-        return "Структура/функция"
-    if normalized.startswith("s"):
-        return "Структуры организма"
-    if normalized.startswith("d"):
-        return "Активность/участие"
-    if normalized.startswith("e"):
-        return "Факторы окружающей среды"
-    if normalized.startswith("pf"):
-        return "Персональные факторы"
-    return "Другие домены"
-
-
-def _is_personal_factor(code: str) -> bool:
-    return code.strip().casefold().replace(" ", "").startswith("pf")
-
-
-def _is_environment_factor(code: str) -> bool:
-    return code.strip().casefold().replace("е", "e").startswith("e")
 
 
 def _mcf_responsible(domain: IcfDomain) -> str:

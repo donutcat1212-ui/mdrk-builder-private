@@ -99,6 +99,15 @@ def test_treating_neurologist_wins_over_department_head_on_shared_line() -> None
     )
 
 
+def test_treating_frm_wins_over_department_head_signature() -> None:
+    document = _document(
+        "СОТРУДНИК А.А., лечащий врач, врач ФРМ /___/\n"
+        "Поляев Б.Б., заведующий отделением-врач ФРМ /___/"
+    )
+
+    assert extract_specialist_name(document, SpecialistRole.FRM) == "СОТРУДНИК А.А."
+
+
 def test_identity_preserves_skp_prefix_and_generic_fio_label() -> None:
     document = _document(
         "Фамилия, имя, отчество: АЛЬФА БЕТА ГАММА\n"

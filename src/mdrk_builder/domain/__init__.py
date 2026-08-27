@@ -10,6 +10,7 @@ from .model import (
     Episode,
     IcfDomain,
     IcfQualifier,
+    IcfSection,
     MdrkKind,
     PatientIdentity,
     Procedure,
@@ -21,6 +22,8 @@ from .model import (
     SourceDocument,
     SpecialistFinding,
     SpecialistRole,
+    infer_icf_section,
+    move_icf_domain,
 )
 
 __all__ = [
@@ -31,6 +34,7 @@ __all__ = [
     "Episode",
     "IcfDomain",
     "IcfQualifier",
+    "IcfSection",
     "MdrkKind",
     "PatientIdentity",
     "Procedure",
@@ -42,4 +46,6 @@ __all__ = [
     "SourceDocument",
     "SpecialistFinding",
     "SpecialistRole",
+    "infer_icf_section",
+    "move_icf_domain",
 ]
