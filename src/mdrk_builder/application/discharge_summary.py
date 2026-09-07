@@ -4,16 +4,12 @@ from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
 
-from mdrk_builder.application.discharge_defaults import (
-    ADDITIONAL_INFORMATION_TEMPLATE,
-    DISCHARGE_CONDITION_TEMPLATE,
-    OPERATIONS_TEMPLATE,
-    RECOMMENDATIONS_TEMPLATE,
-    WORK_CAPACITY_TEMPLATE,
-)
 from mdrk_builder.application.discharge_extractors import (
     extract_complaints,
+    extract_discharge_clinical_sections,
     extract_discharge_header,
+    update_header_period,
+    extract_discharge_final_fields,
     extract_discharge_scale_values,
     extract_instrumental_results,
     extract_laboratory_results,
@@ -35,8 +31,9 @@ from mdrk_builder.application.final_mdrk import (
     apply_final_mdrk_document,
     select_final_mdrk_document,
 )
+from mdrk_builder.application.extractors import extract_clinical_datetime, _infer_procedure_frequency
 from mdrk_builder.application.scanner import scan_patient_folder
-from mdrk_builder.application.snapshot import Snapshot, build_snapshot
+from mdrk_builder.application.snapshot import Snapshot, build_snapshot, canonical_scale_name
 from mdrk_builder.application.source_scan import scan_source_documents
 from mdrk_builder.domain import (
     DischargeScaleRow,
@@ -56,6 +53,10 @@ def _copy_episode_issues(
     *,
     record_number_selected_from_sources: bool,
 ) -> list[ReviewIssue]:
+    # Discharge has its own projected diagnosis and required-field checks.
+    # Missing sections in the separate MDRK snapshot must not block it.
+    issues = [issue for issue in issues if not issue.code.startswith((
+        "required_initial_sections_", "required_sections_"))]
     if not record_number_selected_from_sources:
         return list(issues)
     return [
@@ -116,15 +117,25 @@ def _copy_identity(identity: PatientIdentity) -> PatientIdentity:
     )
 
 
-def _project_team_findings(snapshot: Snapshot) -> tuple[DischargeTeamFinding, ...]:
+def _project_team_findings(snapshot: Snapshot, sources=()) -> tuple[DischargeTeamFinding, ...]:
     return tuple(
         DischargeTeamFinding(
             role=finding.role,
             conclusion=finding.conclusion,
             source=finding.source,
+            specialist_name=next((source.specialist_name for source in sources if source.path == finding.source), ""),
+            occurred_at=finding.source_datetime,
+            scales=tuple(DischargeScaleRow(
+                row.role, row.name,
+                value=row.current.value if row.current else "",
+                source=row.current.source if row.current else None,
+                initial_value=row.initial.value if row.initial else "",
+                initial_source=row.initial.source if row.initial else None,
+                initial_at=row.initial.measured_at if row.initial else None,
+                current_at=row.current.measured_at if row.current else None,
+            ) for row in snapshot.scale_rows if row.role is finding.role),
         )
         for finding in snapshot.findings
-        if finding.role is not SpecialistRole.OTHER and finding.conclusion.strip()
     )
 
 
@@ -132,7 +143,9 @@ def _project_scale_rows(
     snapshot: Snapshot,
     *,
     final_mdrk_source: Path | None,
+    discharge_source: Path | None = None,
 ) -> tuple[tuple[DischargeScaleRow, ...], tuple[DischargeScaleRow, ...]]:
+    final_sources = {source for source in (final_mdrk_source, discharge_source) if source is not None}
     admission_rows = tuple(
         DischargeScaleRow(
             role=row.role,
@@ -143,10 +156,12 @@ def _project_scale_rows(
                 and not (
                     final_mdrk_source is not None
                     and row.current is None
-                    and row.initial.source == final_mdrk_source
+                    and row.initial.source in final_sources
                 )
                 else ""
             ),
+            source=row.initial.source if row.initial is not None else None,
+            current_at=row.initial.measured_at if row.initial is not None else None,
         )
         for row in snapshot.scale_rows
     )
@@ -156,35 +171,50 @@ def _project_scale_rows(
             name=row.name,
             value=(
                 row.current.value
-                if final_mdrk_source is not None
-                and row.current is not None
-                and row.current.source == final_mdrk_source
+                if row.current is not None
                 else (
                     row.initial.value
                     if final_mdrk_source is not None
                     and row.current is None
                     and row.initial is not None
-                    and row.initial.source == final_mdrk_source
+                    and row.initial.source in final_sources
                     else ""
                 )
             ),
+            source=(row.current.source if row.current is not None else row.initial.source if row.initial is not None else None),
+            current_at=(row.current.measured_at if row.current is not None else row.initial.measured_at if row.initial is not None else None),
         )
         for row in snapshot.scale_rows
     )
-    return admission_rows, discharge_rows
+    return (
+        tuple(replace(row, source=None) if not row.value.strip() else row for row in admission_rows),
+        tuple(replace(row, source=None) if not row.value.strip() else row for row in discharge_rows),
+    )
 
 
 def scan_discharge_summary(
     folder: Path,
     *,
     normalizer: DocumentNormalizer | None = None,
+    scan_session=None,
+    admission_datetime_override: datetime | None = None,
+    discharge_datetime_override: datetime | None = None,
 ) -> DischargeSummaryDraft:
     folder = folder.resolve()
-    source_scan = scan_source_documents(folder, normalizer=normalizer)
+    source_scan = scan_source_documents(folder, normalizer=normalizer, session=scan_session)
     selection = select_discharge_sources(source_scan)
     discharge = selection.discharge
     primary = selection.primary
     episode_key = selection.episode_key
+    if episode_key is not None:
+        episode_key = replace(
+            episode_key,
+            admission_at=admission_datetime_override or episode_key.admission_at,
+            discharge_at=discharge_datetime_override or episode_key.discharge_at,
+        )
+        if (episode_key.admission_at and episode_key.discharge_at
+                and episode_key.discharge_at < episode_key.admission_at):
+            raise ValueError("Дата выписки не может быть раньше поступления.")
     selected_record = selection.medical_record_number
     final_boundary = (
         datetime.combine(episode_key.discharge_at.date(), time.max)
@@ -234,6 +264,7 @@ def scan_discharge_summary(
                 else {}
             ),
             issues=issues,
+            discharge_source=discharge.path if discharge else None,
         )
     elif not any(
         issue.code == "final_mdrk_source_ambiguous" for issue in issues
@@ -272,11 +303,38 @@ def scan_discharge_summary(
 
     discharge_document = discharge.scanned.document if discharge else None
     primary_document = primary.scanned.document if primary else None
-    primary_sections = primary.sections if primary else {}
-    discharge_at = discharge.discharge_at if discharge else None
+    primary_sections = extract_discharge_clinical_sections(primary_document) if primary_document else {}
+    discharge_at = discharge_datetime_override or (discharge.discharge_at if discharge else None)
 
     header_text = extract_discharge_header(discharge_document) if discharge_document else ""
-    clinical_diagnosis = primary_sections.get("clinical_diagnosis", "")
+    if admission_datetime_override or discharge_datetime_override:
+        header_text = update_header_period(header_text, episode.admission_datetime, discharge_at)
+    from mdrk_builder.application.diagnosis import compose_diagnosis, diagnosis_choices
+    diagnosis_candidates = []
+    if primary:
+        diagnosis_candidates.append((primary.path, primary_sections.get("clinical_diagnosis", "")))
+    if discharge_document and not any(i.severity is ReviewSeverity.BLOCKING for i in selection.issues):
+        diagnosis_candidates.append((discharge.path, extract_discharge_clinical_sections(discharge_document).get("clinical_diagnosis", "")))
+    if not any(i.severity is ReviewSeverity.BLOCKING for i in selection.issues):
+        used_paths = {path for path, _ in diagnosis_candidates}
+        for item in episode_source_scan.documents:
+            if item.document.source_path in used_paths or item.classification.is_generated_output:
+                continue
+            if item.classification.role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}:
+                text = extract_discharge_clinical_sections(item.document).get('clinical_diagnosis', '')
+                if text:
+                    diagnosis_candidates.append((item.document.source_path, text))
+    clinical_diagnosis, diagnosis_sources, diagnosis_issues = compose_diagnosis(diagnosis_candidates)
+    issues.extend(diagnosis_issues)
+    choices = diagnosis_choices(diagnosis_candidates)
+    from mdrk_builder.application.icf_conflicts import icf_choices, icf_conflict_issues
+    choices.update(icf_choices(snapshot.icf_domains))
+    issues.extend(icf_conflict_issues(snapshot.icf_domains))
+    from mdrk_builder.application.conflicts import scale_conflicts
+    for rows in scale_conflicts(episode):
+        key = 'scale:' + rows[0].specialist.value + '|' + rows[0].measured_at.isoformat() + '|' + rows[0].name
+        choices[key] = [(r.value, r.source) for r in rows]
+        issues.append(ReviewIssue('scale_source_conflict', 'Разные значения одной оценки: '+rows[0].name, ReviewSeverity.WARNING, key, rows[0].source))
     if discharge is not None and not header_text:
         issues.append(
             ReviewIssue(
@@ -347,7 +405,10 @@ def scan_discharge_summary(
     radiation_exposure = extracted_radiation_exposure or "0 мЗв"
     signatures = extract_signature_block(discharge_document) if discharge_document else ""
 
-    field_sources: dict[str, Path] = {}
+    field_sources = {key: value for key, value in episode.field_sources.items()
+                     if key.startswith("identity.") or key == "admission_datetime"}
+    if discharge is not None and discharge_at is not None:
+        field_sources["discharge_datetime"] = discharge.path
     primary_values = {
         "clinical_diagnosis": clinical_diagnosis,
         "complaints": complaints,
@@ -364,7 +425,9 @@ def scan_discharge_summary(
     }
     for field_name, value in primary_values.items():
         _field_source(field_sources, field_name, value, primary)
+    final_values = extract_discharge_final_fields(discharge_document) if discharge_document else {}
     discharge_values = {
+        **final_values,
         "header_text": header_text,
         "laboratory_results": laboratory_results,
         "instrumental_results": instrumental_results,
@@ -381,8 +444,7 @@ def scan_discharge_summary(
     )
     potential_source = episode.field_sources.get("sections.rehabilitation_potential")
     if (
-        final_mdrk is not None
-        and snapshot.sections.rehabilitation_potential
+        snapshot.sections.rehabilitation_potential
         and potential_source is not None
     ):
         field_sources["rehabilitation_potential"] = potential_source
@@ -392,11 +454,21 @@ def scan_discharge_summary(
     if episode.procedures and episode.procedures[0].source is not None:
         field_sources["completed_program"] = episode.procedures[0].source
 
+    # Prefer the motor specialist's own measurements to physician copies.
+    motor_names = {canonical_scale_name(row.name) for row in snapshot.scale_rows
+                   if row.role is SpecialistRole.PHYSICAL_THERAPIST}
+    snapshot = replace(snapshot, scale_rows=tuple(
+        row for row in snapshot.scale_rows
+        if row.role not in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}
+        or canonical_scale_name(row.name) not in motor_names
+    ))
+
     admission_scale_rows, discharge_scale_rows = _project_scale_rows(
         snapshot,
         final_mdrk_source=(
             final_mdrk.document.source_path if final_mdrk is not None else None
         ),
+        discharge_source=discharge.path if discharge else None,
     )
     if final_mdrk is not None:
         final_path = final_mdrk.document.source_path
@@ -406,8 +478,24 @@ def scan_discharge_summary(
             for domain in snapshot.icf_domains
         ):
             field_sources["rehabilitation_diagnosis"] = final_path
-        if any(row.value.strip() for row in discharge_scale_rows):
-            field_sources["discharge_scales"] = final_path
+    scale_sources = {row.source for row in discharge_scale_rows if row.value.strip()}
+    if len(scale_sources) == 1 and None not in scale_sources:
+        field_sources["discharge_scales"] = next(iter(scale_sources))
+    field_sources.update(diagnosis_sources)
+    from mdrk_builder.application.procedures import select_procedures
+    completed_procedures = select_procedures(episode.procedures, episode.admission_datetime, discharge_at)
+    from mdrk_builder.application.discharge_current_fields import select_current_fields, CURRENT_FIELDS
+    current_values, current_sources, current_choices, current_issues = select_current_fields(
+        episode_source_scan.documents, episode.admission_datetime, discharge_at,
+        discharge.path if discharge else None)
+    for key in CURRENT_FIELDS:
+        if key in current_values:
+            primary_values[key] = current_values[key]
+    final_values.update({key: value for key, value in current_values.items() if key not in CURRENT_FIELDS})
+    field_sources.update(current_sources)
+    choices.update(current_choices)
+    issues.extend(current_issues)
+
     generated_output_paths = {
         scanned.document.source_path.resolve()
         for scanned in source_scan.documents
@@ -416,9 +504,13 @@ def scan_discharge_summary(
 
     return DischargeSummaryDraft(
         folder=folder,
+        conflict_choices=choices,
         identity=_copy_identity(episode.identity),
         admission_datetime=episode.admission_datetime,
         discharge_datetime=discharge_at,
+        projection_period=(episode.admission_datetime, discharge_at),
+        manual_fields=({"discharge_datetime", "header_text"} if discharge_datetime_override else set())
+            | ({"admission_datetime", "header_text"} if admission_datetime_override else set()),
         source_paths=tuple(
             path.resolve()
             for path in source_scan.source_files
@@ -429,15 +521,10 @@ def scan_discharge_summary(
         final_mdrk_source=(
             final_mdrk.document.source_path if final_mdrk is not None else None
         ),
-        team_findings=_project_team_findings(snapshot),
-        icf_domains=(
-            tuple(replace(domain) for domain in snapshot.icf_domains)
-            if final_mdrk is not None
-            else ()
-        ),
-        completed_procedures=tuple(
-            replace(procedure) for procedure in episode.procedures
-        ),
+        team_findings=_project_team_findings(snapshot, episode.sources),
+        initial_assessment_datetime=(extract_clinical_datetime(primary_document) if primary_document else None),
+        icf_domains=tuple(replace(domain) for domain in snapshot.icf_domains),
+        completed_procedures=tuple(completed_procedures),
         admission_scale_rows=admission_scale_rows,
         discharge_scale_rows=discharge_scale_rows,
         header_text=header_text,
@@ -452,25 +539,23 @@ def scan_discharge_summary(
         laboratory_results=laboratory_results,
         instrumental_results=instrumental_results,
         other_consultations=other_consultations,
-        medications="",
+        medications=final_values.get("medications") or "",
         movement_regimen=primary_values["movement_regimen"],
         diet=primary_values["diet"],
-        transfusions="",
-        operations=OPERATIONS_TEMPLATE,
-        additional_information=ADDITIONAL_INFORMATION_TEMPLATE,
-        discharge_condition=DISCHARGE_CONDITION_TEMPLATE,
-        discharge_neurological_status="",
+        transfusions=final_values.get("transfusions") or "",
+        operations=final_values.get("operations", ""),
+        additional_information=final_values.get("additional_information", ""),
+        discharge_condition=final_values.get("discharge_condition", ""),
+        discharge_neurological_status=final_values.get("discharge_neurological_status") or "",
         risks=primary_values["risks"],
         limitations=primary_values["limitations"],
         rehabilitation_potential=(
-            snapshot.sections.rehabilitation_potential
-            if final_mdrk is not None
-            else ""
+            current_values.get("rehabilitation_potential", snapshot.sections.rehabilitation_potential if potential_source is not None or final_mdrk is not None else "")
         ),
         goal_result=episode.sections.goal if final_mdrk is not None else "",
-        work_capacity=WORK_CAPACITY_TEMPLATE,
+        work_capacity=final_values.get("work_capacity", ""),
         radiation_exposure=radiation_exposure,
-        recommendations=RECOMMENDATIONS_TEMPLATE,
+        recommendations=final_values.get("recommendations", ""),
         signatures=signatures,
         field_sources=dict(field_sources),
         issues=[replace(issue) for issue in issues],

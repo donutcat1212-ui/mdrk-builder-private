@@ -139,12 +139,12 @@ jobs:
           Compress-Archive -Path "$packageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
           "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
 
-      - name: Publish temporary GitHub release
+      - name: Prepare draft GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = "${{ steps.package.outputs.version }}"
-          $notes = "Внутренний Windows x64 ZIP. Локальная работа без сетевой передачи данных. Перед использованием прочитайте инструкцию внутри архива и проверьте созданные DOCX."
-          gh release create "${{ github.ref_name }}" "${{ steps.release_bundle.outputs.zip_path }}" --verify-tag --title "MDRK Builder $version Internal" --notes $notes
+          $notes = "Внутренний Windows x64 ZIP. Локальная работа без сетевой передачи данных. Проверены сборка и запуск EXE в Windows CI. Преобразование DOC/RTF через настольный Microsoft Word на целевом компьютере ещё требует приёмки. Перед использованием прочитайте инструкцию внутри архива и проверьте созданные DOCX."
+          gh release create "${{ github.ref_name }}" "${{ steps.release_bundle.outputs.zip_path }}" --verify-tag --draft --prerelease --title "MDRK Builder $version Internal" --notes $notes

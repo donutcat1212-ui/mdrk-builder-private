@@ -509,8 +509,11 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     procedures = _find_table(initial, "Реабилитационные процедуры")
     _assert_compact_header_cell(procedures.rows[0].cells[2])
     assert procedures.rows[1].cells[0].text == "ST-150 Тренировка ходьбы"
-    assert procedures.rows[1].cells[2].text == "5"
-    assert procedures.rows[2].cells[2].text == "6"
+    assert procedures.rows[1].cells[2].text == ""
+    assert procedures.rows[2].cells[2].text == ""
+    completed = _find_table(final, "Реабилитационные процедуры")
+    assert completed.rows[1].cells[2].text == "5"
+    assert completed.rows[2].cells[2].text == "6"
     signatures = _find_table(initial, "Специалист МДРК")
     final_signatures = _find_table(final, "Специалист МДРК")
     expected_roles = [

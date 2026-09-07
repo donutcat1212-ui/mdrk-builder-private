@@ -129,6 +129,7 @@ def apply_final_mdrk_document(
     *,
     discharge_scale_values: dict[str, str],
     issues: list[ReviewIssue],
+    discharge_source: Path | None = None,
 ) -> None:
     document = scanned.document
     measured_at = extract_mdrk_document_datetime(document) or episode.final_meeting_at
@@ -137,6 +138,7 @@ def apply_final_mdrk_document(
         discharge_scale_values,
         source=document.source_path,
         issues=issues,
+        discharge_source=discharge_source,
     )
     previous_scales: dict[
         tuple[str, str],
@@ -172,38 +174,7 @@ def apply_final_mdrk_document(
         )
         for measurement in measurements
     }
-    final_starts: dict[tuple[str, str], datetime] = {}
-    for measurement in measurements:
-        key = (
-            _role_group(measurement.specialist),
-            canonical_scale_key(measurement.name),
-        )
-        point = measurement.measured_at or measured_at
-        if point is not None and (key not in final_starts or point < final_starts[key]):
-            final_starts[key] = point
-
-    def precedes_final(
-        finding: SpecialistFinding,
-        measurement: ScaleMeasurement,
-    ) -> bool:
-        key = (
-            _role_group(measurement.specialist),
-            canonical_scale_key(measurement.name),
-        )
-        point = measurement.measured_at or finding.source_datetime
-        return (
-            key not in authoritative_keys
-            or key not in final_starts
-            or point is None
-            or point < final_starts[key]
-        )
-
-    for finding in episode.findings:
-        finding.scales = [
-            measurement
-            for measurement in finding.scales
-            if precedes_final(finding, measurement)
-        ]
+    # A committee summary adds dated facts; it cannot erase original history.
     by_role: dict[SpecialistRole, list[ScaleMeasurement]] = defaultdict(list)
     for measurement in measurements:
         by_role[measurement.specialist].append(measurement)
@@ -233,7 +204,7 @@ def apply_final_mdrk_document(
                 "final_mdrk_scale_rows_missing",
                 (
                     "В итоговом МДРК-2 отсутствуют отдельные шкалы или раздел "
-                    f"шкал; их значения при выписке оставлены пустыми.{detail}"
+                    f"шкал; сохранены данные профильных источников.{detail}"
                 ),
                 ReviewSeverity.WARNING,
                 "discharge_scales",
@@ -244,43 +215,52 @@ def apply_final_mdrk_document(
     observations = extract_icf_observations(document)
     final_domains = [
         IcfDomain(
+            source=document.source_path,
             code=observation.code,
             description=observation.description,
             specialist=observation.specialist or SpecialistRole.OTHER,
-            initial=observation.ratings[0] if observation.ratings else None,
-            final=(
-                observation.ratings[-1]
-                if len(observation.ratings) >= 2
+            initial=observation.initial,
+            final=observation.repeat,
+            note=observation.note,
+            initial_source=(
+                document.source_path
+                if observation.initial is not None or observation.code.casefold().startswith("pf")
                 else None
             ),
-            note=observation.note,
-            initial_source=document.source_path,
             final_source=(
-                document.source_path if len(observation.ratings) >= 2 else None
+                document.source_path if observation.repeat is not None else None
             ),
-            initial_measured_at=episode.initial_meeting_at,
-            final_measured_at=measured_at,
+            initial_measured_at=(episode.initial_meeting_at if observation.initial is not None else None),
+            final_measured_at=(measured_at if observation.repeat is not None else None),
         )
         for observation in observations
     ]
-    final_icf_keys = {_icf_key(domain.code, domain.description) for domain in final_domains}
+    final_icf_keys = {_icf_key(domain) for domain in final_domains}
     missing_icf_domains = [
         domain
         for domain in episode.icf_domains
-        if _icf_key(domain.code, domain.description) not in final_icf_keys
+        if _icf_key(domain) not in final_icf_keys
     ]
+    from mdrk_builder.application.icf_conflicts import merge_icf_summary
+    existing_by_key = {_icf_key(domain): domain for domain in episode.icf_domains}
     episode.icf_domains = [
-        *final_domains,
-        *(
-            replace(
-                domain,
-                final=None,
-                final_source=None,
-                final_measured_at=None,
+        merge_icf_summary(existing_by_key[_icf_key(domain)], domain)
+        if _icf_key(domain) in existing_by_key else domain
+        for domain in final_domains
+    ] + [replace(domain) for domain in missing_icf_domains]
+    for domain in final_domains:
+        if not domain.code.casefold().startswith("pf") and (
+            domain.initial is None or domain.final is None
+        ):
+            issues.append(
+                ReviewIssue(
+                    "icf_incomplete_pair",
+                    f"В итоговом МДРК-2 у домена {domain.code} отсутствует исходная или повторная оценка.",
+                    ReviewSeverity.WARNING,
+                    f"icf.{domain.code}",
+                    document.source_path,
+                )
             )
-            for domain in missing_icf_domains
-        ),
-    ]
     if missing_icf_domains or not observations:
         codes = sorted(
             {domain.code for domain in missing_icf_domains},
@@ -292,7 +272,7 @@ def apply_final_mdrk_document(
                 "final_mdrk_icf_rows_missing",
                 (
                     "В итоговом МДРК-2 отсутствуют отдельные домены или профиль "
-                    f"МКФ; их итоговые оценки оставлены пустыми.{detail}"
+                    f"МКФ; сохранены данные профильных источников.{detail}"
                 ),
                 ReviewSeverity.WARNING,
                 "rehabilitation_diagnosis",
@@ -303,6 +283,12 @@ def apply_final_mdrk_document(
     final_sections = extract_clinical_sections(document)
     for field_name in ("rehabilitation_potential", "goal"):
         value = final_sections[field_name]
+        if not value:
+            continue
+        previous_source = episode.field_sources.get(f"sections.{field_name}")
+        previous_at = next((item.clinical_datetime for item in episode.sources if item.path == previous_source), None)
+        if previous_at is not None and measured_at is not None and previous_at > measured_at:
+            continue
         setattr(episode.sections, field_name, value)
         source_key = f"sections.{field_name}"
         if value:
@@ -333,6 +319,7 @@ def validate_final_scale_measurements(
     *,
     source: Path,
     issues: list[ReviewIssue],
+    discharge_source: Path | None = None,
 ) -> list[ScaleMeasurement]:
     corroborating: dict[str, dict[str, str]] = defaultdict(dict)
     for name, value in discharge_values.items():
@@ -361,7 +348,7 @@ def validate_final_scale_measurements(
             and bounds[0] <= replacement_numeric <= bounds[1]
         )
         if replacement_valid:
-            result.append(replace(measurement, value=replacement))
+            result.append(replace(measurement, value=replacement, source=discharge_source))
             message = (
                 f"В МДРК-2 значение «{measurement.name}» ({measurement.value}) вне "
                 f"диапазона {bounds[0]}–{bounds[1]}; использовано подтверждающее "
@@ -398,13 +385,14 @@ def _role_group(role: SpecialistRole) -> str:
     return role.value
 
 
-def _icf_key(code: str, description: str) -> tuple[str, str]:
+def _icf_key(domain: IcfDomain) -> tuple[str, str, SpecialistRole | None]:
     return (
-        code.casefold().replace(" ", ""),
+        domain.code.casefold().replace(" ", ""),
         " ".join(
             "".join(
                 character if character.isalnum() else " "
-                for character in description.casefold().replace("ё", "е")
+                for character in domain.description.casefold().replace("ё", "е")
             ).split()
         ),
+        None if domain.code.casefold().startswith("pf") else domain.specialist,
     )

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from tkinter import ttk
 
 from mdrk_builder.domain import ReviewIssue, ReviewSeverity
+from mdrk_builder.ui.source_access import open_source_path
 
 
 def confirm_generation_with_issues(
@@ -128,7 +129,13 @@ class _GenerationReviewDialog(tk.Toplevel):
         for index, issue in enumerate(issues, start=1):
             source = f"\n   Источник: {issue.source}" if issue.source else ""
             field = f"\n   Поле: {issue.field}" if issue.field else ""
-            text.insert("end", f"{index}. {issue.message}{field}{source}\n\n")
+            text.insert("end", f"{index}. {issue.message}{field}")
+            if issue.source is not None:
+                tag = f"source:{index}"
+                text.insert("end", source, tag)
+                text.tag_configure(tag, foreground="#1f63c5", underline=True)
+                text.tag_bind(tag, "<Button-1>", lambda _event, path=issue.source: open_source_path(path))
+            text.insert("end", "\n\n")
         text.configure(state="disabled")
         text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")

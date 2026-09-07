@@ -453,7 +453,7 @@ class _DocumentRenderer:
         self._add_blank_paragraph()
         self._add_original_plan_heading("Реабилитационные мероприятия:")
         self._add_blank_paragraph(keep_with_next=True)
-        render_completed_program(self.document, self.episode.procedures)
+        render_completed_program(self.document, self.snapshot.procedures)
         self._add_signature_table_separator()
         self._render_signature_table()
 

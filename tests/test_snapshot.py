@@ -148,7 +148,7 @@ def test_final_scale_row_does_not_copy_only_baseline_into_current() -> None:
     assert rows[0].current is None
 
 
-def test_final_scale_new_after_mdrk1_uses_first_and_last_course_points() -> None:
+def test_final_scale_new_after_mdrk1_has_no_admission_baseline() -> None:
     episode = Episode(folder=Path("/episode"))
     episode.initial_meeting_at = datetime(2026, 6, 6, 8)
     episode.final_meeting_at = datetime(2026, 6, 20, 11)
@@ -183,7 +183,7 @@ def test_final_scale_new_after_mdrk1_uses_first_and_last_course_points() -> None
     assert build_snapshot(episode, MdrkKind.INITIAL).scale_rows == ()
     rows = build_snapshot(episode, MdrkKind.FINAL).scale_rows
     assert len(rows) == 1
-    assert rows[0].initial is first
+    assert rows[0].initial is None
     assert rows[0].current is last
 
 

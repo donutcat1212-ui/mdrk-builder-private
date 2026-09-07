@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from mdrk_builder.application.final_mdrk import (
     apply_final_mdrk_document,
     select_final_mdrk_document,
@@ -12,6 +14,7 @@ from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.application.source_scan import ScannedDocument, SourceScanResult
 from mdrk_builder.domain import (
     Episode,
+    DischargeSummaryDraft,
     IcfDomain,
     IcfQualifier,
     MdrkKind,
@@ -30,6 +33,54 @@ from mdrk_builder.infrastructure.ooxml_reader import (
 
 
 EPISODE_ROOT = Path("/episode")
+
+
+@pytest.mark.parametrize("initial,repeat", [("", "1"), ("2", ""), ("", ""), ("0", "0")])
+def test_final_icf_preserves_empty_rating_positions(initial: str, repeat: str) -> None:
+    scanned = _mdrk_document(
+        "partial-profile.docx",
+        "12. Выполненная программа медицинской реабилитации",
+        tables=(ParsedTable((
+            _row({0: "МКФ", 13: "Ответственный специалист МДРК"}, 15),
+            _row({0: "d450", 1: "Ходьба", 11: initial, 12: repeat, 13: "ФТ"}, 15),
+        )),),
+    )
+    episode = Episode(EPISODE_ROOT)
+    issues = []
+    apply_final_mdrk_document(episode, scanned, discharge_scale_values={}, issues=issues)
+
+    assert len(episode.icf_domains) == 1
+    domain = episode.icf_domains[0]
+    assert (domain.initial.display() if domain.initial is not None else "") == initial
+    assert (domain.final.display() if domain.final is not None else "") == repeat
+    assert domain.initial_source == (scanned.document.source_path if initial else None)
+    assert domain.final_source == (scanned.document.source_path if repeat else None)
+    assert any(issue.code == "icf_incomplete_pair" for issue in issues) == (not initial or not repeat)
+
+
+def test_final_icf_retains_missing_domain_owned_by_another_specialist() -> None:
+    scanned = _mdrk_document(
+        "physical-therapy-profile.docx",
+        "12. Выполненная программа медицинской реабилитации",
+        tables=(ParsedTable((
+            _row({0: "МКФ", 13: "Ответственный специалист МДРК"}, 15),
+            _row({0: "d450", 1: "Ходьба", 11: "2", 12: "1", 13: "ФТ"}, 15),
+        )),),
+    )
+    episode = Episode(EPISODE_ROOT)
+    episode.icf_domains = [IcfDomain(
+        "d450", "Ходьба", SpecialistRole.OCCUPATIONAL_THERAPIST,
+        initial=IcfQualifier(3), final=IcfQualifier(2),
+    )]
+    issues = []
+    apply_final_mdrk_document(episode, scanned, discharge_scale_values={}, issues=issues)
+
+    by_owner = {domain.specialist: domain for domain in episode.icf_domains}
+    assert len(by_owner) == 2
+    assert by_owner[SpecialistRole.OCCUPATIONAL_THERAPIST].initial == IcfQualifier(3)
+    assert by_owner[SpecialistRole.OCCUPATIONAL_THERAPIST].final == IcfQualifier(2)
+    assert by_owner[SpecialistRole.PHYSICAL_THERAPIST].final == IcfQualifier(1)
+    assert any(issue.code == "final_mdrk_icf_rows_missing" for issue in issues)
 
 
 def _mdrk_document(
@@ -305,8 +356,41 @@ def test_invalid_rivermead_value_uses_corroborated_discharge_value() -> None:
     )
 
     assert result[0].value == "9"
+    assert result[0].source is None
     assert [issue.code for issue in issues] == ["scale_value_out_of_range"]
     assert "использовано подтверждающее значение" in issues[0].message
+
+
+def test_corrected_scale_uses_discharge_provenance_through_projection() -> None:
+    discharge_source = EPISODE_ROOT / "discharge.docx"
+    scanned = _mdrk_document(
+        "incorrect-final-scale.docx",
+        "12. Выполненная программа медицинской реабилитации\nРезультат осмотра врача ФРМ",
+        tables=(ParsedTable((
+            _row({0: "Дата и время расчета шкалы", 1: "Шкала/опросник", 2: "Результат расчета"}, 3),
+            _row({0: "17.08.2026 10:00", 1: "Индекс мобильности Ривермид", 2: "79"}, 3),
+        )),),
+    )
+    episode = Episode(EPISODE_ROOT)
+    episode.final_meeting_at = datetime(2026, 8, 17, 10)
+    issues = []
+    apply_final_mdrk_document(
+        episode, scanned,
+        discharge_scale_values={"Индекс мобильности Ривермид": "9"},
+        discharge_source=discharge_source,
+        issues=issues,
+    )
+    admission, discharge = _project_scale_rows(
+        build_snapshot(episode, MdrkKind.FINAL),
+        final_mdrk_source=scanned.document.source_path,
+        discharge_source=discharge_source,
+    )
+    assert admission[0].value == "" and admission[0].source is None
+    assert discharge[0].value == "9" and discharge[0].source == discharge_source
+    issue = next(issue for issue in issues if issue.code == "scale_value_out_of_range")
+    assert issue.source == scanned.document.source_path
+    draft = DischargeSummaryDraft(EPISODE_ROOT, discharge_scale_rows=discharge)
+    assert discharge_source.resolve() in draft.immutable_sources()
 
 
 def test_rankin_alias_out_of_range_is_reported() -> None:
@@ -516,14 +600,14 @@ def test_final_mdrk_is_only_source_of_discharge_icf_and_scales() -> None:
     assert admission["Индекс мобильности Ривермид"] == "4"
     assert discharge["Индекс мобильности Ривермид"] == "9"
     assert admission["Модифицированная шкала Рэнкина"] == "3"
-    assert discharge["Модифицированная шкала Рэнкина"] == ""
+    assert discharge["Модифицированная шкала Рэнкина"] == "2"
 
     by_code = {domain.code: domain for domain in snapshot.icf_domains}
     assert by_code["d450"].final == IcfQualifier(1)
     assert by_code["d450"].final_source == final_source.document.source_path
     assert by_code["d640"].initial == IcfQualifier(3)
-    assert by_code["d640"].final is None
-    assert by_code["d640"].final_source is None
+    assert by_code["d640"].final == IcfQualifier(1)
+    assert by_code["d640"].final_source == follow_up_source
     assert {issue.code for issue in issues} >= {
         "final_mdrk_scale_rows_missing",
         "final_mdrk_icf_rows_missing",

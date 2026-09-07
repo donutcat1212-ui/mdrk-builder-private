@@ -399,3 +399,24 @@ def test_complete_reverse_dates_need_no_review_issue() -> None:
     assert not incomplete_reverse_date_issues(
         [ReverseSheetRow("КОНСУЛЬТАЦИЯ_ТЕСТ", date(2026, 8, 5), datetime(2026, 8, 5, 9))],
     )
+
+
+def test_reverse_excludes_conflicting_patient_and_tracks_appointment_source(tmp_path):
+    primary = tmp_path / 'невролог.docx'
+    _write_docx(primary, 'Первичный осмотр невролога 10.08.2026 10:00',
+                'ФИО пациента: АЛЬФА БЕТА ГАММА', 'Номер ИБ: СКП5906/26',
+                'Дата поступления: 10.08.2026 09:00')
+    own = tmp_path / 'логопед.docx'
+    _write_docx(own, 'Первичный осмотр логопеда 11.08.2026 10:00',
+                'ФИО пациента: АЛЬФА БЕТА ГАММА', 'Номер ИБ: СКП5906/26')
+    foreign = tmp_path / 'чужой логопед.docx'
+    _write_docx(foreign, 'Первичный осмотр логопеда 12.08.2026 10:00',
+                'ФИО пациента: ДЕЛЬТА ЭПСИЛОН ДЗЕТА', 'Номер ИБ: СКП9999/26')
+    draft = scan_reverse_sheet(tmp_path)
+    assert draft.rows and all(row.source != foreign for row in draft.rows)
+    row = next(row for row in draft.rows if row.source == own)
+    assert row.field_sources['appointment_date'] == primary
+    assert row.field_sources['performed_at'] == own
+    assert any(issue.code == 'reverse_source_episode_conflict' and issue.source == foreign for issue in draft.issues)
+    with pytest.raises(ValueError, match='immutable'):
+        write_reverse_sheet_docx(draft, primary)

@@ -450,15 +450,17 @@ SECTION_STOP = re.compile(
     r"^(?:\d+(?:\.\d+)?[.)]?\s*)?(?:клинический диагноз|реабилитационный диагноз|сведения о реабилитации|"
     r"анамнез заболевания|анамнез жизни|результаты диагностических|лабораторные исследования|"
     r"инструментальные исследования|результаты осмотров|реабилитационный потенциал|факторы,? ограничивающие|"
-    r"дата\s+(?:и\s+время\s+)?выписки|"
+    r"дата\s+(?:и\s+время\s+)?(?:выписки|осмотра)|"
+    r"заключительный клинический диагноз|пациентом представлены|физикальное обследование|"
+    r"неврологический статус|локальный статус|шкалы при поступлении|лечащий врач|"
     r"факторы риска|диагноз клинический|цель на этап|цель,? поставленная на этап|"
     r"задачи медицинской|реабилитационн\w* задачи? на этап|"
     r"задача на этап|короткосрочн\w* задача|индивидуальный план|двигательный режим|диета|"
     r"медикаментозная (?:терапия|лечение)|немедикаментозн\w* (?:лечение|терапия)|"
     r"реабилитационные мероприятия|реабилитационный диагноз|функциональный диагноз|динамика|"
-    r"логопедический статус|нейропсихологический статус|обоснование диагноза|"
+    r"логопедический статус|нейропсихологический статус|обоснование\b|"
     r"выполненные медицинские вмешательства|план обследования|план лечения|назначения|"
-    r"трансфузии|оперативные вмешательства|медицинские вмешательства|[AАBВ]\d{2}(?:\.\d+){2,5}|"
+    r"состояние при выписке|рекомендации|трудоспособность|трансфузии|оперативные вмешательства|медицинские вмешательства|[AАBВ]\d{2}(?:\.\d+){2,5}|"
     r"физикальное исследование|эпидемиологический анамнез|фамилия, имя, отчество)",
     re.IGNORECASE,
 )
@@ -762,7 +764,7 @@ def extract_conclusion(
         if value := _extract_logopedist_conclusion(lines):
             return value
     for index, line in enumerate(lines):
-        match = re.match(r"^заключение(?:[^:\n]{0,180})?\s*:\s*", line, re.IGNORECASE)
+        match = re.match(r"^заключение(?:(?:[^:\n]{0,180})?\s*:\s*|\s*$)", line, re.IGNORECASE)
         if not match:
             continue
         if "предшествующ" in line[: match.end()].casefold():
@@ -840,6 +842,19 @@ class IcfObservation:
     ratings: tuple[IcfQualifier, ...]
     note: str = ""
     specialist: SpecialistRole | None = None
+    rating_pair: tuple[IcfQualifier | None, IcfQualifier | None] | None = None
+
+    @property
+    def initial(self) -> IcfQualifier | None:
+        if self.rating_pair is not None:
+            return self.rating_pair[0]
+        return self.ratings[0] if self.ratings else None
+
+    @property
+    def repeat(self) -> IcfQualifier | None:
+        if self.rating_pair is not None:
+            return self.rating_pair[1]
+        return self.ratings[-1] if len(self.ratings) >= 2 else None
 
     @property
     def current(self) -> IcfQualifier | None:
@@ -865,7 +880,7 @@ def _specialist_from_text(value: str) -> SpecialistRole | None:
         return SpecialistRole.LOGOPEDIST
     if "эрго" in low:
         return SpecialistRole.OCCUPATIONAL_THERAPIST
-    if re.fullmatch(r"ф\s*\.?\s*т\s*\.?", low) or any(
+    if re.search(r"\bлфк\b", low) or re.fullmatch(r"ф\s*\.?\s*т\s*\.?", low) or any(
         token in low for token in ("физической реабилитац", "физический терапевт", "кинезио")
     ):
         return SpecialistRole.PHYSICAL_THERAPIST
@@ -881,6 +896,10 @@ def _specialist_from_text(value: str) -> SpecialistRole | None:
 def extract_icf_observations(document: ParsedDocument) -> list[IcfObservation]:
     observations: list[IcfObservation] = []
     for table in document.tables:
+        initial_col = next((cell.col for row in table.rows for cell in row.cells
+                            if re.fullmatch(r"исходн\w*|первичн\w*|итог[.\s]*балл\w*", clean_text(cell.text), re.I)), 11)
+        final_col = next((cell.col for row in table.rows for cell in row.cells
+                          if re.fullmatch(r"повт(?:орн\w*)?(?:[.\s]*балл\w*)?|итогов\w*", clean_text(cell.text), re.I)), 12)
         candidate_rows: list[tuple[ParsedRow, int]] = []
         for row in table.rows:
             for cell in row.cells:
@@ -910,8 +929,13 @@ def extract_icf_observations(document: ParsedDocument) -> list[IcfObservation]:
                     qualifier_candidates.append((col, qualifier))
             qualifier_candidates.sort(key=lambda item: item[0])
             is_personal_factor = code.casefold().startswith("pf")
-            if not qualifier_candidates and not is_personal_factor:
+            if not qualifier_candidates and not is_personal_factor and not description:
                 continue
+            rating_pair = (
+                (_exact_qualifier(values.get(initial_col, "")), _exact_qualifier(values.get(final_col, "")))
+                if row.logical_cols >= 14
+                else None
+            )
             specialist = None
             for col in sorted(values, reverse=True):
                 if col > code_col and (candidate := _specialist_from_text(values[col])) is not None:
@@ -936,6 +960,7 @@ def extract_icf_observations(document: ParsedDocument) -> list[IcfObservation]:
                     tuple(item[1] for item in qualifier_candidates),
                     note,
                     specialist,
+                    rating_pair,
                 )
             )
     return observations
@@ -1157,7 +1182,9 @@ def _procedure_specialist(name: str) -> str:
         return SpecialistRole.LOGOPEDIST.display_name
     if "нейропсих" in low or "психическ" in low:
         return SpecialistRole.NEUROPSYCHOLOGIST.display_name
-    if any(token in low for token in ("лечебной физкультур", "трениров", "механотерап", "стабил", "thera")):
+    if re.search(r"\bлфк\b", low) or any(
+        token in low for token in ("лечебной физкультур", "трениров", "механотерап", "стабил", "thera")
+    ):
         return SpecialistRole.PHYSICAL_THERAPIST.display_name
     if "эрго" in low or "кист" in low:
         return SpecialistRole.OCCUPATIONAL_THERAPIST.display_name
@@ -1184,12 +1211,20 @@ def _resolve_procedure_header_dates(
     headers: list[str],
     reference_date: date | None,
 ) -> dict[int, date]:
-    if reference_date is None:
-        return {}
     result: dict[int, date] = {}
     previous: date | None = None
     for column, raw in enumerate(headers):
         value = clean_text(raw)
+        full_match = re.fullmatch(r"([0-3]?\d)[./]([01]?\d)[./](\d{4})", value)
+        if full_match is not None:
+            try:
+                previous = date(int(full_match[3]), int(full_match[2]), int(full_match[1]))
+            except ValueError:
+                continue
+            result[column] = previous
+            continue
+        if reference_date is None:
+            continue
         day_match = re.fullmatch(r"([0-3]?\d)", value)
         short_match = re.fullmatch(r"([0-3]?\d)[./]([01]?\d)", value)
         if day_match is None and short_match is None:
@@ -1264,18 +1299,38 @@ def _infer_procedure_frequency(
     if expected and expected.issubset(dates):
         return "ежедневно"
 
-    gaps = [(right - left).days for left, right in zip(dates, dates[1:])]
-    if gaps and all(gap == 2 for gap in gaps):
-        return "через день"
-
-    weekly_counts: dict[tuple[int, int], int] = {}
-    for value in dates:
-        year, week, _ = value.isocalendar()
-        weekly_counts[(year, week)] = weekly_counts.get((year, week), 0) + 1
-    counts = list(weekly_counts.values())
-    if len(counts) >= 2 and len(set(counts)) == 1 and counts[0] in {1, 2, 3}:
-        count = counts[0]
-        return f"{count} {'раз' if count == 1 else 'раза'} в неделю"
+    # Require repeated observations, not equal totals in calendar weeks.
+    # Boundaries are the first/last execution: partial edge weeks are allowed.
+    if len(dates) < 3:
+        return "периодически"
+    offsets = {(value - dates[0]).days for value in dates}
+    span = max(offsets)
+    for period in sorted(offsets - {0}):
+        residues = {offset % period for offset in offsets}
+        occurrences = [sum(offset % period == residue for offset in offsets)
+                       for residue in residues]
+        # A lone interval needs three executions. Weekly schedules allow
+        # partial edge weeks once two weekdays repeat. Other inferred cycles
+        # require every slot to repeat, avoiding overfitting a long period.
+        if len(residues) == 1:
+            supported = occurrences[0] >= 3
+        elif period == 7:
+            supported = sum(count >= 2 for count in occurrences) >= 2
+        else:
+            supported = all(count >= 2 for count in occurrences)
+        if not supported:
+            continue
+        expected_offsets = {offset for offset in range(span + 1)
+                            if offset % period in residues}
+        if offsets != expected_offsets:
+            continue
+        count = len(residues)
+        times = "раза" if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14} else "раз"
+        if period == 7:
+            return f"{count} {times} в неделю"
+        days = ("день" if period % 10 == 1 and period % 100 != 11 else
+                "дня" if period % 10 in {2, 3, 4} and period % 100 not in {12, 13, 14} else "дней")
+        return f"{count} {times} в {period} {days}"
     return "периодически"
 
 
@@ -1295,7 +1350,7 @@ def extract_procedures(
         raw_date_columns = {
             index
             for index, value in enumerate(headers)
-            if re.fullmatch(r"[0-3]?\d(?:[./][01]?\d)?", clean_text(value))
+            if re.fullmatch(r"[0-3]?\d(?:[./][01]?\d(?:[./]\d{4})?)?", clean_text(value))
         }
         for row in table.rows[1:]:
             values = row.as_list()
@@ -1320,8 +1375,21 @@ def extract_procedures(
                 if match:
                     duration = int(match.group(1))
                     break
+            planned_count = None
+            planned_frequency = ""
+            for index, header in enumerate(headers):
+                if index >= len(values):
+                    continue
+                label = clean_text(header).casefold()
+                value = clean_text(values[index])
+                if re.search(r"(?:план|назначено|количество назначенных)", label) and re.fullmatch(r"\d+", value):
+                    planned_count = int(value)
+                if "кратност" in label or "частота" in label:
+                    planned_frequency = value
             procedures.append(
                 Procedure(
+                    planned_count=planned_count,
+                    planned_frequency=planned_frequency,
                     name=name or raw_name,
                     specialist=_procedure_specialist(raw_name),
                     actual_count=plus_count,

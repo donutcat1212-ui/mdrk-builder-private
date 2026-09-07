@@ -25,6 +25,8 @@ class BackgroundJobRunner:
         self._thread_factory = thread_factory
         self._deliveries: queue.Queue[Callable[[], None]] = queue.Queue()
         self._busy = False
+        self._progress_queue = queue.Queue()
+        self.on_progress = lambda text: None
 
     @property
     def busy(self) -> bool:
@@ -56,7 +58,15 @@ class BackgroundJobRunner:
         self._thread_factory(target=worker, name=thread_name, daemon=False).start()
         self._root.after(self._poll_interval_ms, self._poll)
 
+    def report_progress(self, text):
+        self._progress_queue.put(text)
+
     def _poll(self) -> None:
+        latest = None
+        while not self._progress_queue.empty():
+            latest = self._progress_queue.get_nowait()
+        if latest is not None:
+            self.on_progress(latest)
         try:
             deliver = self._deliveries.get_nowait()
         except queue.Empty:

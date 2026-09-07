@@ -234,6 +234,10 @@ def _merge_dates(
         value for value, _ in admission_pairs
     )
     episode.admission_datetime = admission_datetime_override or admission
+    for value, record in admission_pairs:
+        if value is not None and value == episode.admission_datetime:
+            episode.field_sources["admission_datetime"] = record.document.source_path
+            break
     admission_dates = {value.date() for value in admission_values}
     if len(admission_dates) > 1:
         selected_date = (
@@ -316,18 +320,21 @@ def _merge_dates(
         episode.final_meeting_at = max(scheduled_final_candidates)
     elif latest_source:
         episode.final_meeting_at = latest_source
-    if episode.admission_datetime and episode.final_meeting_at:
-        duration_days = (
-            episode.final_meeting_at.date() - episode.admission_datetime.date()
-        ).days
-        if duration_days > 0:
-            episode.course_duration_days = duration_days
-        elif duration_days == 0:
-            episode.course_duration_days = 1
-        else:
-            episode.course_duration_days = None
-    else:
-        episode.course_duration_days = None
+    if episode.final_meeting_at is not None:
+        for record in records:
+            if (episode.final_meeting_at in extract_mdrk_meeting_datetimes(record.document)
+                    or record.clinical_datetime == episode.final_meeting_at):
+                episode.field_sources["final_meeting_at"] = record.document.source_path
+                break
+    _update_course_duration(episode)
+
+
+def _update_course_duration(episode: Episode) -> None:
+    from mdrk_builder.application.editing import hospitalization_days
+    if not episode.course_duration_manual:
+        episode.course_duration_days = hospitalization_days(
+            episode.admission_datetime, episode.discharge_datetime or episode.final_meeting_at
+        )
 
 
 def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) -> None:
@@ -405,6 +412,9 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                 if extracted[id(record)][field_name]
                 and not is_empty_clinical_update(extracted[id(record)][field_name])
             ]
+            if field_name not in timeline_fields and episode.admission_datetime is not None:
+                candidates = [(record, value) for record, value in candidates
+                              if record.clinical_datetime is None or record.clinical_datetime.date() >= episode.admission_datetime.date()]
             if not candidates and future_physician_records:
                 future_candidates = [
                     (record, extracted[id(record)][field_name])
@@ -464,6 +474,8 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                     continue
                 setattr(target, field_name, composed.text)
                 provenance[f"sections.{field_name}"] = composed.source
+                for index, source in enumerate(composed.sources, 1):
+                    provenance[f"sections.{field_name}.{index}"] = source
                 continue
 
             # Plans and compact current-state fields are values, not narratives:
@@ -731,12 +743,14 @@ def _personal_factor_records(
 def _select_personal_factor(
     occurrences: list[tuple[ScannedRecord, IcfObservation]],
     boundary: datetime | None,
+    admission: datetime | None = None,
 ) -> tuple[ScannedRecord, IcfObservation] | None:
     dated = [
         item
         for item in occurrences
         if item[0].clinical_datetime is not None
         and (boundary is None or item[0].clinical_datetime <= boundary)
+        and (admission is None or item[0].clinical_datetime.date() >= admission.date())
     ]
     eligible = dated or [item for item in occurrences if item[0].clinical_datetime is None]
     if not eligible:
@@ -753,8 +767,8 @@ def _select_personal_factor(
 
 def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> None:
     for occurrences in _personal_factor_records(records).values():
-        initial = _select_personal_factor(occurrences, episode.initial_meeting_at)
-        final = _select_personal_factor(occurrences, episode.final_meeting_at)
+        initial = _select_personal_factor(occurrences, episode.initial_meeting_at, episode.admission_datetime)
+        final = _select_personal_factor(occurrences, episode.final_meeting_at, episode.admission_datetime)
         if final is None:
             continue
 
@@ -769,6 +783,7 @@ def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> N
         )
         episode.icf_domains.append(
             IcfDomain(
+                source=selected_record.document.source_path,
                 code=selected_observation.code,
                 description=selected_observation.description,
                 specialist=role,
@@ -856,12 +871,14 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
 def _eligible_icf_occurrences(
     occurrences: list[tuple[ScannedRecord, IcfObservation]],
     boundary: datetime | None,
+    admission: datetime | None = None,
 ) -> list[tuple[ScannedRecord, IcfObservation]]:
     dated = [
         item
         for item in occurrences
         if item[0].clinical_datetime is not None
         and (boundary is None or item[0].clinical_datetime <= boundary)
+        and (admission is None or item[0].clinical_datetime.date() >= admission.date())
     ]
     eligible = dated or [
         item for item in occurrences if item[0].clinical_datetime is None
@@ -877,7 +894,7 @@ def _eligible_icf_occurrences(
     # several files.  All rows for one clinical timestamp are one temporal
     # point even when their description differs slightly.  Equal ratings keep
     # the earliest provenance; conflicting ratings at that timestamp use the
-    # deterministic last source as a correction, not as a fake repeat.
+    # deterministic preview; collect_icf_choices retains the alternatives for review.
     by_datetime: dict[
         datetime | None, list[tuple[ScannedRecord, IcfObservation]]
     ] = defaultdict(list)
@@ -886,7 +903,14 @@ def _eligible_icf_occurrences(
     unique: list[tuple[ScannedRecord, IcfObservation]] = []
     for values in by_datetime.values():
         rating_sets = {
-            tuple(qualifier.display() for qualifier in observation.ratings)
+            tuple(
+                qualifier.display() if qualifier is not None else ""
+                for qualifier in (
+                    observation.rating_pair
+                    if observation.rating_pair is not None
+                    else observation.ratings
+                )
+            )
             for _, observation in values
         }
         unique.append(values[0] if len(rating_sets) == 1 else values[-1])
@@ -921,7 +945,7 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
 
         for occurrences in clusters.values():
             temporal_points = _eligible_icf_occurrences(
-                occurrences, episode.final_meeting_at
+                occurrences, episode.final_meeting_at, episode.admission_datetime
             )
             if not temporal_points:
                 # A source written after MDRK-2 cannot introduce or update a row.
@@ -929,17 +953,22 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
 
             initial_record, initial_obs = temporal_points[0]
             final_record, final_obs = temporal_points[-1]
-            initial = initial_obs.ratings[0] if initial_obs.ratings else None
+            initial = initial_obs.initial
             has_distinct_repeat = (
-                len(temporal_points) > 1 or len(final_obs.ratings) >= 2
+                len(temporal_points) > 1 or final_obs.repeat is not None
             )
-            final = final_obs.current if has_distinct_repeat else None
+            final = (
+                final_obs.repeat
+                if final_obs.rating_pair is not None and final_obs.repeat is not None
+                else final_obs.current if has_distinct_repeat else None
+            )
             # Code/wording/note belong to the baseline definition.  Only the
             # qualifier is updated from the last point, preventing later diary
             # wording from leaking into MDRK-1.
             sample = initial_obs
             specialist = sample.specialist or role
             domain = IcfDomain(
+                source=initial_record.document.source_path,
                 code=sample.code,
                 description=sample.description,
                 specialist=specialist,
@@ -957,6 +986,19 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
                     final_record.clinical_datetime if final is not None else None
                 ),
             )
+            if episode.initial_meeting_at is not None and (
+                initial_record.clinical_datetime is None
+                or initial_record.clinical_datetime > episode.initial_meeting_at
+            ):
+                if domain.final is None:
+                    domain.final = domain.initial
+                    domain.final_source = domain.initial_source
+                    domain.final_measured_at = domain.initial_measured_at
+                domain.initial = None
+                domain.initial_source = None
+                domain.initial_measured_at = None
+            from mdrk_builder.application.icf_conflicts import collect_icf_choices
+            collect_icf_choices(domain, occurrences)
             episode.icf_domains.append(domain)
             if (
                 not domain.code.casefold().startswith("pf")
@@ -1003,6 +1045,7 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
             if final_medication:
                 existing.final = qualifier
             existing.note = existing.note or "препараты"
+            existing.origin_note = "Расчёт: e1101 = 4+ по наличию медикаментозного лечения"
             if initial_medication:
                 existing.initial_source = initial_medication_source or existing.initial_source
                 existing.initial_measured_at = (
@@ -1021,6 +1064,8 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
         else:
             episode.icf_domains.append(
                 IcfDomain(
+                    origin_note="Расчёт: e1101 = 4+ по наличию медикаментозного лечения",
+                    source=initial_medication_source or final_medication_source,
                     code="e1101",
                     description="Лекарственные препараты",
                     specialist=owner,
@@ -1141,7 +1186,7 @@ def _merge_mdrk1_baseline(
             continue
 
         for observation in extract_icf_observations(record.document):
-            if len(observation.ratings) > 1 or not observation.description.strip():
+            if observation.repeat is not None or not observation.description.strip():
                 continue
             existing = next(
                 (
@@ -1151,10 +1196,11 @@ def _merge_mdrk1_baseline(
                 ),
                 None,
             )
-            fallback_value = observation.ratings[0] if observation.ratings else None
+            fallback_value = observation.initial
             if existing is None:
                 episode.icf_domains.append(
                     IcfDomain(
+                        source=record.document.source_path,
                         code=observation.code,
                         description=observation.description,
                         specialist=observation.specialist or SpecialistRole.OTHER,
@@ -1271,17 +1317,12 @@ def _merge_mdrk1_baseline(
 
 def _collect_procedures(episode: Episode, records: list[ScannedRecord]) -> None:
     assignment_records = [item for item in records if item.classification.document_type == "assignment_sheet"]
-    assignment_records.sort(key=lambda item: item.clinical_datetime or datetime.min)
-    if assignment_records:
-        reference_date = (
-            episode.admission_datetime.date()
-            if episode.admission_datetime is not None
-            else None
-        )
-        episode.procedures = extract_procedures(
-            assignment_records[-1].document,
-            reference_date=reference_date,
-        )
+    from mdrk_builder.application.procedures import merge_procedures
+    reference_date = episode.admission_datetime.date() if episode.admission_datetime else None
+    episode.procedures = merge_procedures([
+        procedure for record in assignment_records
+        for procedure in extract_procedures(record.document, reference_date=reference_date)
+    ])
     if not episode.procedures:
         episode.issues.append(
             ReviewIssue(
@@ -1379,6 +1420,7 @@ def scan_patient_folder(
     folder: Path,
     *,
     normalizer: DocumentNormalizer | None = None,
+    scan_session=None,
     initial_meeting_at: datetime | None = None,
     final_meeting_at: datetime | None = None,
     medical_record_number_override: str | None = None,
@@ -1387,7 +1429,7 @@ def scan_patient_folder(
 ) -> Episode:
     folder = folder.resolve()
     episode = Episode(folder=folder)
-    source_scan = source_scan or scan_source_documents(folder, normalizer=normalizer)
+    source_scan = source_scan or scan_source_documents(folder, normalizer=normalizer, session=scan_session)
     if not source_scan.source_files:
         episode.issues.append(
             ReviewIssue(
@@ -1523,7 +1565,10 @@ def scan_patient_folder(
         if initial_meeting_at is not None:
             episode.initial_meeting_at = initial_meeting_at
         if final_meeting_at is not None:
+            if final_meeting_at != episode.final_meeting_at:
+                episode.field_sources.pop("final_meeting_at", None)
             episode.final_meeting_at = final_meeting_at
+        _update_course_duration(episode)
         _latest_clinical_sections(episode, episode_records)
         _collect_findings(episode, episode_records)
         _merge_icf(episode, episode_records)

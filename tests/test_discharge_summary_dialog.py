@@ -40,9 +40,7 @@ def test_form_exposes_every_editable_string_field(tmp_path) -> None:
         field.name for field in fields(draft) if isinstance(getattr(draft, field.name), str)
     }
 
-    assert {field.name for field in DISCHARGE_TEXT_FIELDS} == model_string_fields - {
-        "header_text"
-    }
+    assert {field.name for field in DISCHARGE_TEXT_FIELDS} == model_string_fields
 
 
 def test_apply_form_keeps_source_identity_and_dates_read_only(tmp_path) -> None:
@@ -57,7 +55,7 @@ def test_apply_form_keeps_source_identity_and_dates_read_only(tmp_path) -> None:
     apply_discharge_form(
         draft,
         {
-            "header_text": "Попытка изменить автоматическую шапку",
+            "header_text": "Исправленная шапка",
             "medications": "",
             "transfusions": "",
             "recommendations": "Ручная рекомендация",
@@ -70,13 +68,14 @@ def test_apply_form_keeps_source_identity_and_dates_read_only(tmp_path) -> None:
     assert draft.identity.medical_record_number == "701/26"
     assert draft.admission_datetime == datetime(2026, 8, 10, 9, 15)
     assert draft.discharge_datetime == datetime(2026, 8, 17, 12, 30)
-    assert draft.header_text == ""
+    assert draft.header_text == "Исправленная шапка"
+    assert "header_text" in draft.manual_fields
     assert draft.medications == ""
     assert draft.transfusions == ""
     assert draft.recommendations == "Ручная рекомендация"
 
 
-def test_manual_text_change_clears_only_editable_field_provenance(tmp_path) -> None:
+def test_manual_text_change_marks_field_and_preserves_original_source(tmp_path) -> None:
     draft = _draft(tmp_path)
     header_source = tmp_path / "current-discharge.docx"
     recommendation_source = tmp_path / "template.docx"
@@ -95,7 +94,8 @@ def test_manual_text_change_clears_only_editable_field_provenance(tmp_path) -> N
         },
     )
 
-    assert draft.header_text == "Исходная шапка"
+    assert draft.header_text == "Исправленная вручную шапка"
+    assert draft.manual_fields == {"header_text"}
     assert draft.field_sources["header_text"] == header_source
     assert draft.field_sources["recommendations"] == recommendation_source
 

@@ -1075,7 +1075,7 @@ def test_pf_first_seen_after_mdrk1_does_not_leak_into_initial_snapshot() -> None
     assert any(item.code == "Pf" for item in build_snapshot(episode, MdrkKind.FINAL).icf_domains)
 
 
-def test_follow_up_only_domain_uses_first_and_last_points_but_stays_out_of_mdrk1() -> None:
+def test_follow_up_only_domain_keeps_repeat_without_undated_baseline() -> None:
     follow_up = _record(
         "/patient/ft-follow-up.docx",
         "",
@@ -1095,11 +1095,11 @@ def test_follow_up_only_domain_uses_first_and_last_points_but_stays_out_of_mdrk1
     _merge_icf(episode, [follow_up])
 
     domain = next(item for item in episode.icf_domains if item.code == "b999")
-    assert domain.initial and domain.initial.value == 2
+    assert domain.initial is None
     assert domain.final and domain.final.value == 1
-    assert domain.initial_source == Path("/patient/ft-follow-up.docx")
+    assert domain.initial_source is None
     assert domain.final_source == Path("/patient/ft-follow-up.docx")
-    assert domain.initial_measured_at == datetime(2026, 6, 11, 13)
+    assert domain.initial_measured_at is None
     assert domain.final_measured_at == datetime(2026, 6, 11, 13)
     assert not any(
         item.code == "b999"
@@ -1165,7 +1165,7 @@ def test_icf_fuzzy_merges_near_duplicate_description_and_keeps_first_last_only()
     assert domain.final_measured_at == datetime(2026, 6, 18, 10)
 
 
-def test_single_new_icf_point_becomes_final_snapshot_baseline_without_fake_repeat() -> None:
+def test_single_late_icf_point_is_current_without_fake_baseline() -> None:
     role = SpecialistRole.OCCUPATIONAL_THERAPIST
     follow_up = _record(
         "/patient/ot-new-domain.docx",
@@ -1182,12 +1182,35 @@ def test_single_new_icf_point_becomes_final_snapshot_baseline_without_fake_repea
     _merge_icf(episode, [follow_up])
 
     domain = next(item for item in episode.icf_domains if item.code == "d640")
-    assert domain.initial and domain.initial.value == 2
-    assert domain.final is None
+    assert domain.initial is None
+    assert domain.final and domain.final.value == 2
     assert build_snapshot(episode, MdrkKind.INITIAL).icf_domains == ()
     assert [item.code for item in build_snapshot(episode, MdrkKind.FINAL).icf_domains] == [
         "d640"
     ]
+
+
+def test_icf_repeat_only_and_unrated_rows_remain_visible_without_fake_baseline() -> None:
+    source = _record(
+        "/patient/physical-therapy.docx", "",
+        role=SpecialistRole.PHYSICAL_THERAPIST,
+        clinical_datetime=datetime(2026, 6, 12, 14),
+        tables=[_icf_table(
+            _row({0: "d450", 1: "Ходьба", 12: "1"}),
+            _row({0: "b2351", 1: "Равновесие"}),
+        )],
+    )
+    episode = Episode(Path("/patient"))
+    _merge_icf(episode, [source])
+
+    domains = {domain.code: domain for domain in episode.icf_domains}
+    assert set(domains) == {"d450", "b2351"}
+    assert domains["d450"].initial is None
+    assert domains["d450"].final is not None and domains["d450"].final.value == 1
+    assert domains["d450"].initial_source is None
+    assert domains["d450"].final_source == source.document.source_path
+    assert domains["b2351"].initial is None and domains["b2351"].final is None
+    assert len([issue for issue in episode.issues if issue.code == "icf_incomplete_pair"]) == 2
 
 
 def test_icf_copies_at_same_timestamp_are_one_point_despite_wording_variant() -> None:
@@ -1399,3 +1422,30 @@ def test_mdrk1_fallback_rejects_document_from_non_initial_meeting_day() -> None:
 
     assert episode.icf_domains == []
     assert episode.findings == []
+
+
+def test_neurologist_icf_does_not_import_lfk_owned_rows():
+    for label in ('ЛФК', 'врач ЛФК', 'Инструктор по ЛФК'):
+        physician = _record(
+            '/patient/neurologist.docx', '', role=SpecialistRole.NEUROLOGIST,
+            clinical_datetime=datetime(2026, 8, 3, 10),
+            tables=[_icf_table(
+                _row({0: 'b710', 1: 'Подвижность суставов', 11: '4', 13: label}),
+                _row({0: 's110', 1: 'Структура головного мозга', 11: '2', 13: 'Невролог'}),
+            )],
+        )
+        episode = Episode(Path('/patient'))
+        episode.initial_meeting_at = datetime(2026, 8, 4, 10)
+        episode.final_meeting_at = datetime(2026, 8, 14, 10)
+        _merge_icf(episode, [physician])
+        assert {item.code for item in episode.icf_domains} == {'s110'}
+        therapist = _record(
+            '/patient/lfk.docx', '', role=SpecialistRole.PHYSICAL_THERAPIST,
+            clinical_datetime=datetime(2026, 8, 3, 11),
+            tables=[_icf_table(_row({0: 'b710', 1: 'Подвижность суставов', 11: '1', 13: label}))],
+        )
+        _merge_icf(episode, [physician, therapist])
+        domain = next(item for item in episode.icf_domains if item.code == 'b710')
+        assert domain.initial.value == 1
+        assert domain.initial_source == Path('/patient/lfk.docx')
+        assert domain.specialist is SpecialistRole.PHYSICAL_THERAPIST

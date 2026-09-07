@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mdrk_builder.application.editing import merge_rows, merge_issues
+
 import os
 import re
 import subprocess
@@ -57,6 +59,8 @@ from mdrk_builder.ui.dialogs import (
     install_edit_shortcuts,
 )
 from mdrk_builder.ui.inline_tree import InlineTreeEditor
+from mdrk_builder.ui.icf_table import apply_icf_grid_style
+from mdrk_builder.ui.source_access import TableSourceAccess, SourceLinks, icf_source_links, field_source_links, row_source_links, open_source_links, mark_manual_changes, open_source_path
 from mdrk_builder.ui.background_job import BackgroundJobRunner
 from mdrk_builder.ui.document_panels import DischargeSummaryPanel, ReverseSheetPanel
 from mdrk_builder.ui.episode_adapter import (
@@ -112,12 +116,21 @@ def about_text() -> str:
     )
 
 
-class MdrkBuilderApp:
+from mdrk_builder.ui.workspace_state import WorkspaceState
+
+
+class MdrkBuilderApp(WorkspaceState):
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.episode: Episode | None = None
         self._current_kind = MdrkKind.INITIAL
+        self._previous_document = "mdrk1"
         self._background_jobs = BackgroundJobRunner(root, thread_factory=threading.Thread)
+        from mdrk_builder.application.scan_session import ScanSession
+        self._scan_session = ScanSession()
+        self.root._mdrk_scan_session = self._scan_session
+        self._scan_session.progress = lambda done,total,path: self._background_jobs.report_progress(f"Считывание {done}/{total}: {path.name if path else 'готово'}")
+        self._background_jobs.on_progress = lambda text: self.status_var.set(text)
         self._active_job_folder: Path | None = None
         self._scanning = False
         self._setting_folder_field = False
@@ -143,6 +156,7 @@ class MdrkBuilderApp:
         self._procedure_editor: InlineTreeEditor | None = None
         self._scale_editor: InlineTreeEditor | None = None
         self._loading_specialist = False
+        self._displayed_specialist_finding: SpecialistFinding | None = None
         self.reverse_draft: ReverseSheetDraft | None = None
         self.discharge_draft: DischargeSummaryDraft | None = None
 
@@ -153,12 +167,75 @@ class MdrkBuilderApp:
 
         self._configure_window()
         install_edit_shortcuts(self.root)
+        from mdrk_builder.ui.edit_history import install_history
+        self._table_history = install_history(self,
+            ("_commit_icf_cell", "_delete_icf", "_add_icf", "_edit_icf", "_move_icf_domain", "_commit_procedure_cell", "_add_procedure", "_edit_procedure", "_delete_procedure", "_commit_scale_cell", "_add_scale", "_edit_scale", "_delete_scale", "_add_finding", "_edit_finding", "_delete_finding"),
+            lambda: self.episode, self._restore_table_state)
         self._build_menu()
         self._build_layout()
         self._update_field_sources()
         self.folder_var.trace_add("write", self._on_folder_field_changed)
         self._update_action_states()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(30000, self._autosave_workspace)
+        self._saved_workspace = None
+        self.root.after(1500, self._refresh_draft_indicator)
+
+    def _restore_table_state(self, episode):
+        if self.episode is None: return
+        for field in ("icf_domains", "procedures", "findings"):
+            setattr(self.episode, field, deepcopy(getattr(episode, field)))
+        self._manual_collections.update({"icf", "procedures", "findings"})
+        self._refresh_all_trees()
+
+    def _restore_selected_source(self):
+        from mdrk_builder.application.editing import row_key
+        focus = self.root.focus_get()
+        if self.document_var.get() == "discharge":
+            panel=self.discharge_workspace
+            if focus is panel.icf_tree:
+                panel._edit_discharge_icf("source");return
+            if focus is panel.clinical_tree:
+                panel._edit_clinical_row("source");return
+            for key,widget in panel._widgets.items():
+                if focus is widget and getattr(panel,"_baseline",None):
+                    value=getattr(panel._baseline,key)
+                    setattr(panel.draft,key,value);panel._dirty_fields.discard(key);panel.draft.manual_fields.discard(key)
+                    widget.delete("1.0","end");widget.insert("1.0",value);return
+        if self.document_var.get() == 'reverse':
+            panel = self.reverse_workspace
+            if panel.draft is not None and focus is panel.row_tree and panel.row_tree.selection():
+                item = panel.row_tree.selection()[0]
+                index = panel._row_refs[int(item)]
+                old = panel.draft.rows[index]
+                original = next((row for row in panel._baseline.rows if row_key(row) == row_key(old)), None)
+                if original is not None:
+                    panel._table_history.wrap(lambda: panel.draft.rows.__setitem__(index, deepcopy(original)))()
+                    panel._rows_dirty = True
+                    panel._populate()
+            return
+        baseline=getattr(self,"_scan_baseline",None)
+        if self.episode is None or baseline is None:return
+        for key,widget in self._text_fields.items():
+            if focus is widget:
+                value=getattr(sections_for(baseline,self._current_kind),key)
+                widget.delete("1.0","end");widget.insert("1.0",value)
+                self._dirty_section_fields[self._current_kind].discard(key)
+                setattr(sections_for(self.episode,self._current_kind),key,value);return
+        for tree,attr in ((self.icf_tree,"icf_domains"),(self.procedure_tree,"procedures"),(self.finding_tree,"findings")):
+            if focus is tree and tree.selection() and tree.selection()[0].isdigit():
+                index=int(tree.selection()[0]);rows=getattr(self.episode,attr)
+                original=next((r for r in getattr(baseline,attr) if row_key(r)==row_key(rows[index])),None)
+                if original is not None:rows[index]=deepcopy(original);self._refresh_all_trees()
+                return
+
+    def _active_history(self):
+        document = self.document_var.get()
+        if document == "discharge":
+            return self.discharge_workspace._table_history
+        if document == "reverse":
+            return self.reverse_workspace._table_history
+        return self._table_history
 
     def _configure_window(self) -> None:
         self.root.title(f"МДРК — сборщик документов  {__version__}")
@@ -308,6 +385,8 @@ class MdrkBuilderApp:
         file_menu.add_command(label="Повторить сканирование", command=self._rescan_current_document, accelerator="F5")
         file_menu.add_separator()
         file_menu.add_command(label="Сохранить документ", command=self._generate, accelerator="Ctrl+S")
+        file_menu.add_command(label="Сохранить рабочий черновик", command=lambda: self._save_workspace(explicit=True))
+        file_menu.add_command(label="Восстановить черновик", command=lambda: self._restore_workspace(Path(self.folder_var.get())))
         file_menu.add_separator()
         file_menu.add_command(label="Выход", command=self._on_close)
         menu.add_cascade(label="Файл", menu=file_menu)
@@ -336,6 +415,8 @@ class MdrkBuilderApp:
         ttk.Button(top, text="Обзор…", command=self._choose_folder).grid(row=0, column=2, padx=2)
         self.scan_button = ttk.Button(top, text="Повторить сканирование", command=self._rescan_current_document)
         self.scan_button.grid(row=0, column=3, padx=2)
+        self.cancel_button = ttk.Button(top, text="Отменить", command=self._cancel_scan)
+        self.cancel_button.grid(row=0,column=5,padx=2)
         top.columnconfigure(1, weight=1)
 
         document_bar = ttk.Frame(self.root, padding=(6, 3))
@@ -374,6 +455,9 @@ class MdrkBuilderApp:
         self._build_procedures_tab()
         self._build_sources_tab()
         self._build_issues_tab()
+        self.issue_tree.bind("<Double-1>",self._go_to_selected_issue)
+        self.issue_tree.bind("<Return>",self._go_to_selected_issue)
+        self._build_table_source_access()
 
         self.reverse_workspace = ReverseSheetPanel(self.root, open_path=self._open_path)
         self.discharge_workspace = DischargeSummaryPanel(self.root, open_path=self._open_path)
@@ -404,11 +488,18 @@ class MdrkBuilderApp:
             label_frame = ttk.Frame(metadata)
             label_frame.grid(row=row, column=column, sticky="ew", padx=(0, 5), pady=3)
             ttk.Label(label_frame, text=label).pack(side="left")
+            if key == "duration":
+                ttk.Button(label_frame, text="Авто", command=self._automatic_duration).pack(side="left")
             source_key = {
                 "full_name": "identity.full_name",
                 "record_number": "identity.medical_record_number",
                 "birth_date": "identity.birth_date",
                 "sex": "identity.sex",
+                'admission': 'admission_datetime',
+                'meeting': 'meeting_at',
+                'department': 'department',
+                'stage': 'stage',
+                'duration': 'course_duration_days',
             }.get(key)
             if source_key:
                 button = ttk.Button(
@@ -523,6 +614,7 @@ class MdrkBuilderApp:
             show="tree headings",
             selectmode="extended",
         )
+        apply_icf_grid_style(self.icf_tree)
         vertical = ttk.Scrollbar(container, orient="vertical", command=self.icf_tree.yview)
         horizontal = ttk.Scrollbar(container, orient="horizontal", command=self.icf_tree.xview)
         self.icf_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -806,23 +898,58 @@ class MdrkBuilderApp:
     def _mark_entry_dirty(self, key: str) -> None:
         if not self._populating:
             self._dirty_entry_fields.add(key)
+            if self.episode is not None and key == "duration":
+                self.episode.course_duration_manual = True
+            if key in {"admission", "meeting"}:
+                self.root.after_idle(self._refresh_duration)
             source_key = {
                 "full_name": "identity.full_name",
                 "record_number": "identity.medical_record_number",
                 "birth_date": "identity.birth_date",
                 "sex": "identity.sex",
+                'admission': 'admission_datetime',
+                'meeting': 'meeting_at',
+                'department': 'department',
+                'stage': 'stage',
+                'duration': 'course_duration_days',
             }.get(key)
             if source_key and (button := self._field_source_buttons.get(source_key)):
-                button.pack_forget()
-                self._field_source_paths.pop(source_key, None)
+                button.configure(text="Ручная правка", state="normal")
+
+    def _refresh_duration(self):
+        if self.episode is None or self.episode.course_duration_manual:
+            return
+        from mdrk_builder.application.editing import hospitalization_days
+        from mdrk_builder.ui.episode_adapter import parse_optional_datetime
+        try:
+            admission = parse_optional_datetime(self._entry_variables['admission'].get())
+            end = self.episode.discharge_datetime or (
+                parse_optional_datetime(self._entry_variables['meeting'].get())
+                if self._current_kind is MdrkKind.FINAL else self.episode.final_meeting_at
+            )
+        except ValueError:
+            return
+        value = hospitalization_days(admission, end)
+        self.episode.course_duration_days = value
+        self._populating = True
+        try:
+            self._entry_variables['duration'].set('' if value is None else str(value))
+        finally:
+            self._populating = False
+
+    def _automatic_duration(self):
+        if self.episode:
+            self.episode.course_duration_manual = False
+            self._dirty_entry_fields.discard('duration')
+            self._refresh_duration()
+            self.status_var.set('Койко-дни: автоматически по датам; до подтверждения выписки — по дате МДРК-2')
 
     def _mark_section_dirty(self, key: str) -> None:
         if not self._populating:
             self._dirty_section_fields[self._current_kind].add(key)
             source_key = f"sections.{key}"
             if button := self._field_source_buttons.get(source_key):
-                button.pack_forget()
-                self._field_source_paths.pop(source_key, None)
+                button.configure(text="Ручная правка", state="normal")
 
     def _clear_manual_edits(self) -> None:
         getattr(self, "_dirty_entry_fields", set()).clear()
@@ -853,11 +980,16 @@ class MdrkBuilderApp:
             previous.department = form.department
             previous.stage = form.stage
             previous.course_duration_days = form.course_duration_days
+            if self._current_kind is MdrkKind.INITIAL:
+                previous.initial_meeting_at = form.meeting_at
+            else:
+                previous.final_meeting_at = form.meeting_at
             target_sections = sections_for(previous, self._current_kind)
             for key, value in form.section_values:
                 setattr(target_sections, key, value)
         return {
             "episode": previous,
+            "baseline": deepcopy(getattr(self, "_scan_baseline", self.episode)),
             "entry_fields": set(getattr(self, "_dirty_entry_fields", set())),
             "section_fields": {
                 kind: set(fields)
@@ -875,6 +1007,8 @@ class MdrkBuilderApp:
         previous = state["episode"]
         if not isinstance(previous, Episode):
             return
+        episode.course_duration_manual = previous.course_duration_manual
+        episode.discharge_datetime = previous.discharge_datetime or episode.discharge_datetime
         entry_fields = state["entry_fields"]
         if isinstance(entry_fields, set):
             entry_mapping = {
@@ -902,8 +1036,19 @@ class MdrkBuilderApp:
                         "sex": "identity.sex",
                     }.get(key)
                     if source_key:
-                        episode.field_sources.pop(source_key, None)
-                        episode.initial_field_sources.pop(source_key, None)
+                        for mapping, old in ((episode.field_sources, previous.field_sources),
+                                             (episode.initial_field_sources, previous.initial_field_sources)):
+                            for name in list(mapping):
+                                if name == source_key or name.startswith(source_key + "."):
+                                    mapping.pop(name)
+                            mapping.update({name: path for name, path in old.items()
+                                            if name == source_key or name.startswith(source_key + ".")})
+        if 'meeting' in entry_fields:
+            episode.initial_meeting_at = previous.initial_meeting_at
+            episode.final_meeting_at = previous.final_meeting_at
+        if not episode.course_duration_manual:
+            from mdrk_builder.application.scanner import _update_course_duration
+            _update_course_duration(episode)
         section_fields = state["section_fields"]
         if isinstance(section_fields, dict):
             for kind in (MdrkKind.INITIAL, MdrkKind.FINAL):
@@ -913,20 +1058,33 @@ class MdrkBuilderApp:
                 for key in keys:
                     setattr(new_sections, key, getattr(old_sections, key))
                     source_key = f"sections.{key}"
-                    episode.field_sources.pop(source_key, None)
-                    episode.initial_field_sources.pop(source_key, None)
+                    mapping = episode.initial_field_sources if kind is MdrkKind.INITIAL else episode.field_sources
+                    old = previous.initial_field_sources if kind is MdrkKind.INITIAL else previous.field_sources
+                    for name in list(mapping):
+                        if name == source_key or name.startswith(source_key + "."):
+                            mapping.pop(name)
+                    mapping.update({name: path for name, path in old.items()
+                                    if name == source_key or name.startswith(source_key + ".")})
+        baseline = state.get("baseline")
         collections = state["collections"]
         if isinstance(collections, set):
             if "icf" in collections:
-                episode.icf_domains = deepcopy(previous.icf_domains)
+                episode.icf_domains, notes = merge_rows(getattr(baseline, "icf_domains", []), previous.icf_domains, episode.icf_domains)
+                episode.issues.extend(merge_issues(notes))
             if "procedures" in collections:
-                episode.procedures = deepcopy(previous.procedures)
+                episode.procedures, notes = merge_rows(getattr(baseline, "procedures", []), previous.procedures, episode.procedures)
+                episode.issues.extend(merge_issues(notes))
             if "findings" in collections:
-                episode.findings = deepcopy(previous.findings)
+                episode.findings, notes = merge_rows(getattr(baseline, "findings", []), previous.findings, episode.findings)
+                episode.issues.extend(merge_issues(notes))
 
     def _on_folder_field_changed(self, *_args: str) -> None:
         if self._setting_folder_field:
             return
+        if hasattr(self, "discharge_workspace") and self._state_folder():
+            if not self._save_workspace(explicit=True):
+                self._set_folder_field(str(self._state_folder()))
+                return
         if hasattr(self, "reverse_draft"):
             self.reverse_draft = None
         if hasattr(self, "discharge_draft"):
@@ -935,7 +1093,14 @@ class MdrkBuilderApp:
             self._clear_manual_edits()
             self._invalidate_episode()
         self._update_action_states()
-        self.status_var.set("Папка изменена. Выполните сканирование заново.")
+        if hasattr(self, "discharge_workspace"):
+            self.discharge_workspace.draft = None
+            self.reverse_workspace.draft = None
+            self.discharge_workspace._table_history.clear()
+            self.reverse_workspace._table_history.clear()
+        if hasattr(self, "_table_history"):
+            self._table_history.clear()
+        self.status_var.set("Папка изменена. Предыдущий рабочий черновик сохранён; выполните сканирование заново.")
 
     def _folder_field_matches(self, expected: Path) -> bool:
         try:
@@ -953,6 +1118,7 @@ class MdrkBuilderApp:
                 variable.set("")
             for widget in self._text_fields.values():
                 widget.delete("1.0", "end")
+                widget.edit_reset()
         finally:
             self._populating = previous_populating
         for tree in (
@@ -972,15 +1138,63 @@ class MdrkBuilderApp:
     def _choose_folder(self) -> None:
         selected = filedialog.askdirectory(title="Выберите папку эпизода")
         if selected:
+            if not self._confirm_leave():
+                return
             self._clear_manual_edits()
             self.reverse_draft = None
             self.discharge_draft = None
             self._invalidate_episode()
+            self.reverse_workspace.draft = None
+            self.discharge_workspace.draft = None
+            self.reverse_workspace._table_history.clear()
+            self.discharge_workspace._table_history.clear()
+            self._table_history.clear()
             self._set_folder_field(selected)
-            self._start_scan()
+            if not self._restore_workspace(Path(selected)):
+                self._start_scan()
 
     def _on_document_changed(self) -> None:
+        from mdrk_builder.application.shared_edits import transfer_episode_edits, transfer_discharge_edits
         document = self.document_var.get()
+        previous = getattr(self, "_previous_document", "mdrk1")
+        if previous in {"mdrk1", "mdrk2"} and self.episode:
+            state = self._capture_manual_state()
+            if state:
+                transfer_episode_edits(state["episode"], getattr(self, "_scan_baseline", None), self.discharge_workspace.draft, self._dirty_entry_fields)
+        elif previous == "discharge" and self.discharge_workspace.draft:
+            if not self.discharge_workspace.apply():
+                self.document_var.set(previous)
+                return
+            changed = transfer_discharge_edits(self.discharge_workspace.draft, self.episode, self.discharge_workspace._dirty_identity, baseline=getattr(self.discharge_workspace, "_baseline", None))
+            self._manual_collections.update(changed)
+        from mdrk_builder.application.shared_edits import transfer_identity
+        source = None
+        fields = set()
+        if previous in {'mdrk1', 'mdrk2'} and self.episode:
+            source = state['episode'] if state else self.episode
+            fields = set(self._dirty_entry_fields)
+        elif previous == 'discharge':
+            source = self.discharge_workspace.draft
+            fields = set(self.discharge_workspace._dirty_identity)
+        elif previous == 'reverse' and self.reverse_workspace.draft:
+            if not self.reverse_workspace.apply():
+                self.document_var.set(previous)
+                return
+            source = self.reverse_workspace.draft
+            fields = set(self.reverse_workspace._header_dirty)
+        if source:
+            shared = fields & {'full_name', 'record_number', 'birth_date', 'sex', 'admission', 'discharge'}
+            for panel, dirty in ((self.reverse_workspace, '_header_dirty'), (self.discharge_workspace, '_dirty_identity')):
+                if panel.draft is not None and panel.draft is not source:
+                    transfer_identity(source, panel.draft, shared)
+                    getattr(panel, dirty).update(shared & set(getattr(panel, '_header_vars', getattr(panel, '_identity_vars', {}))))
+                    panel._populate()
+            if self.episode is not None and source is not self.episode:
+                transfer_identity(source, self.episode, shared)
+                self._dirty_entry_fields.update(shared - {'discharge'})
+                if previous not in {'mdrk1', 'mdrk2'}:
+                    self._populate_from_episode()
+        self._previous_document = document
         self.mdrk_workspace.pack_forget()
         self.reverse_workspace.pack_forget()
         self.discharge_workspace.pack_forget()
@@ -1014,16 +1228,52 @@ class MdrkBuilderApp:
         else:
             self._start_scan()
 
-    @staticmethod
-    def _open_path(path: Path | None) -> None:
-        if path is None or not path.is_file():
-            return
-        if sys.platform == "win32":
-            os.startfile(path)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
-        else:
-            subprocess.Popen(["xdg-open", str(path)])
+    _open_path = staticmethod(open_source_path)
+
+    def _build_table_source_access(self) -> None:
+        self._table_sources = {}
+        for name, tree in (
+            ("icf", self.icf_tree), ("procedure", self.procedure_tree),
+            ("scale", self.scale_tree), ("finding", self.finding_tree),
+            ("issue", self.issue_tree), ("source", self.source_tree),
+        ):
+            bar = ttk.Frame(tree.master.master)
+            bar.pack(fill="x", pady=(0, 5), before=tree.master)
+            if name == "icf":
+                ttk.Label(bar, text="Источники строки: ПКМ или Shift+F10").pack(side="left")
+            self._table_sources[name] = TableSourceAccess(
+                tree, bar,
+                links=lambda item, table=name: self._table_source_links(table, item),
+                open_path=self._open_path,
+                show_button=name != "icf",
+            )
+
+    def _table_source_links(self, table: str, item: str) -> SourceLinks:
+        if self.episode is None:
+            return ()
+        if table == "scale":
+            row = self._scale_pair_refs.get(item)
+            if row is None:
+                return ()
+            links = list(row_source_links(row.initial, "Исходное значение")) if row.initial else [("Исходное значение", None)]
+            if self._current_kind is MdrkKind.FINAL:
+                links.extend(row_source_links(row.current, "Итоговое значение") if row.current else [("Итоговое значение", None)])
+            return links
+        if table == "issue":
+            issue = self._issue_refs.get(item)
+            return [("Источник предупреждения", issue.source)] if issue else ()
+        if not item.isdigit():
+            return ()
+        index = int(item)
+        if table == "icf" and index < len(self.episode.icf_domains):
+            return icf_source_links(self.episode.icf_domains[index], include_final=self._current_kind is MdrkKind.FINAL)
+        if table == "procedure" and index < len(self.episode.procedures):
+            return row_source_links(self.episode.procedures[index], "Лист назначений")
+        if table == "finding" and index < len(self.episode.findings):
+            return row_source_links(self.episode.findings[index], "Документ специалиста")
+        if table == "source" and index < len(self.episode.sources):
+            return [("Исходный документ", self.episode.sources[index].path)]
+        return ()
 
     def _open_selected_source(self, _event: tk.Event | None = None) -> None:
         if not self.episode:
@@ -1032,6 +1282,19 @@ class MdrkBuilderApp:
         if selected and selected[0].isdigit():
             self._open_path(self.episode.sources[int(selected[0])].path)
 
+    def _go_to_selected_issue(self, event=None):
+        from mdrk_builder.ui.workspace_search import reveal
+        issue=self._selected_issue()
+        if issue is None:return
+        field=issue.field
+        name=field.split(".")[-1]
+        if name in self._text_fields:
+            reveal(self._text_fields[name]);return
+        for prefix,tree in (("icf",self.icf_tree),("procedures",self.procedure_tree),("scales",self.scale_tree)):
+            if field.startswith(prefix):
+                parts=field.split(".");item=parts[1] if len(parts)>1 else next(iter(tree.get_children()),None)
+                reveal(tree,item);return
+
     def _open_selected_issue_source(self, _event: tk.Event | None = None) -> None:
         selected = self.issue_tree.selection()
         if selected and (issue := self._issue_refs.get(selected[0])) is not None:
@@ -1039,26 +1302,47 @@ class MdrkBuilderApp:
 
     def _open_specialist_source(self) -> None:
         finding = self._selected_specialist_finding()
-        self._open_path(finding.source if finding else None)
+        open_source_links(self.specialist_source_button, row_source_links(finding) if finding else (), self._open_path)
+
+    def _field_source_links(self, field_key: str) -> SourceLinks:
+        if self.episode is None:
+            return ()
+        source_map = self.episode.field_sources
+        if field_key.startswith("sections.") and self._current_kind is MdrkKind.INITIAL:
+            source_map = self.episode.initial_field_sources
+        entry_keys = {"identity.full_name": "full_name", "identity.medical_record_number": "record_number",
+                      "identity.birth_date": "birth_date", "identity.sex": "sex", "admission_datetime": "admission",
+                      "meeting_at": "meeting", "department": "department", "stage": "stage", "course_duration_days": "duration"}
+        manual = (entry_keys.get(field_key) in self._dirty_entry_fields or
+                  field_key.removeprefix("sections.") in self._dirty_section_fields[self._current_kind])
+        links = list(field_source_links(source_map, field_key, manual=manual))
+        if links:
+            return links
+        if field_key in {"department", "stage", "sections.rehabilitation_potential"}:
+            return [("Шаблон: значение по умолчанию, не извлечено из документа", None)]
+        if field_key in {"sections.goal", "sections.tasks"} and self._current_kind is MdrkKind.FINAL:
+            return [("Шаблон: установленная формулировка для МДРК-2", None)]
+        if field_key in {"meeting_at", "course_duration_days"}:
+            explanation = ("Расчёт: заседание определяется по поступлению и датам документов; ручная дата имеет приоритет"
+                           if field_key == "meeting_at" else "Расчёт: разность дат итогового заседания и поступления; один день при совпадении")
+            return [(explanation, None), *field_source_links(source_map, "admission_datetime"),
+                    *field_source_links(source_map, "final_meeting_at")]
+        return ()
 
     def _open_field_source(self, field_key: str) -> None:
-        self._open_path(self._field_source_paths.get(field_key))
+        open_source_links(self._field_source_buttons[field_key], self._field_source_links(field_key), self._open_path)
 
     def _update_field_sources(self) -> None:
         self._field_source_paths = {}
-        source_map: dict[str, Path] = {}
-        if self.episode is not None:
-            source_map.update(self.episode.field_sources)
-            if self._current_kind is MdrkKind.INITIAL:
-                source_map.update(self.episode.initial_field_sources)
         for field_key, button in getattr(self, "_field_source_buttons", {}).items():
-            path = source_map.get(field_key)
-            if path is None:
-                button.pack_forget()
+            links = self._field_source_links(field_key)
+            if not links:
+                button.configure(text="Источник не указан", state="disabled")
                 continue
-            self._field_source_paths[field_key] = path
-            if not button.winfo_manager():
-                button.pack(side="right")
+            paths = [path for _, path in links if path is not None]
+            if paths:
+                self._field_source_paths[field_key] = paths[0]
+            button.configure(text="Источник", state="normal")
 
     def _start_scan(self) -> None:
         if self._scanning:
@@ -1143,11 +1427,13 @@ class MdrkBuilderApp:
         self._pending_manual_state = self._capture_manual_state()
         self._invalidate_episode()
         self._set_folder_field(str(folder))
+        if hasattr(self, "_scan_session"):
+            self._scan_session.begin(folder)
         self._active_job_folder = folder
         self._set_scanning(True)
         self.status_var.set("Сканирование исходных документов…")
         self._start_background_job(
-            lambda: scan_patient_folder(folder, **scan_overrides),
+            lambda: scan_patient_folder(folder, scan_session=getattr(self,"_scan_session",None), **scan_overrides),
             self._finish_scan,
             thread_name="mdrk-folder-scan",
         )
@@ -1157,8 +1443,12 @@ class MdrkBuilderApp:
         scan_folder = self._active_job_folder
         self._active_job_folder = None
         if error is not None:
-            self._invalidate_episode()
-            self.status_var.set("Сканирование завершилось ошибкой")
+            state = self._pending_manual_state
+            if state and state.get("episode"):
+                self.episode = state["episode"]
+                self._pending_manual_state = None
+                self._populate_from_episode()
+            self.status_var.set("Сканирование завершилось ошибкой; предыдущие правки сохранены")
             messagebox.showerror("Ошибка сканирования", str(error))
             return
         if (
@@ -1170,14 +1460,21 @@ class MdrkBuilderApp:
             self._invalidate_episode()
             self.status_var.set("Результат отброшен: папка изменилась во время сканирования.")
             return
+        source_baseline = deepcopy(episode)
+        old_baseline = getattr(self, '_scan_baseline', None)
+        from mdrk_builder.application.editing import change_summary
+        summary = change_summary(old_baseline, source_baseline)
         self._merge_manual_state(episode)
+        self._scan_baseline = source_baseline
+        if hasattr(self, "_table_history"):
+            self._table_history.clear()
         self.episode = episode
         self._set_folder_field(str(episode.folder))
         self._populate_from_episode()
         self._update_action_states()
         self.status_var.set(
             f"Готово: {len(episode.sources)} источников, {len(episode.icf_domains)} доменов, "
-            f"{len(episode.procedures)} процедур"
+            f"{len(episode.procedures)} процедур. {summary}"
         )
 
     def _start_reverse_sheet_scan(self) -> None:
@@ -1186,11 +1483,13 @@ class MdrkBuilderApp:
         folder = self._auxiliary_scan_folder()
         if folder is None:
             return
+        if hasattr(self, "_scan_session"):
+            self._scan_session.begin(folder)
         self._active_job_folder = folder
         self._set_scanning(True)
         self.status_var.set("Сбор оборотного листа из документов консультаций…")
         self._start_background_job(
-            lambda: scan_reverse_sheet(folder),
+            lambda: scan_reverse_sheet(folder, scan_session=getattr(self,"_scan_session",None)),
             self._finish_reverse_sheet_scan,
             thread_name="mdrk-reverse-sheet-scan",
         )
@@ -1213,11 +1512,20 @@ class MdrkBuilderApp:
         self.status_var.set(
             f"Оборотный лист: найдено строк — {len(draft.rows)}, требует проверки — {len(draft.issues)}"
         )
+        from mdrk_builder.application.shared_edits import transfer_identity
+        state = self._capture_manual_state()
+        if state:
+            transfer_identity(state['episode'], draft, self._dirty_entry_fields)
+        if self.discharge_workspace.draft:
+            transfer_identity(self.discharge_workspace.draft, draft, self.discharge_workspace._dirty_identity)
         if self.reverse_draft is None:
             self.reverse_workspace.load(draft)
-        else:
-            self.reverse_workspace.merge_scan(draft)
+        elif self.reverse_workspace.merge_scan(draft) is False:
+            self.status_var.set("Результат сканирования не применён. Исправьте поля оборотного листа и повторите сканирование.")
+            return
         self.reverse_draft = self.reverse_workspace.draft
+        if getattr(self.reverse_workspace, "_last_change_summary", ""):
+            self.status_var.set(self.status_var.get() + ". " + self.reverse_workspace._last_change_summary)
         self._update_action_states()
 
     def _start_discharge_summary_scan(self) -> None:
@@ -1227,11 +1535,23 @@ class MdrkBuilderApp:
         if folder is None:
             return
 
+        overrides = {}
+        if getattr(self, "episode", None) is not None and "admission" in self._dirty_entry_fields:
+            overrides["admission_datetime_override"] = self.episode.admission_datetime
+        panel = self.discharge_workspace
+        if panel.draft is not None and panel.draft.folder.resolve() == folder.resolve():
+            if not panel.apply():
+                return
+            for control, field in (("admission", "admission_datetime"), ("discharge", "discharge_datetime")):
+                if control in panel._dirty_identity or field in panel.draft.manual_fields:
+                    overrides[field + "_override"] = getattr(panel.draft, field)
+        if hasattr(self, "_scan_session"):
+            self._scan_session.begin(folder)
         self._active_job_folder = folder
         self._set_scanning(True)
         self.status_var.set("Сбор выписного эпикриза из документов эпизода…")
         self._start_background_job(
-            lambda: scan_discharge_summary(folder),
+            lambda: scan_discharge_summary(folder, scan_session=getattr(self,"_scan_session",None), **overrides),
             self._finish_discharge_summary_scan,
             thread_name="mdrk-discharge-summary-scan",
         )
@@ -1252,6 +1572,10 @@ class MdrkBuilderApp:
         if draft is None or scan_folder is None or not self._folder_field_matches(scan_folder):
             self.status_var.set("Результат выписного эпикриза отброшен: папка изменилась.")
             return
+        from mdrk_builder.application.shared_edits import transfer_episode_edits
+        state = self._capture_manual_state()
+        if state:
+            transfer_episode_edits(state["episode"], getattr(self, "_scan_baseline", None), draft, self._dirty_entry_fields)
         blockers = len(
             [issue for issue in draft.issues if issue.severity is ReviewSeverity.BLOCKING]
         )
@@ -1264,9 +1588,12 @@ class MdrkBuilderApp:
         )
         if self.discharge_draft is None:
             self.discharge_workspace.load(draft)
-        else:
-            self.discharge_workspace.merge_scan(draft)
+        elif self.discharge_workspace.merge_scan(draft) is False:
+            self.status_var.set("Результат сканирования не применён. Исправьте поля выписки и повторите сканирование.")
+            return
         self.discharge_draft = self.discharge_workspace.draft
+        if getattr(self.discharge_workspace, "_last_change_summary", ""):
+            self.status_var.set(self.status_var.get() + ". " + self.discharge_workspace._last_change_summary)
         self._update_action_states()
 
     def _auxiliary_scan_folder(self) -> Path | None:
@@ -1293,8 +1620,15 @@ class MdrkBuilderApp:
             self._background_jobs = runner
         runner.start(operation, on_finished, thread_name=thread_name)
 
+    def _cancel_scan(self):
+        if self._scanning:
+            self._scan_session.cancelled.set()
+            self.status_var.set("Отмена после завершения текущего файла…")
+
     def _set_scanning(self, value: bool) -> None:
         self._scanning = value
+        if hasattr(self, "cancel_button"):
+            self.cancel_button.configure(state="normal" if value else "disabled")
         self._update_action_states()
         if value:
             self.progress.grid()
@@ -1344,6 +1678,7 @@ class MdrkBuilderApp:
             for key, widget in self._text_fields.items():
                 widget.delete("1.0", "end")
                 widget.insert("1.0", getattr(current_sections, key))
+                widget.edit_reset()
             self._update_field_sources()
             self._refresh_all_trees()
         finally:
@@ -1383,6 +1718,11 @@ class MdrkBuilderApp:
                 "record_number": "identity.medical_record_number",
                 "birth_date": "identity.birth_date",
                 "sex": "identity.sex",
+                'admission': 'admission_datetime',
+                'meeting': 'meeting_at',
+                'department': 'department',
+                'stage': 'stage',
+                'duration': 'course_duration_days',
             }.get(key)
             if source_key:
                 self.episode.field_sources.pop(source_key, None)
@@ -1404,12 +1744,16 @@ class MdrkBuilderApp:
                 form = self._parsed_form_data()
             except ValueError as exc:
                 self.kind_var.set(self._current_kind.value)
+                if hasattr(self, "document_var"):
+                    self.document_var.set("mdrk1" if self._current_kind is MdrkKind.INITIAL else "mdrk2")
                 self._last_form_error = str(exc)
                 self.status_var.set("Снимок не переключён: исправьте поля.")
                 messagebox.showerror("Снимок не переключён", str(exc))
                 return
             if form.meeting_at != self.episode.meeting_at(self._current_kind):
                 self.kind_var.set(self._current_kind.value)
+                if hasattr(self, "document_var"):
+                    self.document_var.set("mdrk1" if self._current_kind is MdrkKind.INITIAL else "mdrk2")
                 self._last_form_error = MEETING_RESCAN_MESSAGE
                 self.status_var.set(
                     "Снимок не переключён: нужно повторное сканирование."
@@ -1470,41 +1814,46 @@ class MdrkBuilderApp:
         )
         if not output:
             return
-        try:
-            created = write_mdrk_docx(
-                self.episode,
-                kind,
-                Path(output),
-                ignore_issues=bool(review_issues),
-            )
-        except Exception as exc:
-            messagebox.showerror("Не удалось создать DOCX", str(exc))
-            self.status_var.set("Ошибка генерации DOCX")
-            return
-        self.status_var.set(f"DOCX создан: {created}")
-        messagebox.showinfo("Готово", f"Документ создан:\n{created}\n\nПроверьте его перед использованием.")
+        from functools import partial
+        operation = partial(write_mdrk_docx, deepcopy(self.episode), kind, Path(output), ignore_issues=bool(review_issues))
+        self._start_save_job(operation)
 
-    def _save_auxiliary_document(self, save: Callable[[], Path | None]) -> None:
-        try:
-            created = save()
-        except Exception as exc:
-            messagebox.showerror("Не удалось создать DOCX", str(exc), parent=self.root)
-            self.status_var.set("Ошибка создания DOCX")
+    def _start_save_job(self, operation):
+        self._set_scanning(True)
+        self.cancel_button.configure(state="disabled")
+        self.status_var.set("Сохранение DOCX…")
+        self._start_background_job(operation,self._finish_save,thread_name="mdrk-save")
+
+    def _finish_save(self, created, error):
+        self._set_scanning(False)
+        if error is not None:
+            messagebox.showerror("Не удалось создать DOCX",str(error),parent=self.root)
+            self.status_var.set("Документ не сохранён; правки остаются в программе")
             return
-        if created is None:
-            return
+        if created is None:return
+        self._save_workspace()
         self.status_var.set(f"DOCX создан: {created}")
-        messagebox.showinfo(
-            "Готово",
-            f"Документ создан:\n{created}\n\nПроверьте его перед использованием.",
-            parent=self.root,
-        )
+        window=tk.Toplevel(self.root);window.title("Документ сохранён")
+        ttk.Label(window,text=str(created),wraplength=650,padding=12).pack()
+        bar=ttk.Frame(window,padding=8);bar.pack(fill="x")
+        ttk.Button(bar,text="Открыть документ",command=lambda:self._open_path(created)).pack(side="left",padx=4)
+        ttk.Button(bar,text="Показать в папке",command=lambda:self._open_path(created.parent)).pack(side="left",padx=4)
+        ttk.Button(bar,text="Закрыть",command=window.destroy).pack(side="right",padx=4)
+
+    def _save_auxiliary_document(self, save):
+        if self._scanning:return
+        try:
+            operation=save(defer=True)
+        except Exception as exc:
+            messagebox.showerror("Не удалось подготовить DOCX",str(exc),parent=self.root)
+            return
+        if operation is not None:self._start_save_job(operation)
 
     def _default_output_name(self, kind: MdrkKind) -> str:
         patient = self.episode.identity.full_name if self.episode else "пациент"
-        safe_patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", patient).strip("_") or "пациент"
+        safe_patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё-]+", " ", patient).strip() or "пациент"
         number = "1" if kind is MdrkKind.INITIAL else "2"
-        return f"МДРК_{number}_{safe_patient}.docx"
+        return f"МДРК {number} {safe_patient}.docx"
 
     def _refresh_all_trees(self) -> None:
         self._refresh_sources()
@@ -1550,17 +1899,19 @@ class MdrkBuilderApp:
         if not self.episode:
             return
         visible_domains = build_snapshot(self.episode, self._current_kind).icf_domains
-        visible_keys = {
-            (domain.key, domain.initial_source)
-            for domain in visible_domains
-        }
+        visible_by_key = {}
+        for domain in visible_domains:
+            visible_by_key.setdefault(domain.key, []).append(domain)
+        visible_rows = []
+        for index, domain in enumerate(self.episode.icf_domains):
+            if visible_by_key.get(domain.key):
+                visible_rows.append((index, visible_by_key[domain.key].pop(0)))
         if grouped_ui:
             grouped: dict[IcfSection, list[tuple[int, IcfDomain]]] = {
                 section: [] for section in IcfSection
             }
-            for index, domain in enumerate(self.episode.icf_domains):
-                if (domain.key, domain.initial_source) in visible_keys:
-                    grouped[domain.section].append((index, domain))
+            for index, domain in visible_rows:
+                grouped[domain.section].append((index, domain))
             for section in IcfSection:
                 section_id = f"section:{section.value}"
                 self.icf_tree.insert(
@@ -1616,9 +1967,7 @@ class MdrkBuilderApp:
                 values=("＋ Новая строка МКФ…", "", "", "", "", "", "", "", "", "", ""),
             )
             return
-        for index, domain in enumerate(self.episode.icf_domains):
-            if (domain.key, domain.initial_source) not in visible_keys:
-                continue
+        for index, domain in visible_rows:
             self.icf_tree.insert(
                 "",
                 "end",
@@ -1686,7 +2035,11 @@ class MdrkBuilderApp:
         self._clear_tree(self.procedure_tree)
         if not self.episode:
             return
-        for index, procedure in enumerate(self.episode.procedures):
+        from mdrk_builder.application.procedures import select_procedures
+        kind = self._selected_kind()
+        self.procedure_tree.heading("count", text="Назначено" if kind is MdrkKind.INITIAL else "Выполнено")
+        projected = select_procedures(self.episode.procedures, self.episode.admission_datetime, self.episode.meeting_at(kind), kind)
+        for index, procedure in enumerate(projected):
             self.procedure_tree.insert(
                 "",
                 "end",
@@ -1943,6 +2296,7 @@ class MdrkBuilderApp:
         if not self.episode or not item_id.isdigit():
             return
         domain = self.episode.icf_domains[int(item_id)]
+        previous = deepcopy(domain)
         cleaned = value.strip()
         if column == "code":
             domain.code = cleaned
@@ -1962,6 +2316,7 @@ class MdrkBuilderApp:
             else:
                 domain.specialist = SpecialistRole.OTHER
                 domain.note = cleaned
+        mark_manual_changes(previous, domain)
         self._mark_collection_dirty("icf")
         self._refresh_icf()
         self._refresh_issues()
@@ -1991,6 +2346,7 @@ class MdrkBuilderApp:
             return
         if str(column_name) in {"q0", "q1", "q2", "q3", "q4"} and self.episode:
             self.episode.icf_domains[int(target_id)].initial = parse_qualifier(str(column_name)[1:])
+            self.episode.icf_domains[int(target_id)].manual_fields.add("initial")
             self._mark_collection_dirty("icf")
             self._refresh_icf()
             self._refresh_issues()
@@ -2006,12 +2362,15 @@ class MdrkBuilderApp:
             section = self.episode.icf_domains[target_index].section
         else:
             return
+        previous_section = self.episode.icf_domains[source_index].section
         new_index = move_icf_domain(
             self.episode.icf_domains,
             source_index,
             section,
             before_index=target_index,
         )
+        if previous_section != section:
+            self.episode.icf_domains[new_index].manual_fields.add("section_override")
         self._mark_collection_dirty("icf")
         self._refresh_icf()
         self.icf_tree.selection_set(str(new_index))
@@ -2033,6 +2392,7 @@ class MdrkBuilderApp:
         if not self.episode or not item_id.isdigit():
             return
         procedure = self.episode.procedures[int(item_id)]
+        previous = deepcopy(procedure)
         cleaned = value.strip()
         if column == "code":
             procedure.code = cleaned
@@ -2045,11 +2405,18 @@ class MdrkBuilderApp:
                 raise ValueError("Введите неотрицательное целое число")
             parsed = int(cleaned) if cleaned else None
             if column == "count":
-                procedure.actual_count = parsed
+                if self._selected_kind() is MdrkKind.INITIAL:
+                    procedure.planned_count = parsed
+                else:
+                    procedure.actual_count = parsed
             else:
                 procedure.duration_minutes = parsed
         elif column == "frequency":
-            procedure.frequency = cleaned
+            if self._selected_kind() is MdrkKind.INITIAL:
+                procedure.planned_frequency = cleaned
+            else:
+                procedure.frequency = cleaned
+        mark_manual_changes(previous, procedure)
         self._mark_collection_dirty("procedures")
         self._refresh_procedures()
         self._refresh_issues()
@@ -2071,10 +2438,12 @@ class MdrkBuilderApp:
         self._clear_tree(self.scale_tree)
         self._scale_pair_refs = {}
         finding = self._selected_specialist_finding()
+        self._displayed_specialist_finding = finding
         if finding is None or not self.episode:
             self.specialist_header_var.set("")
             self._loading_specialist = True
             self.specialist_conclusion.delete("1.0", "end")
+            self.specialist_conclusion.edit_reset()
             self._loading_specialist = False
             self.specialist_source_button.configure(state="disabled")
             self.conclusion_source_button.configure(state="disabled")
@@ -2088,6 +2457,7 @@ class MdrkBuilderApp:
         self._loading_specialist = True
         self.specialist_conclusion.delete("1.0", "end")
         self.specialist_conclusion.insert("1.0", finding.conclusion)
+        self.specialist_conclusion.edit_reset()
         self._loading_specialist = False
         rows = [
             row
@@ -2144,6 +2514,21 @@ class MdrkBuilderApp:
             self.root.after(1, lambda: self._scale_editor.edit(blank_item, "name"))
         return True
 
+    def _live_scale_measurements(self, displayed):
+        return [measurement for finding in self.episode.findings for measurement in finding.scales
+                if measurement is displayed or (
+                    measurement.source == displayed.source
+                    and measurement.specialist == displayed.specialist
+                    and measurement.name == displayed.name
+                    and measurement.value == displayed.value
+                    and (measurement.measured_at or finding.source_datetime) == displayed.measured_at)]
+
+    def _edit_scale_measurement(self, displayed, field: str, value: str) -> None:
+        for measurement in self._live_scale_measurements(displayed):
+            if getattr(measurement, field) != value:
+                setattr(measurement, field, value)
+                measurement.manual_fields.add(field)
+
     def _commit_scale_cell(self, item_id: str, column: str, value: str) -> None:
         if not self.episode or item_id not in self._scale_pair_refs:
             return
@@ -2156,12 +2541,12 @@ class MdrkBuilderApp:
             if not cleaned:
                 raise ValueError("Введите название шкалы")
             if row.initial:
-                row.initial.name = cleaned
+                self._edit_scale_measurement(row.initial, "name", cleaned)
             if row.current and row.current is not row.initial:
-                row.current.name = cleaned
+                self._edit_scale_measurement(row.current, "name", cleaned)
         elif column == "initial":
             if row.initial:
-                row.initial.value = cleaned
+                self._edit_scale_measurement(row.initial, "value", cleaned)
             else:
                 finding.scales.append(
                     ScaleMeasurement(row.name, cleaned, self.episode.initial_meeting_at, finding.role)
@@ -2170,7 +2555,7 @@ class MdrkBuilderApp:
             if self._current_kind is not MdrkKind.FINAL:
                 return
             if row.current and row.current is not row.initial:
-                row.current.value = cleaned
+                self._edit_scale_measurement(row.current, "value", cleaned)
             else:
                 finding.scales.append(
                     ScaleMeasurement(row.name, cleaned, self.episode.final_meeting_at, finding.role)
@@ -2182,12 +2567,15 @@ class MdrkBuilderApp:
     def _commit_specialist_conclusion(self, _event: tk.Event | None = None) -> None:
         if self._loading_specialist:
             return
-        finding = self._selected_specialist_finding()
-        if finding is None:
+        finding = getattr(self, "_displayed_specialist_finding", None)
+        if finding is None or self.episode is None or not any(
+            current is finding for current in self.episode.findings
+        ):
             return
         value = self.specialist_conclusion.get("1.0", "end-1c")
         if value != finding.conclusion:
             finding.conclusion = value
+            finding.manual_fields.add("conclusion")
             self._mark_collection_dirty("findings")
             self._refresh_issues()
 
@@ -2233,7 +2621,7 @@ class MdrkBuilderApp:
     def _add_procedure(self) -> None:
         if not self.episode:
             return
-        dialog = ProcedureDialog(self.root)
+        dialog = ProcedureDialog(self.root, planned=self._selected_kind() is MdrkKind.INITIAL)
         if dialog.result:
             self.episode.procedures.append(dialog.result)
             self._mark_collection_dirty("procedures")
@@ -2281,11 +2669,12 @@ class MdrkBuilderApp:
             measurements = {
                 id(measurement)
                 for item_id in selected
-                for measurement in (
+                for displayed in (
                     getattr(self._scale_pair_refs[item_id], "initial", None),
                     getattr(self._scale_pair_refs[item_id], "current", None),
                 )
-                if measurement is not None
+                if displayed is not None
+                for measurement in self._live_scale_measurements(displayed)
             }
             if not measurements:
                 return
@@ -2334,7 +2723,7 @@ class MdrkBuilderApp:
     def _edit_procedure(self) -> None:
         if not self.episode or (index := self._selected_index(self.procedure_tree)) is None:
             return
-        dialog = ProcedureDialog(self.root, self.episode.procedures[index])
+        dialog = ProcedureDialog(self.root, self.episode.procedures[index], planned=self._selected_kind() is MdrkKind.INITIAL)
         if dialog.result:
             self.episode.procedures[index] = dialog.result
             self._mark_collection_dirty("procedures")
@@ -2450,7 +2839,8 @@ class MdrkBuilderApp:
                 "Дождитесь завершения сканирования: сейчас закрытие может оставить Microsoft Word открытым.",
             )
             return
-        self.root.destroy()
+        if self._confirm_leave():
+            self.root.destroy()
 
 
 def _generate_smoke_document(directory: Path) -> Path:

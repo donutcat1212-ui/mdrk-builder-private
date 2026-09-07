@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import re
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -14,6 +15,7 @@ from mdrk_builder.domain import (
     DischargeScaleRow,
     DischargeSummaryDraft,
     ReviewIssue,
+    SpecialistRole,
 )
 from mdrk_builder.infrastructure.clinical_tables import (
     render_completed_program,
@@ -64,6 +66,8 @@ def write_discharge_summary_docx(
     template_path: Path | None = None,
     ignore_issues: bool = False,
 ) -> Path:
+    if draft.requires_period_rescan():
+        raise ValueError("Даты госпитализации изменены. Повторно считайте документы выписки для пересчёта данных.")
     blocking = list(draft.blocking_issues())
     if blocking and not ignore_issues:
         raise DischargeSummaryGenerationBlockedError(blocking)
@@ -110,17 +114,38 @@ class _DischargeSummaryRenderer:
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = title.add_run("ВЫПИСНОЙ ЭПИКРИЗ")
         run.bold = True
-        self._multiline(self.draft.header_text)
+        defaults = (
+            (r"^Поступил\s*:", r"в стационар\s*[-–—]\s*1"),
+            (r"^Период нахождения", r"в стационаре"),
+            (r"^Исход госпитализации", r"выписан\s*[-–—]\s*1"),
+            (r"^Результат госпитализации", r"улучшение\s*[-–—]\s*2"),
+            (r"^Форма оказания медицинской помощи", r"плановая\s*[-–—]\s*1"),
+        )
+        for line in self.draft.header_text.splitlines():
+            paragraph = self.document.add_paragraph(style=STYLE_BODY)
+            pattern = next((value for heading, value in defaults if re.match(heading, line.strip(), re.I)), None)
+            match = re.search(pattern, line, re.I) if pattern else None
+            if match:
+                paragraph.add_run(line[:match.start()])
+                paragraph.add_run(match.group()).bold = True
+                paragraph.add_run(line[match.end():])
+            else:
+                paragraph.add_run(line)
 
     def _diagnoses(self) -> None:
         self._section("Заключительный клинический диагноз")
         self._multiline(self.draft.clinical_diagnosis)
-        self._section("Реабилитационный диагноз")
+        self._section("Реабилитационный диагноз (в категориях МКФ)")
         if self.draft.icf_domains:
             render_final_icf_profile(
                 self.document,
                 self.draft.icf_domains,
                 repeat_missing_final=False,
+                assessment_labels=(
+                    "Перв.\n" + (self.draft.initial_assessment_datetime.strftime("%d.%m.\n%Y") if self.draft.initial_assessment_datetime else ""),
+                    "Вып.\n" + (self.draft.discharge_datetime.strftime("%d.%m.\n%Y") if self.draft.discharge_datetime else ""),
+                ),
+                shade_latest=True,
             )
         else:
             self._multiline("")
@@ -138,21 +163,44 @@ class _DischargeSummaryRenderer:
         self._labeled("Неврологический статус", self.draft.neurological_status)
         self._labeled("Локальный статус", self.draft.local_status)
         self._section("Шкалы при поступлении")
-        self._scale_table(self.draft.admission_scale_rows)
+        self._scale_table(tuple(row for row in self.draft.admission_scale_rows
+                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}))
 
     def _team_results(self) -> None:
         self._section("Проведенные обследования, лечение, медицинская реабилитация")
         for finding in self.draft.team_findings:
-            self._labeled(
-                f"Заключение: {finding.role.display_name}",
-                finding.conclusion,
-            )
-        self._labeled("Консультации узких специалистов", self.draft.other_consultations)
+            if finding.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST} and not finding.conclusion.strip():
+                continue
+            heading = " ".join(part for part in (finding.role.display_name, finding.specialist_name) if part)
+            if finding.occurred_at:
+                heading += " от " + finding.occurred_at.strftime("%d.%m.%Y")
+            self._section(heading)
+            if finding.scales:
+                self._specialist_scale_table(finding.scales)
+            self._labeled("Заключение", finding.conclusion)
+
+    def _specialist_scale_table(self, rows: Sequence[DischargeScaleRow]) -> None:
+        table = self.document.add_table(rows=1, cols=3)
+        configure_table(table, (5345, 2000, 2000))
+        for cell, value in zip(table.rows[0].cells, ("Шкала/опросник", "Первичное", "Повторное")):
+            set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+        mark_header_row(table.rows[0])
+        for row in rows:
+            initial = row.initial_value
+            current = row.value
+            if row.initial_at:
+                initial = row.initial_at.strftime("%d.%m.%Y") + "\n" + initial
+            if row.current_at:
+                current = row.current_at.strftime("%d.%m.%Y") + "\n" + current
+            for cell, value in zip(table.add_row().cells, (row.name, initial, current)):
+                set_cell_text(cell, value, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
 
     def _medical_results(self) -> None:
         self._section("Результаты медицинского обследования")
         self._labeled("Лабораторные исследования", self.draft.laboratory_results)
         self._labeled("Инструментальные исследования", self.draft.instrumental_results)
+        if self.draft.other_consultations.strip():
+            self._multiline(self.draft.other_consultations)
 
     def _treatment(self) -> None:
         self._manual_block(
@@ -161,7 +209,6 @@ class _DischargeSummaryRenderer:
             self.draft.medications,
             blank_lines=3,
         )
-        self._labeled("Двигательный режим", self.draft.movement_regimen)
         self._labeled("Диета", self.draft.diet)
         self._manual_block(
             "Трансфузии (переливания) донорской крови и (или) ее компонентов",
@@ -175,12 +222,14 @@ class _DischargeSummaryRenderer:
         )
         self._section("Медицинские вмешательства")
         self._labeled("Проведенная программа медицинской реабилитации", "")
+        self._labeled("Двигательный режим", self.draft.movement_regimen)
         render_completed_program(self.document, self.draft.completed_procedures)
         self._labeled("Дополнительные сведения", self.draft.additional_information)
 
     def _discharge_state(self) -> None:
         self._section("Шкалы при выписке")
-        self._scale_table(self.draft.discharge_scale_rows)
+        self._scale_table(tuple(row for row in self.draft.discharge_scale_rows
+                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}))
         self._section("Состояние при выписке")
         self._multiline(self.draft.discharge_condition)
         self._manual_block(

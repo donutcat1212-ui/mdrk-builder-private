@@ -13,9 +13,10 @@ from mdrk_builder.application.extractors import (
     parse_first_datetime,
 )
 from mdrk_builder.application.episode_source_facts import (
-    is_admission_department_document,
+    is_admission_department_document, episode_facts_from_document,
 )
 from mdrk_builder.application.source_scan import scan_source_documents
+from mdrk_builder.application.episode_identity import EpisodeCompatibility
 from mdrk_builder.domain import (
     ReverseSheetDraft,
     ReverseSheetRow,
@@ -184,10 +185,11 @@ def scan_reverse_sheet(
     folder: Path,
     *,
     normalizer: DocumentNormalizer | None = None,
+    scan_session=None,
 ) -> ReverseSheetDraft:
     folder = folder.resolve()
     draft = ReverseSheetDraft(folder=folder)
-    source_scan = scan_source_documents(folder, normalizer=normalizer)
+    source_scan = scan_source_documents(folder, normalizer=normalizer, session=scan_session)
     parsed = [
         (item.document, item.classification) for item in source_scan.documents
     ]
@@ -241,6 +243,22 @@ def scan_reverse_sheet(
         )
     )
     header = header_candidates[0] if header_candidates else None
+    if header is not None:
+        episode_key = episode_facts_from_document(source_scan, header[0]).episode_key
+        retained = []
+        for document, classification in parsed:
+            candidate = episode_facts_from_document(source_scan, document).episode_key
+            if episode_key.match(candidate).compatibility is EpisodeCompatibility.CONFLICT:
+                draft.issues.append(ReviewIssue(
+                    "reverse_source_episode_conflict", "Источник другого пациента или госпитализации исключён.",
+                    ReviewSeverity.WARNING, "sources", document.source_path))
+                continue
+            retained.append((document, classification))
+        parsed = retained
+        retained_paths = {document.source_path for document, _ in parsed}
+        primary = next((item for item in clinician_candidates if item[0].source_path in retained_paths), None)
+        existing_mdrk_rows = [row for row in existing_mdrk_rows if row.source in retained_paths]
+    draft.source_paths = tuple(source_scan.source_files)
     planned: dict[str, date] = {}
     primary_performer = ""
     primary_clinical_date: date | None = None
@@ -278,6 +296,8 @@ def scan_reverse_sheet(
     else:
         header_document, header_classification = header
         draft.header_source = header_document.source_path
+        draft.field_sources = {name: header_document.source_path for name in
+                               ("full_name", "birth_date", "record_number", "admission")}
         draft.identity = extract_patient_identity(header_document)
         draft.admission_datetime = extract_admission_datetime(header_document)
         if header_classification.role not in _PRIMARY_CLINICIAN_PRIORITY:
@@ -342,6 +362,15 @@ def scan_reverse_sheet(
                     document.source_path,
                 )
             )
+            row = rows[-1]
+            date_source = (existing.source if existing is not None and extract_mdrk_document_datetime(document) is None
+                           else document.source_path)
+            if row.performed_at is not None:
+                row.field_sources["performed_at"] = date_source
+            if row.appointment_date is not None:
+                row.field_sources["appointment_date"] = date_source if performed_at is not None else (existing.source if existing else primary_document.source_path)
+            if row.performer:
+                row.field_sources["performer"] = primary_document.source_path if primary_performer else existing.source
             continue
         if classification.document_type in {
             "administrative",
@@ -375,6 +404,15 @@ def scan_reverse_sheet(
                 document.source_path,
             )
         )
+
+        row = rows[-1]
+        if row.appointment_date is not None:
+            row.field_sources["appointment_date"] = (document.source_path if is_repeat and performed_at is not None
+                                                     else primary_document.source_path)
+        if row.performed_at is not None:
+            row.field_sources["performed_at"] = document.source_path
+        if row.performer:
+            row.field_sources["performer"] = document.source_path
 
     deduplicated: dict[tuple[str, datetime | None, str], ReverseSheetRow] = {}
     for row in rows:

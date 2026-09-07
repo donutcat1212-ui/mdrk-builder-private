@@ -106,6 +106,16 @@ class WindowsWordConverter:
         destination.parent.mkdir(parents=True, exist_ok=True)
         word = self._start()
         document = None
+        timer = None
+        timed_out = threading.Event()
+        if self._word_pid is not None:
+            conversion_pid = self._word_pid
+            def timeout():
+                timed_out.set()
+                self._force_kill_word_process(conversion_pid)
+            timer = threading.Timer(90.0, timeout)
+            timer.daemon = True
+            timer.start()
         try:
             document = word.Documents.Open(
                 str(source.resolve()),
@@ -124,13 +134,17 @@ class WindowsWordConverter:
         except Exception as exc:
             raise ConversionError(f"Word не смог преобразовать {source.name}: {exc}") from exc
         finally:
-            if document is not None:
+            if document is not None and not timed_out.is_set():
                 try:
                     document.Close(SaveChanges=self.WD_DO_NOT_SAVE_CHANGES)
                 except Exception:
                     # SaveAs2 is the meaningful operation. A COM cleanup error
                     # must not mask a successfully written output document.
                     pass
+            if timer is not None:
+                timer.cancel()
+            if timed_out.is_set():
+                self._word = None
         if not destination.is_file() or destination.stat().st_size == 0:
             raise ConversionError(f"Word не создал DOCX для {source.name}")
         return destination

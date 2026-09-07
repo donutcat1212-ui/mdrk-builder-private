@@ -58,10 +58,17 @@ def test_release_gate_rejects_patient_source_format(tmp_path) -> None:
     assert any("patient/source формат" in finding.reason for finding in findings)
 
 
-def test_release_gate_allows_mutable_internal_feedback_file(tmp_path) -> None:
+def test_release_gate_rejects_populated_feedback_in_new_delivery(tmp_path) -> None:
     candidate = tmp_path / "MDRK_Builder_1.0.0_Internal"
     candidate.mkdir()
     feedback = "ФИО пациента: АЛЬФА БЕТА ГАММА"
     (candidate / "issues.txt").write_text(feedback, encoding="utf-8")
 
+    assert any("журнал обратной связи" in finding.reason for finding in audit_release_candidate(candidate))
+
+
+def test_release_gate_allows_empty_feedback(tmp_path):
+    candidate = tmp_path / "delivery"
+    candidate.mkdir()
+    (candidate / "issues.txt").write_bytes(b"\xef\xbb\xbf")
     assert audit_release_candidate(candidate) == []

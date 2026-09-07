@@ -7,6 +7,7 @@ from docx import Document
 from mdrk_builder.domain import (
     DischargeScaleRow,
     DischargeSummaryDraft,
+    DischargeTeamFinding,
     IcfDomain,
     IcfQualifier,
     PatientIdentity,
@@ -85,14 +86,14 @@ def test_writer_composes_shared_clinical_tables(tmp_path) -> None:
     )
     draft.admission_scale_rows = (
         DischargeScaleRow(
-            SpecialistRole.PHYSICAL_THERAPIST,
+            SpecialistRole.NEUROLOGIST,
             "Индекс мобильности Ривермид",
             "6",
         ),
     )
     draft.discharge_scale_rows = (
         DischargeScaleRow(
-            SpecialistRole.PHYSICAL_THERAPIST,
+            SpecialistRole.NEUROLOGIST,
             "Индекс мобильности Ривермид",
             "9",
         ),
@@ -173,3 +174,36 @@ def test_writer_requires_explicit_override_for_blocking_issue(
         tmp_path / f"overridden-{acknowledged}.docx",
         ignore_issues=True,
     ).is_file()
+
+
+def test_specialist_scales_render_once_in_own_block(tmp_path):
+    draft = _draft(tmp_path)
+    row = DischargeScaleRow(
+        SpecialistRole.PHYSICAL_THERAPIST, "Шкала баланса Берга",
+        "50", initial_value="44",
+    )
+    draft.admission_scale_rows = (row,)
+    draft.discharge_scale_rows = (row,)
+    draft.team_findings = (DischargeTeamFinding(
+        SpecialistRole.PHYSICAL_THERAPIST, "", scales=(row,),
+    ),)
+    output = tmp_path / "Шкалы.docx"
+    write_discharge_summary_docx(draft, output)
+    document = Document(output)
+    matched = [
+        table_row for table in document.tables for table_row in table.rows
+        if any(cell.text == row.name for cell in table_row.cells)
+    ]
+    assert len(matched) == 1
+    assert [cell.text for cell in matched[0].cells] == [row.name, "44", "50"]
+
+
+def test_writer_rejects_stale_period_even_with_issue_override(tmp_path):
+    from datetime import datetime
+    draft = _draft(tmp_path)
+    draft.admission_datetime = datetime(2026, 8, 10)
+    draft.discharge_datetime = datetime(2026, 8, 18)
+    draft.projection_period = (draft.admission_datetime, datetime(2026, 8, 17))
+    with pytest.raises(ValueError, match="Повторно считайте"):
+        write_discharge_summary_docx(draft, tmp_path / "stale.docx", ignore_issues=True)
+    assert not (tmp_path / "stale.docx").exists()

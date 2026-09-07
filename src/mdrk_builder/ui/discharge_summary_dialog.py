@@ -26,6 +26,7 @@ class DischargeTextField:
 
 
 DISCHARGE_FIELD_GROUPS: tuple[tuple[str, tuple[DischargeTextField, ...]], ...] = (
+    ("Шапка", (DischargeTextField("header_text", "Сведения о пациенте и госпитализации из МИС", 16),)),
     (
         "Диагноз",
         (
@@ -55,10 +56,10 @@ DISCHARGE_FIELD_GROUPS: tuple[tuple[str, tuple[DischargeTextField, ...]], ...] =
     (
         "Лечение",
         (
-            DischargeTextField("medications", "Лекарственные препараты — место для ручного заполнения", 4),
+            DischargeTextField("medications", "Лекарственные препараты", 4),
             DischargeTextField("movement_regimen", "Двигательный режим", 3),
             DischargeTextField("diet", "Диета", 3),
-            DischargeTextField("transfusions", "Трансфузии — место для ручного заполнения", 3),
+            DischargeTextField("transfusions", "Трансфузии", 3),
             DischargeTextField("operations", "Оперативные вмешательства", 3),
             DischargeTextField("additional_information", "Дополнительные сведения", 8),
         ),
@@ -112,7 +113,7 @@ def apply_discharge_form(
         if value == getattr(draft, field.name):
             continue
         setattr(draft, field.name, value)
-        draft.field_sources.pop(field.name, None)
+        draft.manual_fields.add(field.name)
 
 
 class DischargeSummaryDialog(tk.Toplevel):
@@ -147,8 +148,8 @@ class DischargeSummaryDialog(tk.Toplevel):
             shell,
             text=(
                 "Проверьте автоматически перенесённые данные. ФИО, номер карты и даты ниже "
-                "автоматически формируют шапку и колонтитул и не редактируются здесь; "
-                "текстовые блоки редактируются здесь. МКФ, шкалы и программа "
+                "перенесены из источника и не редактируются здесь; "
+                "шапка и остальные текстовые блоки доступны для правки. МКФ, шкалы и программа "
                 "переносятся структурно и окончательно проверяются в созданном DOCX."
             ),
             foreground="#555555",
@@ -387,10 +388,12 @@ class DischargeSummaryDialog(tk.Toplevel):
                 for name, widget in self._text_widgets.items()
             },
         )
+        from mdrk_builder.application.discharge_validation import current_discharge_issues
+        self.draft.issues = current_discharge_issues(self.draft)
         for name, label in self._source_labels.items():
-            if name not in self.draft.field_sources:
+            if name in self.draft.manual_fields:
                 label.configure(
-                    text="Изменено вручную — источник снят",
+                    text="Ручная правка; указан исходный документ",
                     foreground="#6A5A00",
                 )
         return True
@@ -412,14 +415,14 @@ class DischargeSummaryDialog(tk.Toplevel):
             return
 
         patient = re.sub(
-            r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", self.draft.identity.full_name
-        ).strip("_")
+            r"[^0-9A-Za-zА-Яа-яЁё-]+", " ", self.draft.identity.full_name
+        ).strip()
         output = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить выписной эпикриз",
             defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
-            initialfile=f"Выписной_эпикриз_{patient or 'пациент'}.docx",
+            initialfile=f"Выписной эпикриз {patient or 'пациент'}.docx",
         )
         if not output:
             return

@@ -160,7 +160,7 @@ def classify_document(document: ParsedDocument) -> DocumentClassification:
 
     assignment_table = any(
         table.rows
-        and table.rows[0].logical_cols >= 10
+        and table.rows[0].logical_cols >= 4
         and table.rows[0].cells
         and "назначения" in table.rows[0].cells[0].text.casefold()
         for table in document.tables

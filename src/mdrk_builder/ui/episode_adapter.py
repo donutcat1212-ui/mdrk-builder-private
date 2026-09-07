@@ -155,6 +155,7 @@ def apply_episode_form_data(
     episode.identity.medical_record_number = form.medical_record_number
     episode.identity.birth_date = form.birth_date
     episode.identity.sex = form.sex
+    previous_days = episode.course_duration_days
     episode.admission_datetime = form.admission_datetime
     if kind is MdrkKind.INITIAL:
         episode.initial_meeting_at = form.meeting_at
@@ -162,7 +163,12 @@ def apply_episode_form_data(
         episode.final_meeting_at = form.meeting_at
     episode.department = form.department
     episode.stage = form.stage
+    if form.course_duration_days != previous_days:
+        episode.course_duration_manual = True
     episode.course_duration_days = form.course_duration_days
+    if not episode.course_duration_manual:
+        from mdrk_builder.application.editing import hospitalization_days
+        episode.course_duration_days = hospitalization_days(episode.admission_datetime, episode.discharge_datetime or episode.final_meeting_at)
     target_sections = sections_for(episode, kind)
     for key, value in form.section_values:
         setattr(target_sections, key, value)

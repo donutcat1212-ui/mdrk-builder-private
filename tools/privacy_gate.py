@@ -327,8 +327,10 @@ def audit_release_candidate(candidate: Path) -> list[Finding]:
     for path in _candidate_files(candidate):
         shown = _relative(path, candidate.parent if candidate.is_file() else candidate)
         if path.name.casefold() == "issues.txt":
-            # The deployed pilot file is intentionally mutable and may contain
-            # contact details entered by clinicians. It is empty in a fresh package.
+            # A new delivery contains only an empty feedback file. Never inspect
+            # or reproduce the contents of a used clinical feedback log.
+            if path.stat().st_size > 3 or path.read_bytes() not in {b"", b"\xef\xbb\xbf"}:
+                findings.append(Finding(shown, "Заполненный журнал обратной связи запрещён в новом комплекте поставки"))
             continue
         if path.suffix.casefold() in PATIENT_SOURCE_SUFFIXES:
             findings.append(Finding(shown, "patient/source формат запрещён в комплекте поставки"))

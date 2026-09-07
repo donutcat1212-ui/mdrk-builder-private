@@ -18,6 +18,7 @@ from mdrk_builder.domain import Episode, MdrkKind, ReviewIssue, ReviewSeverity, 
 
 
 _RECOMPUTED_CODES = {
+    "scale_value_out_of_range", "procedure_dates_count_mismatch", "scale_source_conflict", "icf_source_conflict",
     "required_full_name",
     "required_record_number",
     "required_admission_datetime",
@@ -576,10 +577,12 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                     source=measurement.source,
                 )
             )
-    for index, procedure in enumerate(episode.procedures):
+    from mdrk_builder.application.procedures import select_procedures
+    procedures = select_procedures(episode.procedures, episode.admission_datetime, episode.meeting_at(kind), kind)
+    for index, procedure in enumerate(procedures):
         checks = (
             ("procedure_specialist_missing", procedure.specialist, "ответственный специалист"),
-            ("procedure_count_missing", procedure.actual_count, "фактическое количество"),
+            ("procedure_count_missing", procedure.actual_count, "назначенное количество" if kind is MdrkKind.INITIAL else "фактическое количество"),
             ("procedure_duration_missing", procedure.duration_minutes, "длительность"),
             ("procedure_frequency_missing", procedure.frequency, "кратность"),
         )
@@ -603,7 +606,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     daily_minutes: dict[date, int] = {}
     dates_with_unknown_duration: set[date] = set()
     source_by_date: dict[date, Path | None] = {}
-    for procedure in episode.procedures:
+    for procedure in procedures:
         for performed_date in procedure.performed_dates:
             if performed_date.weekday() >= 5:
                 continue
@@ -653,6 +656,15 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                 source=source_by_date.get(next(iter(dates_with_unknown_duration))),
             )
         )
+    from mdrk_builder.application.discharge_validation import scale_value_issue, procedure_issues
+    from mdrk_builder.application.conflicts import conflict_issues
+    issues.extend(procedure_issues(procedures))
+    issues.extend(conflict_issues(episode))
+    for finding in episode.findings:
+        for scale in finding.scales:
+            issue = scale_value_issue(scale.name, scale.value, 'scales', scale.source)
+            if issue:
+                issues.append(issue)
     return issues
 
 

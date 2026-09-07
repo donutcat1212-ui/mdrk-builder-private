@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from difflib import SequenceMatcher
 
+from mdrk_builder.application.procedures import select_procedures
 from mdrk_builder.application.clinical_text import is_empty_clinical_update
 from mdrk_builder.application.scale_registry import (
     canonical_scale_key,
@@ -14,6 +15,7 @@ from mdrk_builder.domain import (
     Episode,
     IcfDomain,
     MdrkKind,
+    Procedure,
     ScaleMeasurement,
     SpecialistFinding,
     SpecialistRole,
@@ -43,6 +45,7 @@ class Snapshot:
     icf_domains: tuple[IcfDomain, ...]
     goal: str
     tasks: str
+    procedures: tuple[Procedure, ...] = ()
 
 
 def _dated_not_after(value: datetime | None, boundary: datetime | None) -> bool:
@@ -76,6 +79,8 @@ def _latest_finding(
 def select_findings(episode: Episode, boundary: datetime | None) -> tuple[SpecialistFinding, ...]:
     by_role: dict[SpecialistRole, list[SpecialistFinding]] = {}
     for finding in episode.findings:
+        if episode.admission_datetime and finding.source_datetime and finding.source_datetime.date() < episode.admission_datetime.date():
+            continue
         by_role.setdefault(finding.role, []).append(finding)
     selected = [
         item
@@ -145,6 +150,9 @@ class _ScaleCandidate:
 def _prefer_scale_candidate(values: list[_ScaleCandidate]) -> _ScaleCandidate:
     """Resolve exact copied facts while retaining deterministic provenance."""
 
+    manual = [item for item in values if item.measurement.manual_fields]
+    if manual:
+        values = manual
     distinct_values = {
         _normalized_scale_value(item.measurement.value) for item in values
     }
@@ -205,6 +213,8 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
                 and measurement_at > boundary
             ):
                 continue
+            if measurement_at is not None and episode.admission_datetime is not None and measurement_at.date() < episode.admission_datetime.date():
+                continue
             key = _matching_scale_key(
                 normalized_measurement.specialist,
                 canonical_scale_name(normalized_measurement.name),
@@ -219,8 +229,13 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         points = _scale_points(candidates)
         if not points:
             continue
-        initial = points[0]
-        current = points[-1] if kind is MdrkKind.FINAL and len(points) > 1 else None
+        initial_boundary = episode.initial_meeting_at
+        baseline = [point for point in points if initial_boundary is None or (
+            point.measured_at is not None and point.measured_at <= initial_boundary)]
+        initial = baseline[0] if baseline else None
+        current = points[-1] if kind is MdrkKind.FINAL and points[-1] is not initial else None
+        if initial is None and current is None:
+            continue
         sample = current or initial
         rows.append(ScaleRow(role, sample.name, initial, current))
     physician_order = (
@@ -279,6 +294,21 @@ def select_icf_domains(episode: Episode, kind: MdrkKind) -> tuple[IcfDomain, ...
     boundary = episode.meeting_at(kind)
     selected: list[IcfDomain] = []
     for domain in episode.icf_domains:
+        initial_at = _icf_initial_datetime(episode, domain)
+        final_at = _icf_final_datetime(episode, domain)
+        changes = {}
+        for phase, stamp in (("initial", initial_at), ("final", final_at)):
+            if stamp is not None and episode.admission_datetime is not None and stamp.date() < episode.admission_datetime.date():
+                changes.update({phase: None, phase + "_source": None, phase + "_measured_at": None})
+        domain = replace(domain, **changes)
+        initial_at = _icf_initial_datetime(episode, domain)
+        if domain.initial is not None and episode.initial_meeting_at is not None and (
+            initial_at is not None and initial_at > episode.initial_meeting_at
+        ):
+            if domain.final is None:
+                domain = replace(domain, final=domain.initial, final_source=domain.initial_source,
+                                 final_measured_at=initial_at)
+            domain = replace(domain, initial=None, initial_source=None, initial_measured_at=None)
         initial_present = domain.initial is not None or domain.initial_source is not None
         final_present = domain.final is not None or domain.final_source is not None
         initial_at = _icf_initial_datetime(episode, domain)
@@ -340,4 +370,5 @@ def build_snapshot(episode: Episode, kind: MdrkKind) -> Snapshot:
         icf_domains=icf_domains,
         goal=goal,
         tasks=tasks,
+        procedures=select_procedures(episode.procedures, episode.admission_datetime, boundary, kind),
     )

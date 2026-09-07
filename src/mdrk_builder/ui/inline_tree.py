@@ -36,9 +36,8 @@ class InlineTreeEditor:
         if display_column == "#0":
             return None
         try:
-            index = int(display_column[1:]) - 1
-            return str(self.tree.cget("columns")[index])
-        except (IndexError, TypeError, ValueError):
+            return str(self.tree.column(display_column, "id"))
+        except tk.TclError:
             return None
 
     def _on_double_click(self, event: tk.Event) -> str | None:
@@ -60,7 +59,14 @@ class InlineTreeEditor:
         item_id = selected[0]
         if self.activate is not None and self.activate(item_id):
             return "break"
-        column = next(iter(self.editable_columns), None)
+        displayed = tuple(self.tree.cget("displaycolumns"))
+        if displayed == ("#all",):
+            displayed = tuple(self.tree.cget("columns"))
+        column = next(
+            (name for identifier in displayed
+             if (name := self._column_name(identifier)) in self.editable_columns),
+            None,
+        )
         if column is None:
             return None
         self.edit(item_id, column)
@@ -69,15 +75,12 @@ class InlineTreeEditor:
     def edit(self, item_id: str, column: str) -> None:
         if column not in self.editable_columns:
             return
-        try:
-            column_index = tuple(self.tree.cget("columns")).index(column) + 1
-        except ValueError:
+        if column not in tuple(self.tree.cget("columns")):
             return
-        display_column = f"#{column_index}"
-        box = self.tree.bbox(item_id, display_column)
+        box = self.tree.bbox(item_id, column)
         if not box:
             self.tree.see(item_id)
-            box = self.tree.bbox(item_id, display_column)
+            box = self.tree.bbox(item_id, column)
         if not box:
             return
         self.cancel()
@@ -102,8 +105,34 @@ class InlineTreeEditor:
         self._widget = widget
         self._closing = False
         widget.bind("<Return>", lambda _event: self.accept(item_id, column))
+        widget.bind("<Tab>", lambda event: self._next_cell(item_id, column, 1))
+        widget.bind("<Shift-Tab>", lambda event: self._next_cell(item_id, column, -1))
+        widget.bind("<ISO_Left_Tab>", lambda event: self._next_cell(item_id, column, -1))
         widget.bind("<Escape>", lambda _event: self.cancel())
         widget.bind("<FocusOut>", lambda _event: self.accept(item_id, column))
+
+    def _next_cell(self, item_id, column, step):
+        columns = [c for c in self.tree["columns"] if c in self.editable_columns]
+        rows = []
+        def visit(parent=""):
+            for item in self.tree.get_children(parent):
+                rows.append(item)
+                visit(item)
+        visit()
+        if item_id not in rows or column not in columns:
+            return "break"
+        index = rows.index(item_id) * len(columns) + columns.index(column) + step
+        self.accept(item_id, column)
+        if self._widget is not None:
+            return "break"
+        while 0 <= index < len(rows) * len(columns):
+            row, col = rows[index // len(columns)], columns[index % len(columns)]
+            if self.activate is None or self.activate(row):
+                self.tree.selection_set(row)
+                self.edit(row, col)
+                break
+            index += step
+        return "break"
 
     def accept(self, item_id: str, column: str) -> str:
         if self._widget is None or self._closing:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mdrk_builder.ui.source_access import mark_manual_changes
+
 import sys
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -443,32 +445,40 @@ class IcfDomainDialog(simpledialog.Dialog):
             note=self._variables["note"].get().strip(),
             initial_source=previous.initial_source if previous else None,
             final_source=previous.final_source if previous else None,
+            section_override=previous.section_override if previous else None,
+            source=previous.source if previous else None,
+            origin_note=previous.origin_note if previous else "",
+            conflict_choices=dict(previous.conflict_choices) if previous else {},
             initial_measured_at=previous.initial_measured_at if previous else None,
             final_measured_at=previous.final_measured_at if previous else None,
         )
+        if self.domain is not None:
+            mark_manual_changes(self.domain, self.result)
 
 
 class ProcedureDialog(simpledialog.Dialog):
-    def __init__(self, parent: tk.Misc, procedure: Procedure | None = None) -> None:
+    def __init__(self, parent: tk.Misc, procedure: Procedure | None = None, *, planned: bool = False) -> None:
+        self.planned = planned
         self.procedure = procedure
         self.result: Procedure | None = None
         self._variables: dict[str, tk.StringVar] = {}
         super().__init__(parent, "Реабилитационная процедура")
 
     def body(self, master: tk.Frame) -> tk.Widget:
+        count = (self.procedure.planned_count if self.planned else self.procedure.actual_count) if self.procedure else None
         values = {
             "code": self.procedure.code if self.procedure else "",
             "name": self.procedure.name if self.procedure else "",
             "specialist": self.procedure.specialist if self.procedure else "",
-            "count": "" if not self.procedure or self.procedure.actual_count is None else str(self.procedure.actual_count),
+            "count": "" if count is None else str(count),
             "duration": "" if not self.procedure or self.procedure.duration_minutes is None else str(self.procedure.duration_minutes),
-            "frequency": self.procedure.frequency if self.procedure else "",
+            "frequency": (self.procedure.planned_frequency if self.planned else self.procedure.frequency) if self.procedure else "",
         }
         labels = (
             ("code", "Код услуги"),
             ("name", "Название"),
             ("specialist", "Ответственный специалист"),
-            ("count", "Количество"),
+            ("count", "Назначено" if self.planned else "Выполнено"),
             ("duration", "Продолжительность, мин"),
             ("frequency", "Кратность"),
         )
@@ -500,16 +510,20 @@ class ProcedureDialog(simpledialog.Dialog):
             code=self._variables["code"].get().strip(),
             name=self._variables["name"].get().strip(),
             specialist=self._variables["specialist"].get().strip(),
-            actual_count=parse_optional_nonnegative_int(self._variables["count"].get(), "Количество"),
+            actual_count=(previous.actual_count if previous else None) if self.planned else parse_optional_nonnegative_int(self._variables["count"].get(), "Количество"),
             duration_minutes=parse_optional_nonnegative_int(
                 self._variables["duration"].get(), "Продолжительность"
             ),
-            frequency=self._variables["frequency"].get().strip(),
-            planned_count=previous.planned_count if previous else None,
+            frequency=(previous.frequency if previous else "") if self.planned else self._variables["frequency"].get().strip(),
+            planned_frequency=self._variables["frequency"].get().strip() if self.planned else (previous.planned_frequency if previous else ""),
+            planned_count=parse_optional_nonnegative_int(self._variables["count"].get(), "Количество") if self.planned else (previous.planned_count if previous else None),
+            source_paths=previous.source_paths if previous else (),
             source=previous.source if previous else None,
             count_needs_review=previous.count_needs_review if previous else False,
             performed_dates=previous.performed_dates if previous else (),
         )
+        if self.procedure is not None:
+            mark_manual_changes(self.procedure, self.result)
 
 
 class FindingDialog(simpledialog.Dialog):
@@ -556,6 +570,8 @@ class FindingDialog(simpledialog.Dialog):
             source=previous.source if previous else None,
             scales=list(previous.scales) if previous else [],
         )
+        if self.finding is not None:
+            mark_manual_changes(self.finding, self.result)
 
 
 class ScaleDialog(simpledialog.Dialog):
@@ -616,3 +632,5 @@ class ScaleDialog(simpledialog.Dialog):
             specialist=role_from_name(self._variables["role"].get()),
             source=self.measurement.source if self.measurement else None,
         )
+        if self.measurement is not None:
+            mark_manual_changes(self.measurement, self.result)

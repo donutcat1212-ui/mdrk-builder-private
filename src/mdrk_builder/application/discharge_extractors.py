@@ -4,7 +4,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from mdrk_builder.application.extractors import RUSSIAN_MONTHS, parse_first_datetime
+from mdrk_builder.application.extractors import (
+    RUSSIAN_MONTHS, SECTION_STARTS, SECTION_STOP, parse_first_datetime,
+    extract_admission_datetime, extract_clinical_sections,
+)
 from mdrk_builder.infrastructure.ooxml_reader import ParsedDocument, clean_text
 
 
@@ -22,6 +25,7 @@ _CONSULTATION_HEADING_RE = re.compile(
 )
 _CONSULTATION_STOP_RE = re.compile(
     r"^(?:консультация|осмотр|результат\s+осмотра|"
+    r"обоснование|план\s+обследования|план\s+лечения|"
     r"результаты\s+медицинского\s+обследования|"
     r"применение\s+лекарственных\s+препаратов|"
     r"трансфузии|оперативные\s+вмешательства|"
@@ -32,6 +36,22 @@ _CONSULTATION_STOP_RE = re.compile(
 _CORE_REHABILITATION_SPECIALIST_RE = re.compile(
     r"(?:невролог|врач\s+фрм|физическ\w*\s+реабилитац|физическ\w*\s+терапевт|"
     r"нейропсихолог|патопсихолог|логопед|эргореабилит|эрготерапевт)",
+    re.IGNORECASE,
+)
+_ICF_PROFILE_HEADING_RE = re.compile(
+    r"^\s*(?:\|\s*)*(?:мкф\s+(?:категориальн\w*\s+профиль|категории|классификатор)\b|"
+    r"(?:структур\w*|функци\w*|активность(?:\s+и\s+участие)?|участие|"
+    r"факторы\s+(?:окружающей\s+среды|среды)|личностные\s+факторы)\s*\|)",
+    re.IGNORECASE,
+)
+_SOURCE_SECTION_BOUNDARY_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*[.)]?\s*)?(?:обоснование\b|"
+    r"заключительн\w*\s+клиническ\w*\s+диагноз\b|"
+    r"жалобы\b|пациент\w*\s+представлен\w*\b|"
+    r"физикальн\w*\s+(?:обследован\w*|исследован\w*)\b|неврологическ\w*\s+статус\b|"
+    r"локальн\w*\s+статус\b|шкалы\s+при\b|"
+    r"(?:заключение|консультация)\b|рекомендации\b|состояние при выписке\b|"
+    r"лечащ\w*\s+врач\b|заведующ\w*\s+отделени\w*\b)",
     re.IGNORECASE,
 )
 
@@ -55,21 +75,63 @@ def _extract_labeled_block(
     *,
     starts: tuple[str, ...],
     stops: tuple[str, ...],
+    source_lines: list[str] | None = None,
+    use_common_stops: bool = True,
 ) -> str:
-    lines = document_lines(document)
-    start_re = re.compile(r"^(?:" + "|".join(starts) + r")\b\s*[:–—.-]?\s*(.*)$", re.IGNORECASE)
-    stop_re = re.compile(r"^(?:" + "|".join(stops) + r")\b", re.IGNORECASE)
+    lines = document_lines(document) if source_lines is None else source_lines
+    start_re = re.compile(r"^(?:\d+(?:\.\d+)*[.)]?\s*)?(?:" + "|".join(starts) + r")\b\s*[:–—.-]?\s*(.*)$", re.IGNORECASE)
+    stop_re = re.compile(r"^(?:" + "|".join(stops) + r")\b", re.IGNORECASE) if stops else None
     for index, line in enumerate(lines):
         match = start_re.match(line)
         if match is None:
             continue
         values = [clean_text(match.group(1))] if clean_text(match.group(1)) else []
         for following in lines[index + 1 :]:
-            if stop_re.match(following):
+            # An ICF table can follow the examination without a separate
+            # rehabilitation-diagnosis paragraph. Its flattened rows are not prose.
+            if (
+                (stop_re is not None and stop_re.match(following))
+                or _ICF_PROFILE_HEADING_RE.match(following)
+                or _SOURCE_SECTION_BOUNDARY_RE.match(following)
+                or (use_common_stops and SECTION_STOP.match(following))
+            ):
                 break
             values.append(following)
-        return "\n".join(dict.fromkeys(value for value in values if value))
+        return "\n".join(value for value in values if value)
     return ""
+
+
+def extract_discharge_clinical_sections(document: ParsedDocument) -> dict[str, str]:
+    """Read only the primary-examination fields owned by the discharge template."""
+    fields = (
+        "clinical_diagnosis", "disease_history", "life_history",
+        "movement_regimen", "diet", "risks", "limitations",
+    )
+    result = {
+        name: _extract_labeled_block(document, starts=SECTION_STARTS[name], stops=(),
+                                     use_common_stops=name != "life_history")
+        for name in fields
+    }
+    # Keep the diagnosis block in source order, including repeated labels.
+    # A primary examination may list several separate accompanying diseases.
+    lines = document_lines(document)
+    heading = re.compile(r"^(?:(?:заключительный\s+)?клинический\s+диагноз|диагноз)\s*[:–—.-]?\s*(.*)$", re.I)
+    start = next((i for i, line in enumerate(lines) if heading.match(line)
+                  or re.match(r"^основное\s+заболевание\b", line, re.I)), None)
+    if start is not None:
+        match = heading.match(lines[start])
+        values = [match.group(1)] if match else [lines[start]]
+        for line in lines[start + 1:]:
+            if SECTION_STOP.match(line) or _SOURCE_SECTION_BOUNDARY_RE.match(line) or _ICF_PROFILE_HEADING_RE.match(line):
+                break
+            values.append(line)
+        result["clinical_diagnosis"] = "\n".join(value for value in values if value)
+    # Regimen/diet may be embedded in the primary treatment-plan heading.
+    common = extract_clinical_sections(document)
+    for name in ("movement_regimen", "diet"):
+        if not result[name]:
+            result[name] = common.get(name, "")
+    return result
 
 
 def extract_discharge_header(document: ParsedDocument) -> str:
@@ -137,11 +199,21 @@ def extract_complaints(document: ParsedDocument) -> str:
 
 
 def extract_provided_documents(document: ParsedDocument) -> str:
-    return _extract_labeled_block(
+    explicit = _extract_labeled_block(
         document,
         starts=(r"пациент\w*\s+представлен\w*\s+необходим\w*\s+для\s+госпитализаци\w*\s+документ\w*",),
         stops=(r"физикальн\w*\s+(?:обследовани\w*|исследовани\w*)",),
     )
+    if explicit:
+        return explicit
+    prior = _extract_labeled_block(document,
+        starts=(r"выполненные\s+медицинские\s+вмешательства",),
+        stops=(r"план\s+обследования", r"план\s+лечения"))
+    admission = extract_admission_datetime(document)
+    dates = [value for line in prior.splitlines() if (value := parse_first_datetime(line)) is not None]
+    if admission and dates and all(value.date() < admission.date() for value in dates):
+        return prior
+    return ""
 
 
 def extract_physical_exam(document: ParsedDocument) -> str:
@@ -307,5 +379,76 @@ def extract_signature_block(document: ParsedDocument) -> str:
         ):
             break
         if not re.fullmatch(r"\s*\|(?:\s*\|)*\s*", line):
-            values.append(line)
+            values.append(re.sub(r"\s*\|\s*", " ", line).strip())
     return "\n".join(values)
+
+
+def extract_discharge_final_fields(document: ParsedDocument, *, final_context: bool = False) -> dict[str, str]:
+    """Read actual treatment/discharge data from a MIS or departmental summary."""
+    lines = document_lines(document)
+    headings = {
+        'medications': r'применение лекарственных препаратов[^:]*',
+        'transfusions': r'трансфузии[^:]*',
+        'operations': r'оперативные вмешательства[^:]*',
+        'additional_information': r'дополнительные сведения',
+        'discharge_condition': r'состояние при выписке[^:]*',
+        'discharge_neurological_status': r'неврологический статус',
+        'work_capacity': r'трудоспособность[^:]*',
+        'recommendations': r'рекомендации',
+    }
+    boundary = re.compile(r'^(?:' + '|'.join(headings.values()) +
+        r'|шкалы при выписке|медицинские вмешательства|лучевая нагрузка|'
+        r'факторы риска|факторы,? ограничивающие|реабилитационный потенциал|'
+        r'цель,? поставленная|лечащ\w* врач|заведующ\w* отделением|'
+        r'я,?\s|[«"]\d{1,2}[»"]|выписной эпикриз получен)', re.I)
+    discharge_start = next((i for i, line in enumerate(lines)
+                            if re.match(r'^состояние при выписке', line, re.I)), len(lines))
+    treatment_start = next((i for i, line in enumerate(lines)
+                            if re.match(r'^проведен\w* обследования', line, re.I)), len(lines))
+    result = {}
+    for name, heading in headings.items():
+        start = discharge_start if name in {'discharge_neurological_status', 'work_capacity', 'recommendations'} else treatment_start
+        if name == 'discharge_condition':
+            start = 0
+        elif final_context and name in {'medications', 'recommendations', 'work_capacity'}:
+            start = 0
+        pattern = re.compile(r'^' + heading + r'\s*:\s*(.*)$', re.I)
+        for i in range(start, len(lines)):
+            match = pattern.match(lines[i])
+            if match is None:
+                continue
+            values = [match.group(1)] if match.group(1).strip() else []
+            for line in lines[i + 1:]:
+                if boundary.match(line):
+                    break
+                if line != '.' and not re.fullmatch(r'\s*\|(?:\s*\|)*\s*', line):
+                    values.append(line)
+            result[name] = '\n'.join(values).strip()
+            break
+    return result
+
+
+def update_header_period(header: str, admission: datetime | None, discharge: datetime | None) -> str:
+    """Replace only hospitalization dates; retain all other MIS header fields."""
+    if admission is None or discharge is None:
+        return header
+    lines = header.splitlines()
+    period = f"с {admission:%d.%m.%Y %H:%M} по {discharge:%d.%m.%Y %H:%M}"
+    found = False
+    count_found = False
+    for i, line in enumerate(lines):
+        if re.match(r"^Период нахождения", line, re.I):
+            prefix = line.split(":", 1)[0]
+            lines[i] = prefix + ": " + period
+            found = True
+        elif re.match(r"^Дата (?:выписки|поступления)", line, re.I):
+            value = discharge if "выписки" in line.casefold() else admission
+            lines[i] = line.split(":", 1)[0] + f": {value:%d.%m.%Y %H:%M}"
+        elif re.match(r"^Количество дней нахождения", line, re.I):
+            count_found = True
+            lines[i] = line.split(":", 1)[0] + f": {max(1, (discharge.date() - admission.date()).days)}"
+    if not found:
+        lines.append("Период нахождения в стационаре: " + period)
+    if not count_found:
+        lines.append(f"Количество дней нахождения в медицинской организации: {max(1, (discharge.date() - admission.date()).days)}")
+    return "\n".join(lines)

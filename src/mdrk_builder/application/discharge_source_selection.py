@@ -242,12 +242,20 @@ def source_scan_for_episode(
                     issues,
                     "episode_assignment_sheet_date_missing",
                     (
-                        "Лист назначений без извлекаемой даты выполнения исключён "
-                        "из выписного эпизода."
+                        "В листе назначений не распознаны даты выполнения; "
+                        "проверьте принадлежность процедур текущей госпитализации."
                     ),
                     candidate.path,
                 )
-                continue
+            if scanned.classification.document_type == "assignment_sheet" and occurred_ats:
+                inside = tuple(value for value in occurred_ats
+                    if (episode_key.admission_at is None or value.date() >= episode_key.admission_at.date())
+                    and (episode_key.discharge_at is None or value.date() <= episode_key.discharge_at.date()))
+                if inside and len(inside) != len(occurred_ats):
+                    _record_projection_issue(issues, "assignment_dates_outside_episode",
+                        "В листе назначений есть выполнения вне дат госпитализации. "
+                        "В выписку включены только выполнения внутри периода; проверьте даты.", candidate.path)
+                    occurred_ats = inside
             if episode_key.admission_at is not None and any(
                 occurred_at.date() < episode_key.admission_at.date()
                 for occurred_at in occurred_ats

@@ -23,7 +23,7 @@ from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_iss
 
 
 def incomplete_reverse_date_issues(
-    rows: list[ReverseSheetRow],
+    rows: list[ReverseSheetRow], admission=None, discharge=None,
 ) -> tuple[ReviewIssue, ...]:
     issues: list[ReviewIssue] = []
     for row in rows:
@@ -32,6 +32,10 @@ def incomplete_reverse_date_issues(
             fields.append("дата назначения")
         if row.performed_at is None:
             fields.append("дата исполнения")
+        if row.appointment_date and row.performed_at and row.performed_at.date() < row.appointment_date:
+            issues.append(ReviewIssue("reverse_date_order", f"{row.intervention}: исполнение раньше назначения", ReviewSeverity.WARNING, "rows", row.source))
+        if row.performed_at and ((admission and row.performed_at.date() < admission.date()) or (discharge and row.performed_at.date() > discharge.date())):
+            issues.append(ReviewIssue('reverse_outside_period', f'{row.intervention}: исполнение вне дат госпитализации', ReviewSeverity.WARNING, 'rows', row.source))
         if fields:
             issues.append(
                 ReviewIssue(
@@ -47,6 +51,7 @@ def incomplete_reverse_date_issues(
 
 class ReverseSheetRowDialog(simpledialog.Dialog):
     def __init__(self, parent: tk.Misc, row: ReverseSheetRow | None = None) -> None:
+        self._previous = row
         self._source = row.source if row else None
         self._intervention = tk.StringVar(value=row.intervention if row else "")
         self._appointment = tk.StringVar(value=format_date(row.appointment_date) if row else "")
@@ -87,6 +92,10 @@ class ReverseSheetRowDialog(simpledialog.Dialog):
             self._performer.get().strip(),
             self._source,
         )
+        if self._previous is not None:
+            from mdrk_builder.ui.source_access import mark_manual_changes
+            self.result.field_sources = dict(self._previous.field_sources)
+            mark_manual_changes(self._previous, self.result)
         return True
 
 
@@ -290,13 +299,13 @@ class ReverseSheetDialog(tk.Toplevel):
             document_name="Оборотный лист",
         ):
             return
-        patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", self.draft.identity.full_name).strip("_")
+        patient = re.sub(r"[^0-9A-Za-zА-Яа-яЁё-]+", " ", self.draft.identity.full_name).strip()
         output = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить оборотный лист",
             defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
-            initialfile=f"Оборотный_лист_{patient or 'пациент'}.docx",
+            initialfile=f"Оборотный лист {patient or 'пациент'}.docx",
         )
         if not output:
             return

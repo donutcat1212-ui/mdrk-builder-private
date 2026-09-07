@@ -71,6 +71,8 @@ def test_manual_fill_removes_stale_required_issue() -> None:
 
 def test_daily_rehabilitation_minutes_below_180_are_warning() -> None:
     episode = _valid_episode()
+    episode.admission_datetime = datetime(2026, 8, 1)
+    episode.final_meeting_at = datetime(2026, 8, 15)
     first_day = date(2026, 8, 4)
     second_day = date(2026, 8, 5)
     episode.procedures.extend(
@@ -105,17 +107,19 @@ def test_daily_rehabilitation_minutes_below_180_are_warning() -> None:
         )
     )
 
-    issues = current_issues(episode, MdrkKind.INITIAL)
+    issues = current_issues(episode, MdrkKind.FINAL)
     issue = next(item for item in issues if item.code == "rehab_daily_minutes_below_minimum")
 
     assert issue.severity is ReviewSeverity.WARNING
     assert "05.08.2026 — 150 мин" in issue.message
     assert "04.08.2026" not in issue.message
-    assert can_generate(episode, MdrkKind.INITIAL)
+    assert can_generate(episode, MdrkKind.FINAL)
 
 
 def test_weekends_are_excluded_from_daily_rehabilitation_minimum() -> None:
     episode = _valid_episode()
+    episode.admission_datetime = datetime(2026, 8, 1)
+    episode.final_meeting_at = datetime(2026, 8, 15)
     saturday = date(2026, 8, 8)
     sunday = date(2026, 8, 9)
     monday = date(2026, 8, 10)
@@ -140,7 +144,7 @@ def test_weekends_are_excluded_from_daily_rehabilitation_minimum() -> None:
         )
     )
 
-    issues = current_issues(episode, MdrkKind.INITIAL)
+    issues = current_issues(episode, MdrkKind.FINAL)
     deficient = next(
         issue for issue in issues if issue.code == "rehab_daily_minutes_below_minimum"
     )
@@ -638,7 +642,7 @@ def test_scale_only_participant_warns_about_missing_conclusion() -> None:
     )
 
 
-def test_first_scale_seen_after_mdrk1_is_baseline_and_needs_repeat_warning() -> None:
+def test_first_scale_seen_after_mdrk1_needs_baseline_warning() -> None:
     episode = _valid_episode()
     role = SpecialistRole.LOGOPEDIST
     source = Path("/logopedist-final.docx")
@@ -669,11 +673,11 @@ def test_first_scale_seen_after_mdrk1_is_baseline_and_needs_repeat_warning() -> 
 
     issues = current_issues(episode, MdrkKind.FINAL)
 
-    assert not any(
+    assert any(
         issue.code == "scale_initial_missing" and "MASA" in issue.message
         for issue in issues
     )
-    assert any(
+    assert not any(
         issue.code == "scale_final_missing" and "MASA" in issue.message
         for issue in issues
     )
@@ -720,7 +724,7 @@ def test_scale_without_datetime_warns_because_table_requires_date_and_time() -> 
     issues = current_issues(episode, MdrkKind.FINAL)
 
     warning = next(issue for issue in issues if issue.code == "scale_datetime_missing")
-    assert warning.field.endswith(".initial_datetime")
+    assert warning.field.endswith(".final_datetime")
     assert warning.source == source
     assert "дата и время" in warning.message
 
@@ -765,6 +769,6 @@ def test_new_icf_baseline_after_mdrk1_is_hidden_initial_and_needs_final_point() 
 
     assert not any(issue.field.startswith("icf.") for issue in initial_issues)
     assert any(
-        issue.code == "icf_final_missing" and "d640" in issue.message
+        issue.code == "icf_initial_missing" and "d640" in issue.message
         for issue in final_issues
     )

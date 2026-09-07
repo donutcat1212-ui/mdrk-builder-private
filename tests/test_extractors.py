@@ -770,3 +770,22 @@ def test_conclusion_stops_before_specialist_signature_line() -> None:
     value = extract_conclusion(document, SpecialistRole.PHYSICAL_THERAPIST)
 
     assert value == "ЗАКЛЮЧЕНИЕ_ФТ."
+
+
+def test_icf_rating_columns_follow_headers_in_sixteen_column_form():
+    table = ParsedTable((
+        _row({0: 'МКФ', 12: 'Исходно', 13: 'Повторно', 14: 'Ответственный специалист'}, 16),
+        _row({0: 'b760', 1: 'Контроль движений', 12: '2', 13: '1', 14: 'ЛФК'}, 16),
+    ))
+    observation = extract_icf_observations(_document(tables=[table]))[0]
+    assert tuple(item.value for item in observation.rating_pair) == (2, 1)
+    assert observation.specialist is SpecialistRole.PHYSICAL_THERAPIST
+
+
+def test_icf_abbreviated_ft_score_headers():
+    table = ParsedTable((
+        _row({0: 'МКФ', 12: 'Итогбалл', 13: 'Повт.балл', 14: '№ назначения'}, 16),
+        _row({0: 'b760', 1: 'Контроль движений', 12: '2', 13: '1', 14: '2, 3, 4'}, 16),
+    ))
+    observation = extract_icf_observations(_document(tables=[table]))[0]
+    assert tuple(item.value for item in observation.rating_pair) == (2, 1)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -52,6 +53,7 @@ def scan_source_documents(
     folder: Path,
     *,
     normalizer: DocumentNormalizer | None = None,
+    session=None,
 ) -> SourceScanResult:
     folder = folder.resolve()
     source_files = discover_source_files(folder)
@@ -67,18 +69,24 @@ def scan_source_documents(
     documents: list[ScannedDocument] = []
     failures: list[SourceReadFailure] = []
     try:
-        for source_path in source_files:
+        for index, source_path in enumerate(source_files):
+            if session:
+                session.check()
+                session.progress(index, len(source_files), source_path)
             try:
+                fingerprint, cached = session.cached(source_path) if session else (None, None)
+                if cached is not None:
+                    documents.append(cached)
+                    continue
                 normalized_path = normalizer.normalize(source_path)
                 document = read_docx(normalized_path, source_path=source_path)
-                documents.append(
-                    ScannedDocument(
-                        document=document,
-                        classification=classify_document(document),
-                    )
-                )
+                scanned = ScannedDocument(document=document, classification=classify_document(document))
+                documents.append(scanned)
+                if session:
+                    session.put(source_path, fingerprint, scanned)
             except (
                 ConversionError,
+                subprocess.SubprocessError,
                 OSError,
                 ValueError,
                 KeyError,
@@ -91,6 +99,9 @@ def scan_source_documents(
     finally:
         if owns_normalizer:
             normalizer.close()
+    if session:
+        session.progress(len(source_files), len(source_files), None)
+        session.check()
     return SourceScanResult(
         source_files=tuple(source_files),
         documents=tuple(documents),

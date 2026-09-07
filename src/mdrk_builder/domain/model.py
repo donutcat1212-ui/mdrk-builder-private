@@ -100,6 +100,9 @@ class ReverseSheetRow:
     performed_at: datetime | None = None
     performer: str = ""
     source: Path | None = None
+    manual_fields: set[str] = field(default_factory=set)
+    field_sources: dict[str, Path] = field(default_factory=dict)
+
 
 
 @dataclass(slots=True)
@@ -107,7 +110,11 @@ class ReverseSheetDraft:
     folder: Path
     identity: PatientIdentity = field(default_factory=PatientIdentity)
     admission_datetime: datetime | None = None
+    discharge_datetime: datetime | None = None
     header_source: Path | None = None
+    field_sources: dict[str, Path] = field(default_factory=dict)
+    source_paths: tuple[Path, ...] = ()
+    manual_fields: set[str] = field(default_factory=set)
     rows: list[ReverseSheetRow] = field(default_factory=list)
     issues: list[ReviewIssue] = field(default_factory=list)
 
@@ -155,6 +162,11 @@ class IcfDomain:
     initial_measured_at: datetime | None = None
     final_measured_at: datetime | None = None
     section_override: IcfSection | None = None
+    source: Path | None = None
+    origin_note: str = ""
+    conflict_choices: dict[str, list[tuple[str, Path | None]]] = field(default_factory=dict)
+
+    manual_fields: set[str] = field(default_factory=set)
 
     @property
     def section(self) -> IcfSection:
@@ -169,9 +181,11 @@ class IcfDomain:
     def dynamic_marker(self) -> str | None:
         if self.initial is None or self.final is None:
             return None
-        if self.final.value < self.initial.value:
+        initial = -self.initial.value if self.initial.facilitator else self.initial.value
+        final = -self.final.value if self.final.facilitator else self.final.value
+        if final < initial:
             return "+"
-        if self.final.value > self.initial.value:
+        if final > initial:
             return "-"
         return ""
 
@@ -209,6 +223,8 @@ class ScaleMeasurement:
     measured_at: datetime | None
     specialist: SpecialistRole
     source: Path | None = None
+    manual_fields: set[str] = field(default_factory=set)
+
 
 
 @dataclass(slots=True)
@@ -218,6 +234,8 @@ class SpecialistFinding:
     source_datetime: datetime | None = None
     source: Path | None = None
     scales: list[ScaleMeasurement] = field(default_factory=list)
+    manual_fields: set[str] = field(default_factory=set)
+
 
 
 @dataclass(slots=True)
@@ -232,6 +250,10 @@ class Procedure:
     source: Path | None = None
     count_needs_review: bool = False
     performed_dates: tuple[date, ...] = ()
+    source_paths: tuple[Path, ...] = ()
+    planned_frequency: str = ""
+    manual_fields: set[str] = field(default_factory=set)
+
 
 
 @dataclass(slots=True)
@@ -254,6 +276,7 @@ class Episode:
     department: str = "Отделение медицинской реабилитации для пациентов с нарушением функции ЦНС №2"
     stage: str = "2 этап"
     course_duration_days: int | None = None
+    course_duration_manual: bool = False
     initial_sections: ClinicalSections = field(default_factory=ClinicalSections)
     sections: ClinicalSections = field(default_factory=ClinicalSections)
     sources: list[SourceDocument] = field(default_factory=list)

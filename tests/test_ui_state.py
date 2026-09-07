@@ -36,6 +36,9 @@ class _Variable:
 
 
 class _Text:
+    def edit_reset(self):
+        pass
+
     def __init__(self, value: str = "") -> None:
         self.value = value
 
@@ -192,6 +195,7 @@ def test_procedure_edit_preserves_extracted_schedule_provenance(tmp_path) -> Non
     )
     dialog = object.__new__(dialogs_module.ProcedureDialog)
     dialog.procedure = previous
+    dialog.planned = False
     dialog._variables = {
         "code": _Variable(previous.code),
         "name": _Variable("ЛФК, уточнено"),
@@ -532,6 +536,7 @@ def test_rescan_passes_both_meeting_boundaries_without_destructive_confirmation(
 
     assert confirmations == []
     assert captured == {
+        "scan_session": None,
         "folder": tmp_path,
         "initial_meeting_at": datetime(2026, 8, 10, 8),
         "final_meeting_at": datetime(2026, 8, 19, 15, 30),
@@ -620,6 +625,7 @@ def test_rescan_passes_changed_admission_and_recomputes_default_meetings(
     app._start_scan()
 
     assert captured == {
+        "scan_session": None,
         "folder": tmp_path,
         "medical_record_number_override": "123/26",
         "admission_datetime_override": datetime(2026, 8, 8, 12),

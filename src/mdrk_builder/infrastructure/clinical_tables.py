@@ -44,6 +44,8 @@ def render_icf_profile(
     domains: Sequence[IcfDomain],
     *,
     repeat_missing_final: bool = True,
+    assessment_labels: tuple[str, str] = ("", ""),
+    shade_latest: bool = False,
 ) -> None:
     grouped: OrderedDict[IcfSection, list[IcfDomain]] = OrderedDict()
     for domain in domains:
@@ -55,6 +57,12 @@ def render_icf_profile(
     )
     row_count = 2 + category_header_rows + len(domains)
     widths = MCF_FINAL_WIDTHS if kind is MdrkKind.FINAL else MCF_INITIAL_WIDTHS
+    if kind is MdrkKind.FINAL and any(assessment_labels):
+        # Keep the table width, reserving readable date columns for discharge.
+        widths = list(widths)
+        extra = (800 - widths[11]) + (800 - widths[12])
+        widths[11] = widths[12] = 800
+        widths[13] -= extra
     table = document.add_table(rows=row_count, cols=len(widths))
     configure_table(table, widths)
 
@@ -99,7 +107,8 @@ def render_icf_profile(
         alignment=WD_ALIGN_PARAGRAPH.CENTER,
         keep_with_next=True,
     )
-    for cell in header.cells[11:13]:
+    for cell, label in zip(header.cells[11:13], assessment_labels):
+        set_cell_text(cell, label, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER)
         compact_header_cell(cell)
 
     for row in table.rows[:2]:
@@ -142,6 +151,7 @@ def render_icf_profile(
                 kind,
                 personal_factor=section is IcfSection.PERSONAL_FACTORS,
                 repeat_missing_final=repeat_missing_final,
+                shade_latest=shade_latest,
             )
             if environment_group and domain_index < len(category_domains) - 1:
                 for cell in domain_row.cells:
@@ -155,12 +165,16 @@ def render_final_icf_profile(
     domains: Sequence[IcfDomain],
     *,
     repeat_missing_final: bool = True,
+    assessment_labels: tuple[str, str] = ("", ""),
+    shade_latest: bool = False,
 ) -> None:
     render_icf_profile(
         document,
         MdrkKind.FINAL,
         domains,
         repeat_missing_final=repeat_missing_final,
+        assessment_labels=assessment_labels,
+        shade_latest=shade_latest,
     )
 
 
@@ -189,6 +203,7 @@ def render_completed_program(
             keep_with_next=True,
         )
     compact_header_cell(table.rows[0].cells[2])
+    compact_header_cell(table.rows[0].cells[3])
     mark_header_row(table.rows[0])
 
     if not procedures:
@@ -364,6 +379,7 @@ def _fill_mcf_domain_row(
     *,
     personal_factor: bool,
     repeat_missing_final: bool,
+    shade_latest: bool = False,
 ) -> None:
     cells = row.cells
     set_cell_text(
@@ -396,7 +412,7 @@ def _fill_mcf_domain_row(
             style=STYLE_TABLE,
             alignment=WD_ALIGN_PARAGRAPH.CENTER,
         )
-    _shade_initial_qualifier(cells, domain.initial)
+    _shade_initial_qualifier(cells, (domain.final or domain.initial) if shade_latest else domain.initial)
     initial = domain.initial.display() if domain.initial is not None else ""
     final_qualifier = domain.final
     if (

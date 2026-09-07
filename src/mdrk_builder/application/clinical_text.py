@@ -41,6 +41,7 @@ class ClinicalTextObservation:
 class ComposedClinicalText:
     text: str
     source: Path | None
+    sources: tuple[Path, ...] = ()
 
 
 def _normalized(value: str) -> str:
@@ -225,12 +226,13 @@ def compose_clinical_timeline(
     initial = [item for item in meaningful if item[0].document_type == "initial"]
     baseline_item, baseline_text = (initial or meaningful)[0]
     if not include_updates:
-        return ComposedClinicalText(baseline_text, baseline_item.source)
+        return ComposedClinicalText(baseline_text, baseline_item.source, (baseline_item.source,))
 
     baseline_index = meaningful.index((baseline_item, baseline_text))
     known = baseline_text
     lines = [baseline_text]
     latest_source = baseline_item.source
+    sources = [baseline_item.source]
     for item, value in meaningful[baseline_index + 1 :]:
         novel = extract_novel_clinical_text(
             value,
@@ -247,4 +249,6 @@ def compose_clinical_timeline(
         lines.append(f"{label} {novel}")
         known = f"{known}\n{novel}"
         latest_source = item.source
-    return ComposedClinicalText("\n".join(lines), latest_source)
+        if item.source not in sources:
+            sources.append(item.source)
+    return ComposedClinicalText("\n".join(lines), latest_source, tuple(sources))

@@ -223,7 +223,8 @@ def write_reverse_sheet_docx(
 ) -> Path:
     source_paths = {
         path
-        for path in [draft.header_source, *(row.source for row in draft.rows)]
+        for path in [draft.header_source, *draft.source_paths, *draft.field_sources.values(), *(row.source for row in draft.rows),
+                     *(source for row in draft.rows for source in row.field_sources.values())]
         if path is not None
     }
     output = resolve_docx_output_path(output_path, source_paths=source_paths)
