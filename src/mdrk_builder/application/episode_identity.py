@@ -64,8 +64,8 @@ class DischargeEpisodeKey:
             other.discharge_at,
         )
         episode_root_match = _optional_match(
-            self.episode_root,
-            other.episode_root,
+            self.episode_root.resolve() if self.episode_root is not None else None,
+            other.episode_root.resolve() if other.episode_root is not None else None,
         )
         conflicts = tuple(
             field_name

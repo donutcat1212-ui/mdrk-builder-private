@@ -82,3 +82,12 @@ def test_folder_edit_rescan_draft_and_all_exports(tmp_path, scenario):
         document = Document(path)
         assert document.paragraphs or document.tables
     assert all(hashlib.sha256(p.read_bytes()).digest() == digest for p, digest in original.items())
+
+
+def test_episode_root_comparison_normalizes_relative_and_absolute_paths():
+    from pathlib import Path
+    from mdrk_builder.application.episode_identity import DischargeEpisodeKey
+    relative = Path('synthetic-episode')
+    left = DischargeEpisodeKey(episode_root=relative)
+    right = DischargeEpisodeKey(episode_root=relative.resolve())
+    assert left.match(right).episode_root is True

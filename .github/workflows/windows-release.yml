@@ -66,7 +66,9 @@ jobs:
           python -VV
           python -m PyInstaller --version
           python -m compileall -q src tests tools/package_internal_release.py tools/privacy_gate.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -c "import tkinter; import pythoncom; import pywintypes; import win32com.client; import mdrk_builder.ui.app"
 
       - name: Privacy gate
