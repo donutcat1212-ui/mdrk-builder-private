@@ -6,7 +6,7 @@ import pytest
 
 from mdrk_builder.domain import Episode, DischargeSummaryDraft, ReverseSheetDraft, MdrkKind, Procedure
 from mdrk_builder.ui.app import MdrkBuilderApp
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
 
 
 @pytest.fixture
@@ -168,7 +168,7 @@ def test_added_specialist_scale_uses_parent_role_and_both_views(app,monkeypatch)
     role=SpecialistRole.PHYSICAL_THERAPIST
     panel.load(DischargeSummaryDraft(app.episode.folder,team_findings=(DischargeTeamFinding(role,''),)))
     panel.clinical_tree.selection_set('team:0')
-    monkeypatch.setattr('mdrk_builder.ui.discharge_tables.FieldsDialog',lambda *a:SimpleNamespace(result={
+    monkeypatch.setattr('mdrk_builder.ui.discharge_summary_panel.FieldsDialog',lambda *a:SimpleNamespace(result={
         'name':'Берг','value':'35','initial_value':'20','initial_at':'10.08.2026 00:00','current_at':'18.08.2026 00:00'}))
     panel._edit_clinical_row('add_scale')
     row=panel.draft.team_findings[0].scales[0]

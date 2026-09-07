@@ -5,7 +5,7 @@ from docx import Document
 
 from mdrk_builder.domain import DischargeSummaryDraft, IcfDomain, IcfQualifier, SpecialistRole
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
 
 
 def test_icf_panel_matches_docx_and_refreshes_on_rescan(tmp_path):

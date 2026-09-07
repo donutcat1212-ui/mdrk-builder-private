@@ -7,8 +7,11 @@ from pathlib import Path
 import os
 from tempfile import NamedTemporaryFile
 from mdrk_builder import domain
+from mdrk_builder.application.workspace import (WorkspaceDraft, MdrkWorkspaceState, ReverseWorkspaceState, DischargeWorkspaceState)
 
 TYPES = {name: getattr(domain, name) for name in domain.__all__ if isinstance(getattr(domain, name), type)}
+
+TYPES.update({cls.__name__: cls for cls in (WorkspaceDraft, MdrkWorkspaceState, ReverseWorkspaceState, DischargeWorkspaceState)})
 
 
 def encode(value):

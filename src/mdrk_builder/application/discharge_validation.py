@@ -1,4 +1,5 @@
 """Validation of the current editable discharge, independent of scan-time warnings."""
+from mdrk_builder.application.icf_validation import icf_assessment_issues
 from mdrk_builder.domain import ReviewIssue, ReviewSeverity
 from mdrk_builder.application.scale_registry import scale_bounds, numeric_scale_value
 
@@ -19,8 +20,8 @@ def procedure_issues(rows):
 
 
 def current_discharge_issues(draft):
-    dynamic = {'primary_clinical_diagnosis_missing', 'discharge_datetime_missing', 'discharge_header_missing', 'discharge_current_required', 'scale_value_out_of_range', 'procedure_dates_count_mismatch'}
-    issues = [i for i in draft.issues if i.code not in dynamic and not i.code.startswith(('required_', 'scale_initial_missing', 'scale_final_missing', 'icf_incomplete_pair'))]
+    dynamic = {'primary_clinical_diagnosis_missing', 'discharge_datetime_missing', 'discharge_header_missing', 'discharge_current_required', 'scale_value_out_of_range', 'procedure_dates_count_mismatch', 'icf_incomplete_pair', 'icf_initial_missing', 'icf_final_missing'}
+    issues = [i for i in draft.issues if i.code not in dynamic and not i.code.startswith(('required_', 'scale_initial_missing', 'scale_final_missing'))]
     for name, label in (('clinical_diagnosis', 'Заключительный диагноз'), ('header_text', 'Шапка'), ('discharge_datetime', 'Дата выписки')):
         value = getattr(draft, name)
         if name == 'clinical_diagnosis':
@@ -33,5 +34,6 @@ def current_discharge_issues(draft):
             issue = scale_value_issue(row.name, value, f'scales.{i}', row.source)
             if issue:
                 issues.append(issue)
+    issues.extend(icf_assessment_issues(draft.icf_domains, include_final=True))
     issues.extend(procedure_issues(draft.completed_procedures))
     return issues

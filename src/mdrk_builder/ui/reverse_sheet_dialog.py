@@ -93,7 +93,7 @@ class ReverseSheetRowDialog(simpledialog.Dialog):
             self._source,
         )
         if self._previous is not None:
-            from mdrk_builder.ui.source_access import mark_manual_changes
+            from mdrk_builder.application.editing import mark_manual_changes
             self.result.field_sources = dict(self._previous.field_sources)
             mark_manual_changes(self._previous, self.result)
         return True

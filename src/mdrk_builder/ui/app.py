@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mdrk_builder.application.editing import mark_manual_changes
 from mdrk_builder.application.editing import merge_rows, merge_issues
 
 import os
@@ -39,6 +40,7 @@ from mdrk_builder.domain import (
     IcfSection,
     MdrkKind,
     PatientIdentity,
+    Procedure,
     ReviewIssue,
     ReviewSeverity,
     ReverseSheetDraft,
@@ -60,9 +62,10 @@ from mdrk_builder.ui.dialogs import (
 )
 from mdrk_builder.ui.inline_tree import InlineTreeEditor
 from mdrk_builder.ui.icf_table import apply_icf_grid_style
-from mdrk_builder.ui.source_access import TableSourceAccess, SourceLinks, icf_source_links, field_source_links, row_source_links, open_source_links, mark_manual_changes, open_source_path
+from mdrk_builder.ui.source_access import TableSourceAccess, SourceLinks, icf_source_links, field_source_links, row_source_links, open_source_links, open_source_path
 from mdrk_builder.ui.background_job import BackgroundJobRunner
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel, ReverseSheetPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
+from mdrk_builder.ui.reverse_sheet_panel import ReverseSheetPanel
 from mdrk_builder.ui.episode_adapter import (
     EpisodeFormData,
     apply_episode_form_data,
@@ -116,10 +119,11 @@ def about_text() -> str:
     )
 
 
-from mdrk_builder.ui.workspace_state import WorkspaceState
+from mdrk_builder.ui.workspace_state import WorkspacePersistence
+from mdrk_builder.application.workspace import WorkspaceDraft, MdrkWorkspaceState
 
 
-class MdrkBuilderApp(WorkspaceState):
+class MdrkBuilderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.episode: Episode | None = None
@@ -167,26 +171,120 @@ class MdrkBuilderApp(WorkspaceState):
 
         self._configure_window()
         install_edit_shortcuts(self.root)
+        from mdrk_builder.application.table_editor import SharedTableEditor
         from mdrk_builder.ui.edit_history import install_history
+        self._table_editor = SharedTableEditor(
+            episode=lambda: self.episode, discharge=lambda: self.discharge_workspace.draft,
+            refresh_episode=self._refresh_shared_episode,
+            refresh_discharge=lambda: self.discharge_workspace.refresh_tables(),
+        )
         self._table_history = install_history(self,
-            ("_commit_icf_cell", "_delete_icf", "_add_icf", "_edit_icf", "_move_icf_domain", "_commit_procedure_cell", "_add_procedure", "_edit_procedure", "_delete_procedure", "_commit_scale_cell", "_add_scale", "_edit_scale", "_delete_scale", "_add_finding", "_edit_finding", "_delete_finding"),
-            lambda: self.episode, self._restore_table_state)
+            ("_commit_icf_cell", "_delete_icf", "_add_icf", "_edit_icf", "_move_icf_domain",
+             "_commit_procedure_cell", "_add_procedure", "_edit_procedure", "_delete_procedure",
+             "_commit_scale_cell", "_add_scale", "_edit_scale", "_delete_scale",
+             "_add_finding", "_edit_finding", "_delete_finding", "_activate_icf_item",
+             "_activate_procedure_item", "_activate_scale_item", "_finish_icf_pointer",
+             "_commit_specialist_conclusion", "_restore_selected_source"),
+            history=self._table_editor.history)
         self._build_menu()
         self._build_layout()
+        self._workspace = WorkspacePersistence(
+            root, capture=self._capture_workspace, restore=self._apply_workspace,
+            folder=self._state_folder, busy=lambda: self._scanning, status=self.status_var.set,
+        )
         self._update_field_sources()
         self.folder_var.trace_add("write", self._on_folder_field_changed)
         self._update_action_states()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.after(30000, self._autosave_workspace)
-        self._saved_workspace = None
+        self.root.after(30000, self._workspace.autosave)
         self.root.after(1500, self._refresh_draft_indicator)
 
-    def _restore_table_state(self, episode):
-        if self.episode is None: return
-        for field in ("icf_domains", "procedures", "findings"):
-            setattr(self.episode, field, deepcopy(getattr(episode, field)))
-        self._manual_collections.update({"icf", "procedures", "findings"})
-        self._refresh_all_trees()
+    def _capture_workspace(self):
+        manual = self._capture_manual_state()
+        mdrk = None
+        if manual is not None:
+            mdrk = MdrkWorkspaceState(
+                manual['episode'], manual['baseline'], manual['entry_fields'],
+                manual['section_fields'], manual['collections'],
+                {key: variable.get() for key, variable in self._entry_variables.items()},
+                {key: widget.get('1.0', 'end-1c') for key, widget in self._text_fields.items()},
+            )
+        return WorkspaceDraft(self._current_kind, self.document_var.get(), mdrk,
+                              self.reverse_workspace.capture_state(), self.discharge_workspace.capture_state())
+
+    def _state_folder(self):
+        for model in (self.episode, self.discharge_workspace.draft, self.reverse_workspace.draft):
+            if model is not None:
+                return model.folder
+        return None
+
+    def _save_workspace(self, explicit=False):
+        return self._workspace.save(explicit)
+
+    def _restore_workspace(self, folder):
+        return self._workspace.open(folder)
+
+    def _confirm_leave(self):
+        return self._workspace.confirm_leave()
+
+    def _refresh_draft_indicator(self):
+        self._workspace.refresh_indicator()
+
+    def _clear_workspace(self):
+        self._clear_manual_edits()
+        self._scan_baseline = None
+        self._invalidate_episode()
+        self.reverse_workspace.clear()
+        self.discharge_workspace.clear()
+        self.reverse_draft = self.discharge_draft = None
+        self._table_history.clear()
+        self._workspace.saved = None
+
+    def _apply_workspace(self, state):
+        if state.mdrk and (state.mdrk.entries.keys() - self._entry_variables.keys() or state.mdrk.sections.keys() - self._text_fields.keys()):
+            raise ValueError('Неизвестные поля МДРК в черновике')
+        self.reverse_workspace.validate_state(state.reverse)
+        self.discharge_workspace.validate_state(state.discharge)
+        self._clear_workspace()
+        self._current_kind = state.kind
+        if state.mdrk:
+            mdrk = state.mdrk
+            self.episode = mdrk.episode
+            self._scan_baseline = mdrk.baseline
+            self._dirty_entry_fields = set(mdrk.entry_fields)
+            self._dirty_section_fields = {kind: set(mdrk.section_fields.get(kind, ())) for kind in MdrkKind}
+            self._manual_collections = set(mdrk.collections)
+            self._populate_from_episode()
+            self._populating = True
+            try:
+                for key, value in mdrk.entries.items():
+                    self._entry_variables[key].set(value)
+                for key, value in mdrk.sections.items():
+                    widget = self._text_fields[key]
+                    widget.delete('1.0', 'end')
+                    widget.insert('1.0', value)
+                    widget.edit_reset()
+                    widget.edit_modified(False)
+            finally:
+                self._populating = False
+        self.reverse_workspace.restore_state(state.reverse)
+        self.discharge_workspace.restore_state(state.discharge)
+        self.reverse_draft = self.reverse_workspace.draft
+        self.discharge_draft = self.discharge_workspace.draft
+        self.document_var.set(state.document)
+        self._previous_document = state.document
+        for panel in (self.mdrk_workspace, self.reverse_workspace, self.discharge_workspace):
+            panel.pack_forget()
+        panels = {'mdrk1': self.mdrk_workspace, 'mdrk2': self.mdrk_workspace,
+                  'reverse': self.reverse_workspace, 'discharge': self.discharge_workspace}
+        panels[state.document].pack(fill='both', expand=True)
+        self.kind_var.set(state.kind.value)
+        self._update_action_states()
+
+    def _refresh_shared_episode(self):
+        if self.episode is not None:
+            self._manual_collections.update({'icf', 'procedures', 'findings'})
+            self._refresh_all_trees()
 
     def _restore_selected_source(self):
         from mdrk_builder.application.editing import row_key
@@ -391,6 +489,13 @@ class MdrkBuilderApp(WorkspaceState):
         file_menu.add_command(label="Выход", command=self._on_close)
         menu.add_cascade(label="Файл", menu=file_menu)
 
+        edit_menu = tk.Menu(menu, tearoff=False)
+        edit_menu.add_command(label="Отменить табличную правку", command=lambda: self._active_history().undo())
+        edit_menu.add_command(label="Повторить табличную правку", command=lambda: self._active_history().redo())
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Вернуть выбранное из источника", command=self._restore_selected_source)
+        menu.add_cascade(label="Правка", menu=edit_menu)
+
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="Обратная связь…", command=self._show_feedback)
         help_menu.add_separator()
@@ -460,7 +565,7 @@ class MdrkBuilderApp(WorkspaceState):
         self._build_table_source_access()
 
         self.reverse_workspace = ReverseSheetPanel(self.root, open_path=self._open_path)
-        self.discharge_workspace = DischargeSummaryPanel(self.root, open_path=self._open_path)
+        self.discharge_workspace = DischargeSummaryPanel(self.root, open_path=self._open_path, history=self._table_history)
 
         self.progress = ttk.Progressbar(top, mode="indeterminate", length=120)
         self.progress.grid(row=0, column=4, padx=(8, 0))
@@ -663,6 +768,7 @@ class MdrkBuilderApp(WorkspaceState):
             commit=self._commit_icf_cell,
             values=self._icf_editor_values,
             activate=self._activate_icf_item,
+            is_data_row=str.isdigit,
         )
         self.icf_tree.bind("<ButtonPress-1>", self._start_icf_drag, add="+")
         self.icf_tree.bind("<ButtonRelease-1>", self._finish_icf_pointer, add="+")
@@ -711,6 +817,7 @@ class MdrkBuilderApp(WorkspaceState):
             editable_columns=set(columns),
             commit=self._commit_procedure_cell,
             activate=self._activate_procedure_item,
+            is_data_row=str.isdigit,
         )
 
     def _build_scales_tab(self) -> None:
@@ -784,6 +891,7 @@ class MdrkBuilderApp(WorkspaceState):
             editable_columns=set(scale_columns),
             commit=self._commit_scale_cell,
             activate=self._activate_scale_item,
+            is_data_row=lambda item: item in self._scale_pair_refs,
         )
         self._bind_tree_delete(self.scale_tree, self._delete_scale)
 
@@ -1085,21 +1193,12 @@ class MdrkBuilderApp(WorkspaceState):
             if not self._save_workspace(explicit=True):
                 self._set_folder_field(str(self._state_folder()))
                 return
-        if hasattr(self, "reverse_draft"):
-            self.reverse_draft = None
-        if hasattr(self, "discharge_draft"):
-            self.discharge_draft = None
-        if self.episode is not None:
+        if hasattr(self, 'discharge_workspace'):
+            self._clear_workspace()
+        else:
             self._clear_manual_edits()
             self._invalidate_episode()
         self._update_action_states()
-        if hasattr(self, "discharge_workspace"):
-            self.discharge_workspace.draft = None
-            self.reverse_workspace.draft = None
-            self.discharge_workspace._table_history.clear()
-            self.reverse_workspace._table_history.clear()
-        if hasattr(self, "_table_history"):
-            self._table_history.clear()
         self.status_var.set("Папка изменена. Предыдущий рабочий черновик сохранён; выполните сканирование заново.")
 
     def _folder_field_matches(self, expected: Path) -> bool:
@@ -1109,6 +1208,9 @@ class MdrkBuilderApp(WorkspaceState):
             return False
 
     def _invalidate_episode(self) -> None:
+        for editor in (getattr(self, '_icf_editor', None), getattr(self, '_procedure_editor', None), getattr(self, '_scale_editor', None)):
+            if editor is not None:
+                editor.cancel()
         self.episode = None
         self._last_form_error = ""
         previous_populating = getattr(self, "_populating", False)
@@ -1131,7 +1233,12 @@ class MdrkBuilderApp(WorkspaceState):
         ):
             self._clear_tree(tree)
         self._scale_refs = []
+        self._scale_pair_refs = {}
+        self._displayed_specialist_finding = None
         self._issue_refs = {}
+        if hasattr(self, 'specialist_conclusion'):
+            self.specialist_conclusion.delete('1.0', 'end')
+            self.specialist_conclusion.edit_reset()
         self._update_field_sources()
         self._update_action_states()
 
@@ -1140,33 +1247,20 @@ class MdrkBuilderApp(WorkspaceState):
         if selected:
             if not self._confirm_leave():
                 return
-            self._clear_manual_edits()
-            self.reverse_draft = None
-            self.discharge_draft = None
-            self._invalidate_episode()
-            self.reverse_workspace.draft = None
-            self.discharge_workspace.draft = None
-            self.reverse_workspace._table_history.clear()
-            self.discharge_workspace._table_history.clear()
-            self._table_history.clear()
+            self._clear_workspace()
             self._set_folder_field(selected)
             if not self._restore_workspace(Path(selected)):
                 self._start_scan()
 
     def _on_document_changed(self) -> None:
-        from mdrk_builder.application.shared_edits import transfer_episode_edits, transfer_discharge_edits
         document = self.document_var.get()
         previous = getattr(self, "_previous_document", "mdrk1")
         if previous in {"mdrk1", "mdrk2"} and self.episode:
             state = self._capture_manual_state()
-            if state:
-                transfer_episode_edits(state["episode"], getattr(self, "_scan_baseline", None), self.discharge_workspace.draft, self._dirty_entry_fields)
         elif previous == "discharge" and self.discharge_workspace.draft:
             if not self.discharge_workspace.apply():
                 self.document_var.set(previous)
                 return
-            changed = transfer_discharge_edits(self.discharge_workspace.draft, self.episode, self.discharge_workspace._dirty_identity, baseline=getattr(self.discharge_workspace, "_baseline", None))
-            self._manual_collections.update(changed)
         from mdrk_builder.application.shared_edits import transfer_identity
         source = None
         fields = set()
@@ -1469,6 +1563,9 @@ class MdrkBuilderApp(WorkspaceState):
         if hasattr(self, "_table_history"):
             self._table_history.clear()
         self.episode = episode
+        if hasattr(self, '_table_editor'):
+            changed = self._table_editor.episode_loaded(self.discharge_workspace.source_baseline)
+            self._manual_collections.update(changed)
         self._set_folder_field(str(episode.folder))
         self._populate_from_episode()
         self._update_action_states()
@@ -2526,8 +2623,9 @@ class MdrkBuilderApp(WorkspaceState):
     def _edit_scale_measurement(self, displayed, field: str, value: str) -> None:
         for measurement in self._live_scale_measurements(displayed):
             if getattr(measurement, field) != value:
+                previous = deepcopy(measurement)
                 setattr(measurement, field, value)
-                measurement.manual_fields.add(field)
+                mark_manual_changes(previous, measurement)
 
     def _commit_scale_cell(self, item_id: str, column: str, value: str) -> None:
         if not self.episode or item_id not in self._scale_pair_refs:

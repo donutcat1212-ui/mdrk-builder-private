@@ -17,7 +17,7 @@ from mdrk_builder.domain import (DischargeScaleRow, DischargeTeamFinding, Discha
 from mdrk_builder.infrastructure.draft_store import load_draft, save_draft, decode
 from mdrk_builder.application.scan_session import ScanSession, ScanCancelled
 from mdrk_builder.application.source_scan import scan_source_documents
-from mdrk_builder.ui.edit_history import EditHistory
+from mdrk_builder.application.edit_history import EditHistory
 from mdrk_builder.ui.reverse_sheet_dialog import incomplete_reverse_date_issues
 
 ROLE = SpecialistRole.PHYSICAL_THERAPIST

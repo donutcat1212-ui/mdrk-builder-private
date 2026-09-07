@@ -11,7 +11,7 @@ from mdrk_builder.application.source_scan import scan_source_documents
 from mdrk_builder.domain import Episode, SpecialistFinding, SpecialistRole, ScaleMeasurement, MdrkKind, Procedure, DischargeSummaryDraft
 from mdrk_builder.domain.discharge_summary import DischargeScaleRow, DischargeTeamFinding
 from mdrk_builder.ui.app import MdrkBuilderApp
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
 
 
 @pytest.fixture
@@ -132,7 +132,7 @@ def test_explicit_final_meeting_recalculates_course_duration(tmp_path):
 
 def test_manual_identity_keeps_original_source_across_rescan(root, tmp_path):
     from mdrk_builder.domain import PatientIdentity, ReverseSheetDraft
-    from mdrk_builder.ui.document_panels import ReverseSheetPanel
+    from mdrk_builder.ui.reverse_sheet_panel import ReverseSheetPanel
     old, new = tmp_path / 'old.docx', tmp_path / 'new.docx'
     panel = DischargeSummaryPanel(root, open_path=lambda _: None)
     panel.load(DischargeSummaryDraft(tmp_path, identity=PatientIdentity(full_name='Исходный'),

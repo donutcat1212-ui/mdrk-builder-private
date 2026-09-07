@@ -157,16 +157,6 @@ def row_source_links(row, label: str = 'Исходный документ') -> S
     return links
 
 
-def mark_manual_changes(previous, current) -> None:
-    """Keep the origin document while marking only changed clinical fields."""
-    from dataclasses import fields
-    ignored = {'manual_fields', 'source', 'initial_source', 'final_source', 'field_sources', 'scales', 'origin_note'}
-    object.__setattr__(current, 'manual_fields', set(getattr(previous, 'manual_fields', ())))
-    for item in fields(current):
-        if item.name not in ignored and getattr(previous, item.name) != getattr(current, item.name):
-            current.manual_fields.add(item.name)
-
-
 def open_source_links(parent: tk.Misc, links: SourceLinks, open_path: Callable[[Path | None], None]) -> None:
     menu = tk.Menu(parent, tearoff=False)
     parent._source_detail_menu = menu

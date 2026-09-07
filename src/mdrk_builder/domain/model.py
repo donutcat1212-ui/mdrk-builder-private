@@ -102,6 +102,7 @@ class ReverseSheetRow:
     source: Path | None = None
     manual_fields: set[str] = field(default_factory=set)
     field_sources: dict[str, Path] = field(default_factory=dict)
+    origin_key: tuple[str, ...] | None = None
 
 
 
@@ -167,6 +168,7 @@ class IcfDomain:
     conflict_choices: dict[str, list[tuple[str, Path | None]]] = field(default_factory=dict)
 
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
     @property
     def section(self) -> IcfSection:
@@ -224,6 +226,7 @@ class ScaleMeasurement:
     specialist: SpecialistRole
     source: Path | None = None
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
 
 
@@ -235,6 +238,7 @@ class SpecialistFinding:
     source: Path | None = None
     scales: list[ScaleMeasurement] = field(default_factory=list)
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
 
 
@@ -253,6 +257,7 @@ class Procedure:
     source_paths: tuple[Path, ...] = ()
     planned_frequency: str = ""
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
 
 

@@ -21,12 +21,14 @@ class InlineTreeEditor:
         commit: CommitCallback,
         values: ValuesCallback | None = None,
         activate: ActivateCallback | None = None,
+        is_data_row: Callable[[str], bool] | None = None,
     ) -> None:
         self.tree = tree
         self.editable_columns = editable_columns
         self.commit = commit
         self.values = values
         self.activate = activate
+        self.is_data_row = is_data_row or (lambda _item: True)
         self._widget: ttk.Entry | ttk.Combobox | None = None
         self._closing = False
         tree.bind("<Double-1>", self._on_double_click, add="+")
@@ -59,14 +61,7 @@ class InlineTreeEditor:
         item_id = selected[0]
         if self.activate is not None and self.activate(item_id):
             return "break"
-        displayed = tuple(self.tree.cget("displaycolumns"))
-        if displayed == ("#all",):
-            displayed = tuple(self.tree.cget("columns"))
-        column = next(
-            (name for identifier in displayed
-             if (name := self._column_name(identifier)) in self.editable_columns),
-            None,
-        )
+        column = next(iter(self._visible_editable_columns()), None)
         if column is None:
             return None
         self.edit(item_id, column)
@@ -112,12 +107,14 @@ class InlineTreeEditor:
         widget.bind("<FocusOut>", lambda _event: self.accept(item_id, column))
 
     def _next_cell(self, item_id, column, step):
-        columns = [c for c in self.tree["columns"] if c in self.editable_columns]
+        columns = self._visible_editable_columns()
         rows = []
         def visit(parent=""):
             for item in self.tree.get_children(parent):
-                rows.append(item)
-                visit(item)
+                if self.is_data_row(item):
+                    rows.append(item)
+                if self.tree.item(item, 'open'):
+                    visit(item)
         visit()
         if item_id not in rows or column not in columns:
             return "break"
@@ -125,14 +122,19 @@ class InlineTreeEditor:
         self.accept(item_id, column)
         if self._widget is not None:
             return "break"
-        while 0 <= index < len(rows) * len(columns):
+        if 0 <= index < len(rows) * len(columns):
             row, col = rows[index // len(columns)], columns[index % len(columns)]
-            if self.activate is None or self.activate(row):
-                self.tree.selection_set(row)
-                self.edit(row, col)
-                break
-            index += step
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+            self.edit(row, col)
         return "break"
+
+    def _visible_editable_columns(self):
+        displayed = tuple(self.tree.cget('displaycolumns'))
+        if displayed == ('#all',):
+            displayed = tuple(self.tree.cget('columns'))
+        return [name for identifier in displayed
+                if (name := self._column_name(identifier)) in self.editable_columns]
 
     def accept(self, item_id: str, column: str) -> str:
         if self._widget is None or self._closing:

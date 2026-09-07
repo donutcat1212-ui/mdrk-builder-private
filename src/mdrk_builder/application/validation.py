@@ -510,32 +510,8 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             )
         )
 
-    visible_icf_domains = select_icf_domains(episode, kind)
-    for index, domain in enumerate(visible_icf_domains):
-        # Personal factors are descriptive rows (for example age/motivation),
-        # not numeric ICF qualifier pairs.
-        if domain.code.strip().casefold().startswith("pf"):
-            continue
-        if domain.initial is None:
-            issues.append(
-                ReviewIssue(
-                    code="icf_initial_missing",
-                    message=f"У домена {domain.code} отсутствует исходная оценка",
-                    severity=ReviewSeverity.WARNING,
-                    field=f"icf.{index}.initial",
-                    source=domain.initial_source or domain.final_source,
-                )
-            )
-        if kind is MdrkKind.FINAL and domain.final is None:
-            issues.append(
-                ReviewIssue(
-                    code="icf_final_missing",
-                    message=f"У домена {domain.code} отсутствует повторная оценка",
-                    severity=ReviewSeverity.WARNING,
-                    field=f"icf.{index}.final",
-                    source=domain.final_source or domain.initial_source,
-                )
-            )
+    from mdrk_builder.application.icf_validation import icf_assessment_issues
+    issues.extend(icf_assessment_issues(select_icf_domains(episode, kind), include_final=kind is MdrkKind.FINAL))
 
     for index, row in enumerate(select_scale_rows(episode, kind)):
         if row.initial is None:

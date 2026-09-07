@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 
 from mdrk_builder.domain import DischargeSummaryDraft, ReverseSheetDraft
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel, ReverseSheetPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
+from mdrk_builder.ui.reverse_sheet_panel import ReverseSheetPanel
 
 
 @pytest.fixture
@@ -14,7 +15,7 @@ def root(monkeypatch):
     except tk.TclError as exc:
         pytest.skip(str(exc))
     window.withdraw()
-    monkeypatch.setattr('mdrk_builder.ui.document_panels.messagebox.showerror', lambda *a, **k: None)
+    monkeypatch.setattr('tkinter.messagebox.showerror', lambda *a, **k: None)
     yield window
     window.destroy()
 

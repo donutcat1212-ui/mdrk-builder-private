@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mdrk_builder.ui.source_access import mark_manual_changes
+from mdrk_builder.application.editing import mark_manual_changes
 
 import sys
 import tkinter as tk

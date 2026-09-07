@@ -16,7 +16,7 @@ from mdrk_builder.infrastructure.draft_store import save_draft, load_draft
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
 from mdrk_builder.infrastructure.docx_writer import write_mdrk_docx
 from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
-from mdrk_builder.ui.document_panels import DischargeSummaryPanel
+from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
 from test_discharge_summary import _write_document, _primary_lines, _discharge_lines
 
 

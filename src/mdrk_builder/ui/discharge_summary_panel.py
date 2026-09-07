@@ -1,480 +1,39 @@
 from __future__ import annotations
 
-import re
 import tkinter as tk
-from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from mdrk_builder.application.discharge_extractors import update_header_period
-from mdrk_builder.application.editing import merge_rows, merge_issues
+from mdrk_builder.application.editing import mark_manual_changes, merge_issues, merge_rows, row_key
+from mdrk_builder.application.workspace import DischargeWorkspaceState
 from mdrk_builder.domain import (
-    DischargeSummaryDraft,
-    ReverseSheetDraft,
-    ReverseSheetRow,
-    ReviewIssue,
-    ReviewSeverity,
-    IcfSection,
-    SpecialistRole,
+    DischargeScaleRow, DischargeSummaryDraft, DischargeTeamFinding,
+    IcfSection, ReviewIssue, ReviewSeverity, SpecialistRole,
 )
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
-from mdrk_builder.infrastructure.reverse_sheet_writer import write_reverse_sheet_docx
-from mdrk_builder.ui.discharge_summary_dialog import (
-    DISCHARGE_FIELD_GROUPS,
-    apply_discharge_form,
-)
+from mdrk_builder.ui.dialogs import IcfDomainDialog, ProcedureDialog
+from mdrk_builder.ui.discharge_summary_dialog import DISCHARGE_FIELD_GROUPS, apply_discharge_form
+from mdrk_builder.ui.document_controls import OpenPath, add_document_source_access, safe_patient_name
 from mdrk_builder.ui.episode_adapter import (
-    format_date,
-    format_datetime,
-    parse_optional_date,
-    parse_optional_datetime,
+    format_date, format_datetime, parse_optional_date, parse_optional_datetime, role_from_name,
 )
+from mdrk_builder.ui.fields_dialog import FieldsDialog
 from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
-from mdrk_builder.ui.inline_tree import InlineTreeEditor
 from mdrk_builder.ui.icf_table import apply_icf_grid_style
 from mdrk_builder.ui.source_access import (
-    TableSourceAccess, SourceLinks, icf_source_links, path_column_links,
-    row_source_links, field_source_links, open_source_links, mark_manual_changes,
+    TableSourceAccess, SourceLinks, icf_source_links, row_source_links,
+    field_source_links, open_source_links,
 )
-from mdrk_builder.ui.reverse_sheet_dialog import incomplete_reverse_date_issues
 
 
-OpenPath = Callable[[Path | None], None]
-
-
-def _add_document_source_access(
-    source_tree: ttk.Treeview, warning_tree: ttk.Treeview, open_path: OpenPath,
-) -> tuple[TableSourceAccess, ...]:
-    controls = []
-    for tree in (source_tree, warning_tree):
-        bar = ttk.Frame(tree.master)
-        bar.pack(fill="x", pady=(0, 5), before=tree)
-        column = "source" if "source" in tree["columns"] else "path"
-        controls.append(TableSourceAccess(
-            tree, bar, links=lambda item, t=tree, c=column: path_column_links(t, item, c),
-            open_path=open_path,
-        ))
-    return tuple(controls)
-
-
-def _safe_patient_name(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-zА-Яа-яЁё-]+", " ", value).strip() or "пациент"
-
-
-def _reverse_group(row: ReverseSheetRow) -> str:
-    value = f"{row.intervention} {row.performer}".casefold()
-    groups = (
-        (("неврол",), "Врач-невролог"),
-        (("рефлекс",), "Рефлексотерапевт"),
-        (("нейропсих", "психол"), "Медицинский психолог"),
-        (("логопед",), "Медицинский логопед"),
-        (("эрготерап",), "Эрготерапевт"),
-        (("физио",), "Физиотерапевт"),
-        (("лфк", "физической реабилитац"), "Врач ЛФК / ФРМ"),
-    )
-    for needles, label in groups:
-        if any(needle in value for needle in needles):
-            return label
-    return "Другие"
-
-
-class ReverseSheetPanel(ttk.Frame):
-    def __init__(self, parent: tk.Misc, *, open_path: OpenPath) -> None:
-        super().__init__(parent)
-        self.draft: ReverseSheetDraft | None = None
-        self._open_path = open_path
-        self._selected_group = ""
-        self._row_refs: list[int] = []
-        self._header_dirty: set[str] = set()
-        self._rows_dirty = False
-        self._populating = False
-        self._header_vars = {
-            "full_name": tk.StringVar(),
-            "birth_date": tk.StringVar(),
-            "record_number": tk.StringVar(),
-            "admission": tk.StringVar(),
-        }
-        for name, variable in self._header_vars.items():
-            variable.trace_add("write", lambda *_args, field=name: self._mark_header_dirty(field))
-        from mdrk_builder.ui.edit_history import install_history
-        methods = [name for name in ("_commit_row_cell", "_delete_rows", "_add_row", "_edit_row", "_edit_discharge_icf", "_edit_clinical_row") if hasattr(self, name)]
-        self._table_history = install_history(self, methods, lambda: self.draft, self._restore_table_state)
-        self._build()
-
-    def _build(self) -> None:
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=6, pady=(0, 5))
-        notebook.enable_traversal()
-
-        main = ttk.Frame(notebook, padding=7)
-        notebook.add(main, text="Основное")
-        labels = (
-            ("full_name", "ФИО пациента"),
-            ("birth_date", "Дата рождения"),
-            ("record_number", "Номер медкарты"),
-            ("admission", "Поступление"),
-        )
-        for index, (name, label) in enumerate(labels):
-            row, pair = divmod(index, 2)
-            ttk.Label(main, text=label).grid(row=row * 2, column=pair, sticky="w", padx=(0, 8), pady=(4, 2))
-            ttk.Entry(main, textvariable=self._header_vars[name]).grid(
-                row=row * 2 + 1, column=pair, sticky="ew", padx=(0, 12), pady=(0, 7)
-            )
-        main.columnconfigure(0, weight=1)
-        main.columnconfigure(1, weight=1)
-        self.header_source_button = ttk.Button(
-            main, text="Источник", command=self._open_header_source
-        )
-        self.header_source_button.grid(row=4, column=1, sticky="e", padx=(0, 12), pady=(8, 0))
-
-        specialists = ttk.Frame(notebook, padding=7)
-        notebook.add(specialists, text="Специалисты")
-        pane = ttk.Panedwindow(specialists, orient="horizontal")
-        pane.pack(fill="both", expand=True)
-        left = ttk.Frame(pane)
-        right = ttk.Frame(pane)
-        pane.add(left, weight=1)
-        pane.add(right, weight=4)
-        self.group_tree = ttk.Treeview(left, columns=("count",), show="tree")
-        self.group_tree.pack(fill="both", expand=True)
-        self.group_tree.bind("<<TreeviewSelect>>", self._on_group_selected)
-
-        row_bar = ttk.Frame(right)
-        row_bar.pack(fill="x", pady=(0, 4))
-        self.group_title = tk.StringVar()
-        ttk.Label(row_bar, textvariable=self.group_title).pack(side="left")
-
-        table = ttk.Frame(right)
-        table.pack(fill="both", expand=True)
-        columns = ("intervention", "appointment", "performed", "performer")
-        self.row_tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="extended")
-        for name, label, width in (
-            ("intervention", "Медицинское вмешательство", 390),
-            ("appointment", "Дата назначения", 130),
-            ("performed", "Дата исполнения", 155),
-            ("performer", "Исполнитель", 190),
-        ):
-            self.row_tree.heading(name, text=label)
-            self.row_tree.column(name, width=width, minwidth=80, anchor="w")
-        scroll = ttk.Scrollbar(table, orient="vertical", command=self.row_tree.yview)
-        self.row_tree.configure(yscrollcommand=scroll.set)
-        self.row_tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        self.row_tree.tag_configure("new", foreground="#1f63c5")
-        self._row_editor = InlineTreeEditor(
-            self.row_tree,
-            editable_columns=set(columns),
-            commit=self._commit_row_cell,
-            activate=self._activate_row,
-        )
-        self.row_tree.bind("<Delete>", self._delete_rows)
-        self.row_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_row_source())
-        self._row_sources = TableSourceAccess(
-            self.row_tree, row_bar, links=self._row_source_links, open_path=self._open_path,
-        )
-        self.row_source_button = self._row_sources.button
-
-        sources = ttk.Frame(notebook, padding=7)
-        notebook.add(sources, text="Источники")
-        self.source_tree = ttk.Treeview(sources, columns=("path",), show="headings")
-        self.source_tree.heading("path", text="Документ")
-        self.source_tree.column("path", width=900, anchor="w")
-        self.source_tree.pack(fill="both", expand=True)
-        self.source_tree.bind("<Double-1>", self._open_selected_source)
-
-        warnings = ttk.Frame(notebook, padding=7)
-        notebook.add(warnings, text="Предупреждения")
-        self.warning_tree = ttk.Treeview(warnings, columns=("message", "source"), show="headings")
-        self.warning_tree.heading("message", text="Сообщение")
-        self.warning_tree.heading("source", text="Источник")
-        self.warning_tree.column("message", width=650, anchor="w")
-        self.warning_tree.column("source", width=300, anchor="w")
-        self.warning_tree.pack(fill="both", expand=True)
-        self._source_access = _add_document_source_access(self.source_tree, self.warning_tree, self._open_path)
-        self.warning_tree.bind("<Return>", self._go_to_warning)
-        self.warning_tree.bind("<Double-1>", self._go_to_warning)
-
-    def _go_to_warning(self, event=None):
-        from mdrk_builder.ui.workspace_search import reveal
-        selected=self.warning_tree.selection()
-        if not selected:return
-        values=self.warning_tree.item(selected[0],"values")
-        field=str(values[1]).split(".")[0] if len(values)>2 else "rows"
-        widget=getattr(self,"_widgets",{}).get(field)
-        if widget is None:
-            widget=getattr(self,"icf_tree",None) if field in {"icf","rehabilitation_diagnosis"} else getattr(self,"clinical_tree",getattr(self,"row_tree",None))
-        if widget is not None:reveal(widget)
-
-    def _restore_table_state(self, draft):
-        if self.draft is None: return
-        self.draft.rows = deepcopy(draft.rows)
-        self._rows_dirty = True
-        self._refresh_groups()
-        self._refresh_rows()
-        self._refresh_warnings()
-
-    def load(self, draft: ReverseSheetDraft) -> None:
-        self.draft = draft
-        self._baseline = deepcopy(draft)
-        if hasattr(self, "_table_history"):
-            self._table_history.clear()
-        self._header_dirty.clear()
-        self._rows_dirty = False
-        self._populate()
-
-    def merge_scan(self, draft: ReverseSheetDraft) -> bool:
-        if self.draft is None:
-            self.load(draft)
-            return True
-        if not self.apply():
-            return False
-        previous = self.draft
-        source_baseline = deepcopy(draft)
-        from mdrk_builder.application.editing import change_summary
-        self._last_change_summary = change_summary(getattr(self, "_baseline", None), draft)
-        if self._rows_dirty:
-            draft.rows, notes = merge_rows(getattr(self, "_baseline", previous).rows, previous.rows, draft.rows)
-            draft.issues.extend(merge_issues(notes))
-        if "full_name" in self._header_dirty:
-            draft.identity.full_name = previous.identity.full_name
-        if "birth_date" in self._header_dirty:
-            draft.identity.birth_date = previous.identity.birth_date
-        if "record_number" in self._header_dirty:
-            draft.identity.medical_record_number = previous.identity.medical_record_number
-        if "admission" in self._header_dirty:
-            draft.admission_datetime = previous.admission_datetime
-        for name in self._header_dirty:
-            draft.field_sources.pop(name, None)
-            origin = previous.field_sources.get(name, previous.header_source)
-            if origin is not None:
-                draft.field_sources[name] = origin
-        self._baseline = source_baseline
-        if hasattr(self, "_table_history"):
-            self._table_history.clear()
-        self.draft = draft
-        self._populate()
-        return True
-
-    def _populate(self) -> None:
-        if self.draft is None:
-            return
-        self._populating = True
-        self._header_vars["full_name"].set(self.draft.identity.full_name)
-        self._header_vars["birth_date"].set(format_date(self.draft.identity.birth_date))
-        self._header_vars["record_number"].set(self.draft.identity.medical_record_number)
-        self._header_vars["admission"].set(format_datetime(self.draft.admission_datetime))
-        self._populating = False
-        if self.draft.header_source is None and not self.draft.field_sources and not self._header_dirty:
-            self.header_source_button.configure(text="Источник не указан", state="disabled")
-        else:
-            self.header_source_button.configure(text="Источник", state="normal")
-        self._refresh_groups()
-        self._refresh_sources()
-        self._refresh_warnings()
-
-    def _mark_header_dirty(self, field: str) -> None:
-        if not self._populating:
-            self._header_dirty.add(field)
-
-    def _refresh_groups(self) -> None:
-        self.group_tree.delete(*self.group_tree.get_children())
-        if self.draft is None:
-            return
-        grouped: dict[str, int] = {}
-        for row in self.draft.rows:
-            group = _reverse_group(row)
-            grouped[group] = grouped.get(group, 0) + 1
-        for index, (group, count) in enumerate(grouped.items()):
-            self.group_tree.insert("", "end", iid=f"group:{index}", text=f"{group}  ({count})", values=(group,))
-        if not grouped:
-            grouped["Другие"] = 0
-            self.group_tree.insert("", "end", iid="group:0", text="Другие  (0)", values=("Другие",))
-        groups = list(grouped)
-        if self._selected_group not in grouped:
-            self._selected_group = groups[0]
-        selected = groups.index(self._selected_group)
-        self.group_tree.selection_set(f"group:{selected}")
-        self._refresh_rows()
-
-    def _on_group_selected(self, _event: tk.Event | None = None) -> None:
-        selected = self.group_tree.selection()
-        if selected:
-            values = self.group_tree.item(selected[0], "values")
-            if values:
-                self._selected_group = str(values[0])
-        self._refresh_rows()
-
-    def _refresh_rows(self) -> None:
-        self.row_tree.delete(*self.row_tree.get_children())
-        self._row_refs = []
-        self.group_title.set(self._selected_group)
-        if self.draft is not None:
-            for index, row in enumerate(self.draft.rows):
-                if _reverse_group(row) != self._selected_group:
-                    continue
-                item_id = str(len(self._row_refs))
-                self._row_refs.append(index)
-                self.row_tree.insert(
-                    "", "end", iid=item_id,
-                    values=(row.intervention, format_date(row.appointment_date), format_datetime(row.performed_at), row.performer),
-                )
-        self.row_tree.insert("", "end", iid="new:reverse", tags=("new",), values=("＋ Новая строка…", "", "", ""))
-        self._update_row_source()
-
-    def _activate_row(self, item_id: str) -> bool:
-        if item_id != "new:reverse" or self.draft is None:
-            return False
-        self.draft.rows.append(ReverseSheetRow(""))
-        self._rows_dirty = True
-        index = len(self.draft.rows) - 1
-        self._row_refs.append(index)
-        local_id = str(len(self._row_refs) - 1)
-        self.row_tree.insert("", len(self.row_tree.get_children()) - 1, iid=local_id, values=("", "", "", ""))
-        self.row_tree.selection_set(local_id)
-        self.after(1, lambda: self._row_editor.edit(local_id, "intervention"))
-        return True
-
-    def _commit_row_cell(self, item_id: str, column: str, value: str) -> None:
-        if self.draft is None or not item_id.isdigit():
-            return
-        row = self.draft.rows[self._row_refs[int(item_id)]]
-        previous = deepcopy(row)
-        cleaned = value.strip()
-        if column == "intervention":
-            row.intervention = cleaned
-        elif column == "appointment":
-            row.appointment_date = parse_optional_date(cleaned)
-        elif column == "performed":
-            row.performed_at = parse_optional_datetime(cleaned)
-        elif column == "performer":
-            row.performer = cleaned
-        mark_manual_changes(previous, row)
-        self._rows_dirty = True
-        self._refresh_groups()
-        self._refresh_warnings()
-
-    def _delete_rows(self, _event: tk.Event | None = None) -> str:
-        if self.draft is None:
-            return "break"
-        indices = sorted(
-            (self._row_refs[int(item)] for item in self.row_tree.selection() if item.isdigit()),
-            reverse=True,
-        )
-        for index in indices:
-            del self.draft.rows[index]
-        if indices:
-            self._rows_dirty = True
-            self._refresh_groups()
-            self._refresh_warnings()
-        return "break"
-
-    def _refresh_sources(self) -> None:
-        self.source_tree.delete(*self.source_tree.get_children())
-        if self.draft is None:
-            return
-        paths = {row.source for row in self.draft.rows if row.source is not None}
-        if self.draft.header_source is not None:
-            paths.add(self.draft.header_source)
-        for index, path in enumerate(sorted(paths, key=lambda item: str(item).casefold())):
-            self.source_tree.insert("", "end", iid=str(index), values=(str(path),))
-
-    def _refresh_warnings(self) -> None:
-        self.warning_tree.delete(*self.warning_tree.get_children())
-        if self.draft is None:
-            return
-        for index, issue in enumerate(self.review_issues()):
-            self.warning_tree.insert("", "end", iid=str(index), values=(issue.message, str(issue.source or "")))
-
-    def _update_row_source(self) -> None:
-        self._row_sources.refresh()
-
-    def _row_source_links(self, item: str) -> SourceLinks:
-        if self.draft is None or not item.isdigit() or int(item) >= len(self._row_refs):
-            return ()
-        row = self.draft.rows[self._row_refs[int(item)]]
-        links = list(row_source_links(row, "Документ вмешательства"))
-        labels = {"appointment_date": "Дата назначения", "performed_at": "Дата исполнения", "performer": "Исполнитель"}
-        links.extend((labels.get(key, key), path) for key, path in row.field_sources.items())
-        return links
-
-    def _selected_row(self) -> ReverseSheetRow | None:
-        if self.draft is None:
-            return None
-        selected = self.row_tree.selection()
-        if not selected or not selected[0].isdigit():
-            return None
-        return self.draft.rows[self._row_refs[int(selected[0])]]
-
-    def _open_header_source(self) -> None:
-        links = []
-        if self.draft is not None:
-            labels = {"full_name": "ФИО", "birth_date": "Дата рождения",
-                      "record_number": "Номер ИБ", "admission": "Поступление"}
-            for name, label in labels.items():
-                origin = self.draft.field_sources.get(name) if name in self._header_dirty else self.draft.field_sources.get(name, self.draft.header_source)
-                entries = field_source_links({name: origin} if origin else {}, name,
-                                             manual=name in self._header_dirty)
-                links.extend((f"{label}: {text}", path) for text, path in
-                             entries or [("Источник не указан", None)])
-        open_source_links(self.header_source_button, links, self._open_path)
-
-    def _open_selected_row_source(self) -> None:
-        row = self._selected_row()
-        self._open_path(row.source if row else None)
-
-    def _open_selected_source(self, _event: tk.Event | None = None) -> None:
-        selected = self.source_tree.selection()
-        if selected:
-            values = self.source_tree.item(selected[0], "values")
-            self._open_path(Path(str(values[0])) if values else None)
-
-    def apply(self) -> bool:
-        if self.draft is None:
-            return False
-        try:
-            birth_date = parse_optional_date(self._header_vars["birth_date"].get())
-            admission = parse_optional_datetime(self._header_vars["admission"].get())
-        except ValueError as exc:
-            messagebox.showerror("Проверьте поля", str(exc), parent=self)
-            return False
-        self.draft.identity.full_name = self._header_vars["full_name"].get().strip()
-        self.draft.identity.birth_date = birth_date
-        self.draft.identity.medical_record_number = self._header_vars["record_number"].get().strip()
-        self.draft.admission_datetime = admission
-        return True
-
-    def review_issues(self) -> tuple[ReviewIssue, ...]:
-        if self.draft is None:
-            return ()
-        return (*self.draft.issues, *incomplete_reverse_date_issues(self.draft.rows, self.draft.admission_datetime, self.draft.discharge_datetime))
-
-    def save(self, *, defer=False):
-        if self.draft is None or not self.apply():
-            return None
-        issues = self.review_issues()
-        if not confirm_generation_with_issues(self, issues, document_name="Оборотный лист"):
-            return None
-        output = filedialog.asksaveasfilename(
-            parent=self, title="Сохранить оборотный лист", defaultextension=".docx",
-            filetypes=(("Документ Word", "*.docx"),),
-            initialfile=f"Оборотный лист {_safe_patient_name(self.draft.identity.full_name)}.docx",
-        )
-        if not output:
-            return None
-        if defer:
-            from functools import partial
-            return partial(write_reverse_sheet_docx, deepcopy(self.draft), Path(output))
-        return write_reverse_sheet_docx(self.draft, Path(output))
-
-
-from mdrk_builder.ui.discharge_tables import DischargeTableEditing
-
-
-class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
-    def __init__(self, parent: tk.Misc, *, open_path: OpenPath) -> None:
+class DischargeSummaryPanel(ttk.Frame):
+    def __init__(self, parent: tk.Misc, *, open_path: OpenPath, history=None) -> None:
         super().__init__(parent)
         self.draft: DischargeSummaryDraft | None = None
+        self._baseline = None
         self._open_path = open_path
         self._widgets: dict[str, tk.Text] = {}
         self._source_buttons: dict[str, ttk.Button] = {}
@@ -488,8 +47,8 @@ class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
         for name, variable in self._identity_vars.items():
             variable.trace_add("write", lambda *_args, field=name: self._mark_identity_dirty(field))
         from mdrk_builder.ui.edit_history import install_history
-        methods = [name for name in ("_commit_row_cell", "_delete_rows", "_add_row", "_edit_row", "_edit_discharge_icf", "_edit_clinical_row") if hasattr(self, name)]
-        self._table_history = install_history(self, methods, lambda: self.draft, self._restore_table_state)
+        methods = ("_edit_discharge_icf", "_edit_clinical_row")
+        self._table_history = install_history(self, methods, lambda: self.draft, self._restore_table_state, history=history)
         self._build()
 
     def _build(self) -> None:
@@ -569,7 +128,7 @@ class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
             self.warning_tree.heading(name, text=label)
             self.warning_tree.column(name, width=width, anchor="w")
         self.warning_tree.pack(fill="both", expand=True)
-        self._source_access = _add_document_source_access(self.source_tree, self.warning_tree, self._open_path)
+        self._source_access = add_document_source_access(self.source_tree, self.warning_tree, self._open_path)
         self.warning_tree.bind("<Return>", self._go_to_warning)
         self.warning_tree.bind("<Double-1>", self._go_to_warning)
 
@@ -588,9 +147,71 @@ class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
         if self.draft is None: return
         for field in ('icf_domains', 'completed_procedures', 'team_findings', 'admission_scale_rows', 'discharge_scale_rows'):
             setattr(self.draft, field, deepcopy(getattr(draft, field)))
+        self.refresh_tables()
+
+    def refresh_tables(self):
         self._refresh_icf()
         self._refresh_clinical_data()
         self._refresh_live_issues()
+
+    def capture_state(self):
+        if self.draft is None:
+            return None
+        return deepcopy(DischargeWorkspaceState(
+            self.draft, self._baseline, self._dirty_fields, self._dirty_identity,
+            {key: variable.get() for key, variable in self._identity_vars.items()},
+            {key: widget.get('1.0', 'end-1c') for key, widget in self._widgets.items()},
+        ))
+
+    @property
+    def source_baseline(self):
+        return self._baseline
+
+    def validate_state(self, state):
+        if state is not None and (state.entries.keys() - self._identity_vars.keys() or state.text.keys() - self._widgets.keys()):
+            raise ValueError('Неизвестные поля документа в черновике')
+
+    def restore_state(self, state):
+        self.clear()
+        if state is None:
+            return
+        self.load(state.draft)
+        self._baseline = state.baseline or deepcopy(state.draft)
+        self._populating = True
+        try:
+            for key, value in state.entries.items():
+                self._identity_vars[key].set(value)
+            for key, value in state.text.items():
+                widget = self._widgets[key]
+                widget.delete('1.0', 'end')
+                widget.insert('1.0', value)
+                widget.edit_reset()
+                widget.edit_modified(False)
+        finally:
+            self._populating = False
+        self._dirty_fields = set(state.dirty_fields)
+        self._dirty_identity = set(state.dirty_identity)
+
+    def clear(self):
+        self.draft = self._baseline = None
+        self._table_history.clear()
+        self._dirty_fields.clear()
+        self._dirty_identity.clear()
+        self._last_change_summary = ''
+        self._populating = True
+        try:
+            for variable in self._identity_vars.values():
+                variable.set('')
+            for widget in self._widgets.values():
+                widget.delete('1.0', 'end')
+                widget.edit_reset()
+                widget.edit_modified(False)
+        finally:
+            self._populating = False
+        for tree in (self.icf_tree, self.clinical_tree, self.source_tree, self.warning_tree):
+            tree.delete(*tree.get_children())
+        for button in (*self._source_buttons.values(), self.identity_source_button):
+            button.configure(text='Источник не указан', state='disabled')
 
     def load(self, draft: DischargeSummaryDraft) -> None:
         self.draft = draft
@@ -1034,7 +655,7 @@ class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
         output = filedialog.asksaveasfilename(
             parent=self, title="Сохранить выписной эпикриз", defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
-            initialfile=f"Выписной эпикриз {_safe_patient_name(self.draft.identity.full_name)}.docx",
+            initialfile=f"Выписной эпикриз {safe_patient_name(self.draft.identity.full_name)}.docx",
         )
         if not output:
             return None
@@ -1042,3 +663,100 @@ class DischargeSummaryPanel(DischargeTableEditing, ttk.Frame):
             from functools import partial
             return partial(write_discharge_summary_docx, deepcopy(self.draft), Path(output), ignore_issues=bool(issues))
         return write_discharge_summary_docx(self.draft, Path(output), ignore_issues=bool(issues))
+
+    def _edit_discharge_icf(self, action='edit'):
+        if self.draft is None: return
+        selected=self.icf_tree.selection()
+        index=int(selected[0].split(':')[1]) if selected and selected[0].startswith('domain:') else None
+        rows=list(self.draft.icf_domains)
+        if action != 'add' and index is None: return
+        old=rows[index] if index is not None else None
+        if action == 'delete':
+            if not messagebox.askyesno('Удалить строку', 'Удалить выбранный домен? Отменить можно через меню «Правка».', parent=self): return
+            rows.pop(index)
+        elif action == 'source':
+            original=next((r for r in self._baseline.icf_domains if row_key(r)==row_key(old)),None)
+            if original is None: return
+            rows[index]=deepcopy(original)
+        else:
+            dialog=IcfDomainDialog(self, old if action=='edit' else None)
+            if not dialog.result:return
+            if action=='add':
+                dialog.result.manual_fields.update({'code', 'initial', 'final'})
+                rows.append(dialog.result)
+            else: rows[index]=dialog.result
+        self.draft.icf_domains=tuple(rows);self._refresh_icf()
+
+    def _edit_clinical_row(self, action='edit'):
+        if self.draft is None:return
+        selected=self.clinical_tree.selection()
+        if not selected:return
+        parts=selected[0].split(':');group=parts[0]
+        mapping={'team':'team_findings','program':'completed_procedures','admission':'admission_scale_rows','discharge':'discharge_scale_rows'}
+        if group not in mapping:return
+        attr=mapping[group];rows=list(getattr(self.draft,attr));index=int(parts[1]) if len(parts)>1 else None
+        if action!='add' and index is None:return
+        child=len(parts)==4 and parts[2]=='scale'
+        if action == "add_scale":
+            if group != "team" or index is None: return
+            child = True
+            action = "add"
+        parent=rows[index] if index is not None else None
+        target=list(parent.scales) if child else rows
+        target_index=(int(parts[3]) if len(parts)==4 else None) if child else index
+        old=target[target_index] if target_index is not None else None
+        if action=='delete':
+            if not messagebox.askyesno('Удалить строку','Удалить выбранную строку? Отмена доступна в меню «Правка».',parent=self):return
+            target.pop(target_index)
+        elif action=='source':
+            originals=getattr(self._baseline,attr)
+            if child:
+                original_parent=next((r for r in originals if row_key(r)==row_key(parent)),None)
+                originals=original_parent.scales if original_parent else ()
+            original=next((r for r in originals if row_key(r)==row_key(old)),None)
+            if original is None:return
+            target[target_index]=deepcopy(original)
+        else:
+            if action=='add':old=None
+            if group=='program':
+                dialog=ProcedureDialog(self,old);new=dialog.result
+            elif group=='team' and not child:
+                values={'role':('Специалист',old.role.display_name if old else SpecialistRole.OTHER.display_name),
+                    'specialist_name':('ФИО',old.specialist_name if old else ''),
+                    'occurred_at':('Дата и время',format_datetime(old.occurred_at) if old else ''),
+                    'conclusion':('Заключение',old.conclusion if old else '')}
+                dialog=FieldsDialog(self,'Заключение специалиста',values)
+                if not dialog.result:return
+                data=dialog.result;new=replace(old,role=role_from_name(data['role']),specialist_name=data['specialist_name'],occurred_at=parse_optional_datetime(data['occurred_at']),conclusion=data['conclusion']) if old else DischargeTeamFinding(role_from_name(data['role']),data['conclusion'],specialist_name=data['specialist_name'],occurred_at=parse_optional_datetime(data['occurred_at']))
+            else:
+                values={'role':('Специалист',old.role.display_name if old else SpecialistRole.OTHER.display_name),
+                    'name':('Шкала',old.name if old else ''),'value':('Текущее значение',old.value if old else ''),
+                    'initial_value':('Первичное значение',old.initial_value if old else ''),
+                    'initial_at':('Дата первичной оценки',format_datetime(old.initial_at) if old else ''),
+                    'current_at':('Дата текущей оценки',format_datetime(old.current_at) if old else '')}
+                if child:
+                    values.pop('role')
+                dialog=FieldsDialog(self,'Шкала',values)
+                if not dialog.result:return
+                data=dialog.result;data['role']=parent.role if child else role_from_name(data['role'])
+                for k in ('initial_at','current_at'):data[k]=parse_optional_datetime(data[k])
+                new=replace(old,**data) if old else DischargeScaleRow(**data)
+            if new is None:return
+            if old is not None:mark_manual_changes(old,new)
+            elif hasattr(new,'manual_fields'):new.manual_fields.update({'value'} if hasattr(new,'value') else {'name'})
+            if action=='add':target.append(new)
+            else:target[target_index]=new
+        from mdrk_builder.application.shared_edits import synchronize_scale_rows, synchronize_discharge_point, remove_scale_rows
+        if child:
+            rows[index] = replace(parent, scales=tuple(target))
+            if old is not None:
+                remove_scale_rows(self.draft, old)
+            if action != 'delete':
+                synchronize_scale_rows(self.draft, target[-1] if action == 'add' else target[target_index])
+        setattr(self.draft, attr, tuple(rows))
+        if group in {'admission', 'discharge'}:
+            synchronize_discharge_point(self.draft, attr, old, None if action == 'delete' else target[-1] if action == 'add' else target[target_index])
+        elif group == 'team' and not child and action == 'delete':
+            for row in old.scales:
+                remove_scale_rows(self.draft, row)
+        self._refresh_clinical_data()

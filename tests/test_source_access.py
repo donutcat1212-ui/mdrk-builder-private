@@ -10,7 +10,7 @@ from mdrk_builder.domain import (
     ReverseSheetDraft, ReverseSheetRow, ReviewIssue, ScaleMeasurement, SpecialistRole,
 )
 from mdrk_builder.ui.app import MdrkBuilderApp
-from mdrk_builder.ui.document_panels import ReverseSheetPanel
+from mdrk_builder.ui.reverse_sheet_panel import ReverseSheetPanel
 from mdrk_builder.ui.source_access import TableSourceAccess
 
 

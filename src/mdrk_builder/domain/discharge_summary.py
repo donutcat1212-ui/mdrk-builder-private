@@ -23,6 +23,7 @@ class DischargeTeamFinding:
     occurred_at: datetime | None = None
     scales: tuple[DischargeScaleRow, ...] = ()
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,7 @@ class DischargeScaleRow:
     initial_at: datetime | None = None
     current_at: datetime | None = None
     manual_fields: set[str] = field(default_factory=set)
+    origin_key: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)

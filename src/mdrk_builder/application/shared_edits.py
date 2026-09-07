@@ -82,6 +82,8 @@ def transfer_discharge_edits(draft, episode, identity_fields=(), baseline=None):
                             continue
                         if new is None:
                             finding.scales.remove(scale)
+                        elif (new.role, canonical_scale_name(new.name)) != (old.role, canonical_scale_name(old.name)):
+                            finding.scales.remove(scale)
                         elif new.current_at != old.current_at:
                             scale.measured_at = new.current_at
                             scale.value = new.value
@@ -91,8 +93,7 @@ def transfer_discharge_edits(draft, episode, identity_fields=(), baseline=None):
             rows=getattr(episode,source_attr)
             for row in getattr(draft,attr):
                 if not row.manual_fields:continue
-                key=lambda v:(getattr(v,'code',''),getattr(v,'name',''),getattr(v,'source',None))
-                index=next((i for i,v in enumerate(rows) if key(v)==key(row)),None)
+                index=next((i for i,v in enumerate(rows) if row_key(v)==row_key(row)),None)
                 if index is None:rows.append(deepcopy(row))
                 else:rows[index]=deepcopy(row)
     for finding in episode.findings:
@@ -102,7 +103,7 @@ def transfer_discharge_edits(draft, episode, identity_fields=(), baseline=None):
                 scale.value=candidates[-1].value;scale.manual_fields.update({'value'})
 
     for row in (*draft.admission_scale_rows, *draft.discharge_scale_rows):
-        if not row.manual_fields or not row.value:
+        if not row.manual_fields:
             continue
         present = any(scale.specialist == row.role and canonical_scale_name(scale.name) == canonical_scale_name(row.name)
                       and scale.source == row.source and scale.measured_at == row.current_at
