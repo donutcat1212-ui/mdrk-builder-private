@@ -266,20 +266,6 @@ def scan_discharge_summary(
             issues=issues,
             discharge_source=discharge.path if discharge else None,
         )
-    elif not any(
-        issue.code == "final_mdrk_source_ambiguous" for issue in issues
-    ):
-        issues.append(
-            ReviewIssue(
-                "final_mdrk_source_missing",
-                (
-                    "Структурно итоговый МДРК-2 не найден. Итоговые поля собраны "
-                    "из профильных документов и требуют ручной сверки."
-                ),
-                ReviewSeverity.WARNING,
-                "final_mdrk_source",
-            )
-        )
     snapshot = build_snapshot(episode, MdrkKind.FINAL)
 
     if discharge is None:
@@ -448,9 +434,11 @@ def scan_discharge_summary(
         and potential_source is not None
     ):
         field_sources["rehabilitation_potential"] = potential_source
-    if final_mdrk is not None:
-        if episode.sections.goal:
-            field_sources["goal_result"] = final_mdrk.document.source_path
+    imported_goal = ""
+    if (final_mdrk is not None
+            and episode.field_sources.get("sections.goal") == final_mdrk.document.source_path):
+        imported_goal = episode.sections.goal
+        field_sources["goal_result"] = final_mdrk.document.source_path
     if episode.procedures and episode.procedures[0].source is not None:
         field_sources["completed_program"] = episode.procedures[0].source
 
@@ -552,7 +540,7 @@ def scan_discharge_summary(
         rehabilitation_potential=(
             current_values.get("rehabilitation_potential", snapshot.sections.rehabilitation_potential if potential_source is not None or final_mdrk is not None else "")
         ),
-        goal_result=episode.sections.goal if final_mdrk is not None else "",
+        goal_result=final_values.get("goal_result", imported_goal),
         work_capacity=final_values.get("work_capacity", ""),
         radiation_exposure=radiation_exposure,
         recommendations=final_values.get("recommendations", ""),

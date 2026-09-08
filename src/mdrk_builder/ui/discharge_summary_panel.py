@@ -358,10 +358,9 @@ class DischargeSummaryPanel(ttk.Frame):
         self.icf_status = tk.StringVar(value="Выберите папку эпизода и выполните сканирование.")
         ttk.Label(bar, textvariable=self.icf_status, wraplength=680).pack(side="left")
         self.icf_source_button = ttk.Button(
-            bar, text="Источник МДРК-2",
+            bar, text="Дополнительный источник МДРК",
             command=lambda: self._open_path(self.draft.final_mdrk_source if self.draft else None),
         )
-        self.icf_source_button.pack(side="right")
         self.icf_source_button.state(["disabled"])
         table = ttk.Frame(tab)
         table.pack(fill="both", expand=True)
@@ -422,12 +421,14 @@ class DischargeSummaryPanel(ttk.Frame):
             self.icf_tree.column(column, width=135)
         domains = self.draft.icf_domains
         self.icf_source_button.state(["!disabled" if self.draft.final_mdrk_source else "disabled"])
+        if self.draft.final_mdrk_source:
+            self.icf_source_button.pack(side="right")
+        else:
+            self.icf_source_button.pack_forget()
         self.icf_status.set(
-            "Профиль для выписного эпикриза — просмотр. Пустая оценка означает отсутствие данных."
+            "МКФ эпизода. Двойной щелчок — правка; источники доступны для каждой строки."
             if domains else
-            "МКФ не извлечена из МДРК-2. Проверьте источник и предупреждения."
-            if self.draft.final_mdrk_source else
-            "Итоговый МДРК-2 не найден. Проверьте документы эпизода и предупреждения."
+            "В документах эпизода не найдены оценки МКФ. Добавьте строки или проверьте источники."
         )
         for index, domain in enumerate(domains):
             group = domain.section.value
@@ -564,7 +565,7 @@ class DischargeSummaryPanel(ttk.Frame):
         for label, source in (
             ("Выписной эпикриз", self.draft.discharge_source),
             ("Первичный осмотр", self.draft.primary_neurologist_source),
-            ("МДРК-2", self.draft.final_mdrk_source),
+            ("Внешний МДРК (дополнительный)", self.draft.final_mdrk_source),
         ):
             if source is not None and source not in known:
                 rows.append((label, source))

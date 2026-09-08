@@ -172,7 +172,7 @@ def test_final_mdrk_selection_requires_completed_program_structure() -> None:
     assert selected is completed
 
 
-def test_generated_final_mdrk_can_be_discharge_source() -> None:
+def test_generated_final_mdrk_is_not_a_discharge_source() -> None:
     generated = _mdrk_document(
         "generated-final.docx",
         "12. Выполненная программа медицинской реабилитации",
@@ -193,10 +193,10 @@ def test_generated_final_mdrk_can_be_discharge_source() -> None:
         episode_key=_episode_key(),
     )
 
-    assert selected is generated
+    assert selected is None
 
 
-def test_final_mdrk_selection_reports_equal_candidates_as_blocking() -> None:
+def test_final_mdrk_selection_reports_equal_optional_candidates_as_warning() -> None:
     first = _mdrk_document(
         "first-final.docx",
         "12. Выполненная программа медицинской реабилитации",
@@ -215,7 +215,7 @@ def test_final_mdrk_selection_reports_equal_candidates_as_blocking() -> None:
 
     assert selected is None
     assert [issue.code for issue in issues] == ["final_mdrk_source_ambiguous"]
-    assert issues[0].severity.value == "blocking"
+    assert issues[0].severity.value == "warning"
 
 
 def test_final_mdrk_selection_rejects_document_after_discharge() -> None:

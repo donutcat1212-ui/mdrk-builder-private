@@ -15,6 +15,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
+from time import perf_counter
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import TypeVar
 
@@ -3036,6 +3037,7 @@ def smoke_test(*, include_ui: bool = False) -> int:
                 _assert_consistent_geometry_managers(root)
                 root.deiconify()
                 for document in ("mdrk1", "mdrk2", "discharge", "mdrk1"):
+                    started = perf_counter()
                     application._select_document(document)
                     panel = application.discharge_workspace if document == "discharge" else application
                     panel.notebook.select(1)
@@ -3047,7 +3049,7 @@ def smoke_test(*, include_ui: bool = False) -> int:
                     root.update()
                     panel.icf_tree.yview_moveto(0)
                     root.update()
-                    _write_smoke_report(f"phase=responsive_{document}_icf")
+                    _write_smoke_report(f"phase=responsive_{document}_icf seconds={perf_counter() - started:.3f}")
             finally:
                 root.destroy()
                 _write_smoke_report("phase=ui_destroyed")

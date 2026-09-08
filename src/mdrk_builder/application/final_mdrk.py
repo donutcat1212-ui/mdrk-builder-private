@@ -70,6 +70,7 @@ def select_final_mdrk_document(
             not classification.is_mdrk
             or classification.mdrk_kind is not MdrkKind.FINAL
             or classification.is_discharge_summary
+            or classification.is_generated_output
             or not is_structurally_final_mdrk(scanned)
         ):
             continue
@@ -113,10 +114,10 @@ def _report_ambiguous_final_mdrk(
         ReviewIssue(
             "final_mdrk_source_ambiguous",
             (
-                "Найдено несколько равнозначных итоговых МДРК-2; "
-                "автоматический выбор заблокирован."
+                "Найдено несколько равнозначных внешних МДРК-2; "
+                "они не использованы. Сохранены данные профильных источников."
             ),
-            ReviewSeverity.BLOCKING,
+            ReviewSeverity.WARNING,
             "final_mdrk_source",
             candidates[0].scanned.document.source_path,
         )

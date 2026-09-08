@@ -107,6 +107,7 @@ jobs:
           if (Get-Process MDRK_Builder -ErrorAction SilentlyContinue) {
             throw "Packaged smoke test leaked an MDRK_Builder process"
           }
+          Get-Content $env:MDRK_BUILDER_SMOKE_REPORT
 
       - name: Prepare internal distribution folder
         id: package

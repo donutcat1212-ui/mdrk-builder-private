@@ -393,6 +393,7 @@ def extract_discharge_final_fields(document: ParsedDocument, *, final_context: b
         'additional_information': r'дополнительные сведения',
         'discharge_condition': r'состояние при выписке[^:]*',
         'discharge_neurological_status': r'неврологический статус',
+        'goal_result': r'(?:цель,? поставленная на этап медицинской реабилитации|результат достижения цели)',
         'work_capacity': r'трудоспособность[^:]*',
         'recommendations': r'рекомендации',
     }
@@ -407,10 +408,10 @@ def extract_discharge_final_fields(document: ParsedDocument, *, final_context: b
                             if re.match(r'^проведен\w* обследования', line, re.I)), len(lines))
     result = {}
     for name, heading in headings.items():
-        start = discharge_start if name in {'discharge_neurological_status', 'work_capacity', 'recommendations'} else treatment_start
+        start = discharge_start if name in {'discharge_neurological_status', 'work_capacity', 'recommendations', 'goal_result'} else treatment_start
         if name == 'discharge_condition':
             start = 0
-        elif final_context and name in {'medications', 'recommendations', 'work_capacity'}:
+        elif final_context and name in {'medications', 'recommendations', 'work_capacity', 'goal_result'}:
             start = 0
         pattern = re.compile(r'^' + heading + r'\s*:\s*(.*)$', re.I)
         for i in range(start, len(lines)):

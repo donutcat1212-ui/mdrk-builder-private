@@ -50,8 +50,10 @@ def test_icf_panel_matches_docx_and_refreshes_on_rescan(tmp_path):
         assert not panel.icf_tree.get_children()
         assert panel.icf_source_button.instate(["disabled"])
         assert "не найден" in panel.icf_status.get()
+        assert "МДРК-2" not in panel.icf_status.get()
+        assert not panel.icf_source_button.winfo_manager()
         fresh.final_mdrk_source = draft.final_mdrk_source
         panel.load(fresh)
-        assert "не извлечена" in panel.icf_status.get()
+        assert "не найдены оценки МКФ" in panel.icf_status.get()
     finally:
         root.destroy()
