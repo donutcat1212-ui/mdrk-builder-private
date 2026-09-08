@@ -1,4 +1,7 @@
 from docx import Document
+import os
+import subprocess
+import sys
 
 import mdrk_builder.ui.app as app_module
 from mdrk_builder.ui.app import _generate_smoke_document
@@ -40,6 +43,24 @@ def test_packaged_ui_smoke_flag_constructs_ui(monkeypatch) -> None:
 
     assert app_module.main(["--smoke-test-ui"]) == 0
     assert calls == [True]
+
+
+def test_visible_icf_tables_remain_responsive(tmp_path) -> None:
+    """A withdrawn root misses native drawing hangs in the packaged Windows UI."""
+    report = tmp_path / "visible-ui-smoke.txt"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "mdrk_builder.ui.app", "--smoke-test-ui"],
+            env={**os.environ, "MDRK_BUILDER_SMOKE_REPORT": str(report)},
+            capture_output=True, text=True, timeout=25,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(report.read_text(encoding="utf-8")) from exc
+    assert result.returncode == 0, report.read_text(encoding="utf-8") + result.stderr
+    text = report.read_text(encoding="utf-8")
+    for document in ("mdrk1", "mdrk2", "discharge"):
+        assert f"phase=responsive_{document}_icf" in text
+    assert "status=ok" in text
 
 
 def test_packaged_smoke_writes_failure_report(monkeypatch, tmp_path) -> None:

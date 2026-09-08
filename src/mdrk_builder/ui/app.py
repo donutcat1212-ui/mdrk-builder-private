@@ -37,6 +37,7 @@ from mdrk_builder.domain import (
     DischargeSummaryDraft,
     Episode,
     IcfDomain,
+    IcfQualifier,
     IcfSection,
     MdrkKind,
     PatientIdentity,
@@ -3008,16 +3009,45 @@ def smoke_test(*, include_ui: bool = False) -> int:
             try:
                 root.withdraw()
                 application = MdrkBuilderApp(root)
+                application.episode = Episode(
+                    folder=temporary_path,
+                    admission_datetime=datetime(2026, 1, 1, 9),
+                    initial_meeting_at=datetime(2026, 1, 2, 8),
+                    final_meeting_at=datetime(2026, 1, 15, 12),
+                    icf_domains=[
+                        IcfDomain(
+                            "d450", f"Тестовая строка {index + 1}",
+                            SpecialistRole.PHYSICAL_THERAPIST,
+                            initial=IcfQualifier(3), final=IcfQualifier(2),
+                        )
+                        for index in range(60)
+                    ],
+                )
+                application._populate_from_episode()
                 smoke_discharge = DischargeSummaryDraft(
                     folder=temporary_path,
+                    admission_datetime=application.episode.admission_datetime,
+                    discharge_datetime=application.episode.final_meeting_at,
+                    icf_domains=tuple(deepcopy(application.episode.icf_domains)),
                 )
                 application.discharge_workspace.load(smoke_discharge)
                 application.discharge_draft = smoke_discharge
                 _write_smoke_report("phase=app_constructed")
                 _assert_consistent_geometry_managers(root)
-                root.update_idletasks()
-                root.update()
-                _write_smoke_report("phase=idle_updated")
+                root.deiconify()
+                for document in ("mdrk1", "mdrk2", "discharge", "mdrk1"):
+                    application._select_document(document)
+                    panel = application.discharge_workspace if document == "discharge" else application
+                    panel.notebook.select(1)
+                    _write_smoke_report(f"phase=paint_{document}_icf")
+                    root.update()
+                    if not panel.icf_tree.winfo_ismapped():
+                        raise RuntimeError(f"Таблица МКФ не отображается: {document}")
+                    panel.icf_tree.yview_moveto(1)
+                    root.update()
+                    panel.icf_tree.yview_moveto(0)
+                    root.update()
+                    _write_smoke_report(f"phase=responsive_{document}_icf")
             finally:
                 root.destroy()
                 _write_smoke_report("phase=ui_destroyed")
