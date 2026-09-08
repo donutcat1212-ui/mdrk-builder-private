@@ -3,6 +3,8 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 import json
+import hashlib
+import sys
 from pathlib import Path
 import os
 from tempfile import NamedTemporaryFile
@@ -12,6 +14,38 @@ from mdrk_builder.application.workspace import (WorkspaceDraft, MdrkWorkspaceSta
 TYPES = {name: getattr(domain, name) for name in domain.__all__ if isinstance(getattr(domain, name), type)}
 
 TYPES.update({cls.__name__: cls for cls in (WorkspaceDraft, MdrkWorkspaceState, ReverseWorkspaceState, DischargeWorkspaceState)})
+
+
+def _workspace_draft_directory() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "MDRK Builder" / "drafts"
+
+
+def workspace_draft_path(folder: Path) -> Path:
+    """Per-user local storage; episode folders remain input-only for autosave."""
+    key = os.path.normcase(str(Path(folder).resolve()))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return _workspace_draft_directory() / (digest + ".json")
+
+
+def import_legacy_workspace_draft(folder: Path) -> Path:
+    """Move an old managed draft only after validating and reopening its local copy."""
+    from mdrk_builder.application.workspace import restore_workspace_state
+    path = workspace_draft_path(folder)
+    legacy = folder / ".mdrk draft.json"
+    if path.exists() or not legacy.is_file():
+        return path
+    state = restore_workspace_state(load_draft(legacy), folder)
+    save_draft(path, state)
+    if load_draft(path) != state:
+        raise OSError("Не удалось проверить перенос рабочего черновика")
+    legacy.unlink()
+    return path
 
 
 def encode(value):

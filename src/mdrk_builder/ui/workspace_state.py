@@ -3,7 +3,9 @@ from copy import deepcopy
 from tkinter import messagebox
 
 from mdrk_builder.application.workspace import restore_workspace_state
-from mdrk_builder.infrastructure.draft_store import save_draft, load_draft
+from mdrk_builder.infrastructure.draft_store import (
+    save_draft, load_draft, workspace_draft_path, import_legacy_workspace_draft,
+)
 
 
 class WorkspacePersistence:
@@ -20,7 +22,7 @@ class WorkspacePersistence:
         try:
             state = self.capture()
             state.validate(folder)
-            save_draft(folder / '.mdrk draft.json', state)
+            save_draft(workspace_draft_path(folder), state)
             self.saved = deepcopy(state)
         except (OSError, ValueError, TypeError) as exc:
             if explicit:
@@ -29,7 +31,7 @@ class WorkspacePersistence:
                 self.status('Не удалось сохранить локальный черновик. Используйте «Сохранить черновик».')
             return False
         if explicit:
-            self.status('Рабочий черновик сохранён в папке эпизода')
+            self.status('Рабочий черновик сохранён локально на этом компьютере')
         return True
 
     def autosave(self):
@@ -55,7 +57,11 @@ class WorkspacePersistence:
         return self.save(explicit=True) if answer else True
 
     def open(self, folder):
-        path = folder / '.mdrk draft.json'
+        try:
+            path = import_legacy_workspace_draft(folder)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            messagebox.showerror('Не удалось перенести старый черновик', str(exc), parent=self.root)
+            return False
         if not path.is_file():
             return False
         if not messagebox.askyesno('Найден черновик', 'Восстановить сохранённые правки этого эпизода?', parent=self.root):

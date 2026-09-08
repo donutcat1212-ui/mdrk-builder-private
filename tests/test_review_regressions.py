@@ -98,8 +98,10 @@ def test_new_episode_draft_excludes_previous_episode_state(app, tmp_path):
     assert panel.draft is None
     assert app._save_workspace()
 
-    saved = (new_folder / ".mdrk draft.json").read_text(encoding="utf-8")
+    from mdrk_builder.infrastructure.draft_store import workspace_draft_path
+    saved = workspace_draft_path(new_folder).read_text(encoding="utf-8")
     assert previous_marker not in saved
+    assert not (new_folder / ".mdrk draft.json").exists()
 
 
 def test_undo_survives_switching_between_mdrk_and_discharge(app):

@@ -12,6 +12,8 @@ from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge
 from mdrk_builder.infrastructure.docx_writer import write_mdrk_docx
 from test_discharge_summary import _primary_lines, _discharge_lines, _write_document
 
+SYNTHETIC_NAME = "АЛЬФА БЕТА ГАММА"
+
 
 def _assessment(path, lines, qualifier, scale):
     document = Document()
@@ -28,13 +30,13 @@ def _assessment(path, lines, qualifier, scale):
 
 @pytest.mark.parametrize("first", ["mdrk2", "discharge"])
 def test_export_order_and_duplicate_outputs_do_not_change_either_document(tmp_path, first):
-    _assessment(tmp_path / "primary.docx", (*_primary_lines(),
+    _assessment(tmp_path / "primary.docx", (*_primary_lines(full_name=SYNTHETIC_NAME),
         "Дата осмотра: 10.08.2026 11:00"), 3, 4)
     _assessment(tmp_path / "follow-up.docx", (
         "Повторный осмотр невролога 16.08.2026 10:00",
-        "ФИО пациента: Пациент Тестовый Пример", "Номер ИБ: СКП5906/26",
+        f"ФИО пациента: {SYNTHETIC_NAME}", "Номер ИБ: СКП5906/26",
     ), 2, 9)
-    _write_document(tmp_path / "mis.docx", _discharge_lines())
+    _write_document(tmp_path / "mis.docx", _discharge_lines(full_name=SYNTHETIC_NAME))
     source_hashes = {path: hashlib.sha256(path.read_bytes()).digest() for path in tmp_path.glob("*.docx")}
     scan_options = dict(initial_meeting_at=datetime(2026, 8, 11, 8),
                         final_meeting_at=datetime(2026, 8, 17, 10))
@@ -64,10 +66,10 @@ def test_export_order_and_duplicate_outputs_do_not_change_either_document(tmp_pa
 
 @pytest.mark.parametrize("origin", ["mis", "final_clinician"])
 def test_explicit_goal_result_does_not_require_mdrk2(tmp_path, origin):
-    _write_document(tmp_path / "primary.docx", (*_primary_lines(),
+    _write_document(tmp_path / "primary.docx", (*_primary_lines(full_name=SYNTHETIC_NAME),
         "Цель на этап медицинской реабилитации: ИСХОДНАЯ ЦЕЛЬ"))
     mis_path = tmp_path / "mis.docx"
-    _write_document(mis_path, _discharge_lines())
+    _write_document(mis_path, _discharge_lines(full_name=SYNTHETIC_NAME))
     assert scan_discharge_summary(tmp_path).goal_result == ""
     goal = "Достигнута частично"
     result_lines = ("Состояние при выписке: улучшение",
@@ -75,12 +77,12 @@ def test_explicit_goal_result_does_not_require_mdrk2(tmp_path, origin):
                     "Трудоспособность: временно утрачена")
     if origin == "mis":
         source = mis_path
-        _write_document(source, (*_discharge_lines(), *result_lines))
+        _write_document(source, (*_discharge_lines(full_name=SYNTHETIC_NAME), *result_lines))
     else:
         source = tmp_path / "final.docx"
         _write_document(source, (
             "Заключительный осмотр невролога 16.08.2026 10:00",
-            "ФИО пациента: Пациент Тестовый Пример", "Номер ИБ: СКП5906/26",
+            f"ФИО пациента: {SYNTHETIC_NAME}", "Номер ИБ: СКП5906/26",
             *result_lines,
         ))
     draft = scan_discharge_summary(tmp_path)
