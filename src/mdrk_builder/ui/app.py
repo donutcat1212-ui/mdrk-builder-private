@@ -56,10 +56,6 @@ from mdrk_builder.infrastructure.docx_writer import canonical_template_path, wri
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
 from mdrk_builder.ui.dialogs import (
     FeedbackDialog,
-    FindingDialog,
-    IcfDomainDialog,
-    ProcedureDialog,
-    ScaleDialog,
     install_edit_shortcuts,
 )
 from mdrk_builder.ui.inline_tree import InlineTreeEditor
@@ -184,7 +180,7 @@ class MdrkBuilderApp:
             ("_commit_icf_cell", "_delete_icf", "_add_icf", "_edit_icf", "_move_icf_domain",
              "_commit_procedure_cell", "_add_procedure", "_edit_procedure", "_delete_procedure",
              "_commit_scale_cell", "_add_scale", "_edit_scale", "_delete_scale",
-             "_add_finding", "_edit_finding", "_delete_finding", "_activate_icf_item",
+             "_delete_finding", "_activate_icf_item",
              "_activate_procedure_item", "_activate_scale_item", "_finish_icf_pointer",
              "_commit_specialist_conclusion", "_restore_selected_source"),
             history=self._table_editor.history)
@@ -713,6 +709,7 @@ class MdrkBuilderApp:
             "initial",
             "final",
             "responsible",
+            "note",
             "dynamic",
         )
         self.icf_tree = ttk.Treeview(
@@ -742,7 +739,8 @@ class MdrkBuilderApp:
             "q4": "4",
             "initial": "Исх.",
             "final": "Повт.",
-            "responsible": "Ответственный специалист / уточнение",
+            "responsible": "Ответственный специалист",
+            "note": "Уточнение",
             "dynamic": "+/−",
         }
         widths = {
@@ -755,7 +753,8 @@ class MdrkBuilderApp:
             "q4": 34,
             "initial": 52,
             "final": 52,
-            "responsible": 290,
+            "responsible": 220,
+            "note": 220,
             "dynamic": 45,
         }
         for column in columns:
@@ -766,7 +765,7 @@ class MdrkBuilderApp:
         self.icf_tree.tag_configure("new", foreground="#1f63c5")
         self._icf_editor = InlineTreeEditor(
             self.icf_tree,
-            editable_columns={"code", "description", "initial", "final", "responsible"},
+            editable_columns={"code", "description", "initial", "final", "responsible", "note"},
             commit=self._commit_icf_cell,
             values=self._icf_editor_values,
             activate=self._activate_icf_item,
@@ -812,7 +811,6 @@ class MdrkBuilderApp:
         for column in columns:
             self.procedure_tree.heading(column, text=headings[column])
             self.procedure_tree.column(column, width=widths[column], minwidth=45, anchor="w")
-        self.procedure_tree.bind("<Double-1>", lambda _event: self._edit_procedure())
         self._bind_tree_delete(self.procedure_tree, self._delete_procedure)
         self._procedure_editor = InlineTreeEditor(
             self.procedure_tree,
@@ -821,28 +819,6 @@ class MdrkBuilderApp:
             activate=self._activate_procedure_item,
             is_data_row=str.isdigit,
         )
-
-    def _build_scales_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=7)
-        self.notebook.add(tab, text="Шкалы")
-        columns = ("role", "date", "name", "value", "source")
-        self.scale_tree = self._create_tree_with_scrollbars(tab, columns, selectmode="extended")
-        for column, heading, width in (
-            ("role", "Специалист", 245),
-            ("date", "Дата и время", 145),
-            ("name", "Шкала/опросник", 410),
-            ("value", "Результат", 210),
-            ("source", "Источник", 260),
-        ):
-            self.scale_tree.heading(column, text=heading)
-            self.scale_tree.column(column, width=width, minwidth=55, anchor="w")
-        self.scale_tree.bind("<Double-1>", lambda _event: self._edit_scale())
-        self._bind_tree_delete(self.scale_tree, self._delete_scale)
-        buttons = ttk.Frame(tab)
-        buttons.pack(fill="x", pady=(6, 0))
-        ttk.Button(buttons, text="Добавить…", command=self._add_scale).pack(side="left")
-        ttk.Button(buttons, text="Изменить…", command=self._edit_scale).pack(side="left", padx=4)
-        ttk.Button(buttons, text="Удалить", command=self._delete_scale).pack(side="left")
 
     def _build_specialists_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=7)
@@ -902,32 +878,10 @@ class MdrkBuilderApp:
         ttk.Label(conclusion_bar, text="Заключение").pack(side="left")
         self.conclusion_source_button = ttk.Button(conclusion_bar, text="Источник", command=self._open_specialist_source)
         self.conclusion_source_button.pack(side="right")
-        self.specialist_conclusion = scrolledtext.ScrolledText(right, height=12, wrap="word", undo=True)
-        self.specialist_conclusion.pack(fill="both", expand=True)
-        self.specialist_conclusion.bind("<FocusOut>", self._commit_specialist_conclusion)
-
-    def _build_findings_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=7)
-        self.notebook.add(tab, text="Заключения")
-        columns = ("role", "date", "scales", "conclusion")
-        self.finding_tree = self._create_tree_with_scrollbars(
-            tab, columns, selectmode="extended"
-        )
-        for column, heading, width in (
-            ("role", "Специалист", 250),
-            ("date", "Клиническая дата", 145),
-            ("scales", "Шкал", 55),
-            ("conclusion", "Заключение", 620),
-        ):
-            self.finding_tree.heading(column, text=heading)
-            self.finding_tree.column(column, width=width, minwidth=45, anchor="w")
-        self.finding_tree.bind("<Double-1>", lambda _event: self._edit_finding())
-        self._bind_tree_delete(self.finding_tree, self._delete_finding)
-        buttons = ttk.Frame(tab)
-        buttons.pack(fill="x", pady=(6, 0))
-        ttk.Button(buttons, text="Добавить…", command=self._add_finding).pack(side="left")
-        ttk.Button(buttons, text="Изменить…", command=self._edit_finding).pack(side="left", padx=4)
-        ttk.Button(buttons, text="Удалить", command=self._delete_finding).pack(side="left")
+        from mdrk_builder.ui.specialist_conclusions import SpecialistConclusions
+        self._specialist_conclusions = SpecialistConclusions(right, self._commit_specialist_conclusion)
+        self._specialist_conclusions.pack(fill="both", expand=True)
+        self.specialist_conclusion = self._specialist_conclusions.text
 
     def _build_issues_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=7)
@@ -1007,8 +961,9 @@ class MdrkBuilderApp:
 
     def _mark_entry_dirty(self, key: str) -> None:
         if not self._populating:
-            self._dirty_entry_fields.add(key)
-            if self.episode is not None and key == "duration":
+            dirty_key = "planned_duration" if key == "duration" and self._current_kind is MdrkKind.INITIAL else key
+            self._dirty_entry_fields.add(dirty_key)
+            if self.episode is not None and key == "duration" and self._current_kind is MdrkKind.FINAL:
                 self.episode.course_duration_manual = True
             if key in {"admission", "meeting"}:
                 self.root.after_idle(self._refresh_duration)
@@ -1027,7 +982,11 @@ class MdrkBuilderApp:
                 button.configure(text="Ручная правка", state="normal")
 
     def _refresh_duration(self):
-        if self.episode is None or self.episode.course_duration_manual:
+        if self.episode is None:
+            return
+        if self._current_kind is MdrkKind.INITIAL:
+            return
+        if self.episode.course_duration_manual:
             return
         from mdrk_builder.application.editing import hospitalization_days
         from mdrk_builder.ui.episode_adapter import parse_optional_datetime
@@ -1049,6 +1008,15 @@ class MdrkBuilderApp:
 
     def _automatic_duration(self):
         if self.episode:
+            if self._current_kind is MdrkKind.INITIAL:
+                self.episode.planned_course_duration_days = 16
+                self._dirty_entry_fields.discard('planned_duration')
+                self._populating = True
+                self._entry_variables['duration'].set('16')
+                self._populating = False
+                self._update_field_sources()
+                self.status_var.set('Плановая длительность МДРК-1: 16 койко-дней')
+                return
             self.episode.course_duration_manual = False
             self._dirty_entry_fields.discard('duration')
             self._refresh_duration()
@@ -1076,6 +1044,8 @@ class MdrkBuilderApp:
     def _capture_manual_state(self) -> dict[str, object] | None:
         if not self.episode:
             return None
+        if hasattr(self, "_specialist_conclusions"):
+            self._commit_specialist_conclusion()
         try:
             form = self._parsed_form_data()
         except (AttributeError, KeyError, ValueError):
@@ -1089,7 +1059,10 @@ class MdrkBuilderApp:
             previous.admission_datetime = form.admission_datetime
             previous.department = form.department
             previous.stage = form.stage
-            previous.course_duration_days = form.course_duration_days
+            if self._current_kind is MdrkKind.INITIAL:
+                previous.planned_course_duration_days = form.course_duration_days
+            else:
+                previous.course_duration_days = form.course_duration_days
             if self._current_kind is MdrkKind.INITIAL:
                 previous.initial_meeting_at = form.meeting_at
             else:
@@ -1118,6 +1091,9 @@ class MdrkBuilderApp:
         if not isinstance(previous, Episode):
             return
         episode.course_duration_manual = previous.course_duration_manual
+        episode.planned_course_duration_days = previous.planned_course_duration_days
+        if previous.course_duration_manual:
+            episode.course_duration_days = previous.course_duration_days
         episode.discharge_datetime = previous.discharge_datetime or episode.discharge_datetime
         entry_fields = state["entry_fields"]
         if isinstance(entry_fields, set):
@@ -1133,7 +1109,6 @@ class MdrkBuilderApp:
                 "admission": (episode, "admission_datetime", previous.admission_datetime),
                 "department": (episode, "department", previous.department),
                 "stage": (episode, "stage", previous.stage),
-                "duration": (episode, "course_duration_days", previous.course_duration_days),
             }
             for key in entry_fields:
                 if key in entry_mapping:
@@ -1238,9 +1213,9 @@ class MdrkBuilderApp:
         self._scale_pair_refs = {}
         self._displayed_specialist_finding = None
         self._issue_refs = {}
-        if hasattr(self, 'specialist_conclusion'):
-            self.specialist_conclusion.delete('1.0', 'end')
-            self.specialist_conclusion.edit_reset()
+        if hasattr(self, '_specialist_conclusions'):
+            self._specialist_conclusions.clear()
+            self.specialist_conclusion = self._specialist_conclusions.text
         self._update_field_sources()
         self._update_action_states()
 
@@ -1409,6 +1384,8 @@ class MdrkBuilderApp:
         entry_keys = {"identity.full_name": "full_name", "identity.medical_record_number": "record_number",
                       "identity.birth_date": "birth_date", "identity.sex": "sex", "admission_datetime": "admission",
                       "meeting_at": "meeting", "department": "department", "stage": "stage", "course_duration_days": "duration"}
+        if self._current_kind is MdrkKind.INITIAL:
+            entry_keys["course_duration_days"] = "planned_duration"
         manual = (entry_keys.get(field_key) in self._dirty_entry_fields or
                   field_key.removeprefix("sections.") in self._dirty_section_fields[self._current_kind])
         links = list(field_source_links(source_map, field_key, manual=manual))
@@ -1419,6 +1396,8 @@ class MdrkBuilderApp:
         if field_key in {"sections.goal", "sections.tasks"} and self._current_kind is MdrkKind.FINAL:
             return [("Шаблон: установленная формулировка для МДРК-2", None)]
         if field_key in {"meeting_at", "course_duration_days"}:
+            if field_key == "course_duration_days" and self._current_kind is MdrkKind.INITIAL:
+                return [("Шаблон: плановая длительность 16 койко-дней; врач может изменить", None)]
             explanation = ("Расчёт: заседание определяется по поступлению и датам документов; ручная дата имеет приоритет"
                            if field_key == "meeting_at" else "Расчёт: разность дат итогового заседания и поступления; один день при совпадении")
             return [(explanation, None), *field_source_links(source_map, "admission_datetime"),
@@ -1768,7 +1747,7 @@ class MdrkBuilderApp:
             "meeting": format_datetime(episode.meeting_at(self._current_kind)),
             "department": episode.department,
             "stage": episode.stage,
-            "duration": "" if episode.course_duration_days is None else str(episode.course_duration_days),
+            "duration": "" if episode.course_duration(self._current_kind) is None else str(episode.course_duration(self._current_kind)),
         }
         try:
             for key, value in values.items():
@@ -1797,6 +1776,8 @@ class MdrkBuilderApp:
         if not self.episode:
             messagebox.showwarning("Нет данных", "Сначала просканируйте папку эпизода.")
             return False
+        if hasattr(self, "_specialist_conclusions"):
+            self._commit_specialist_conclusion()
         target_kind = kind or self._current_kind
         try:
             form = self._parsed_form_data()
@@ -1981,9 +1962,10 @@ class MdrkBuilderApp:
                 "q4",
                 "initial",
                 "responsible",
+                "note",
             )
             if self._current_kind is MdrkKind.FINAL:
-                display_columns = (*display_columns[:-1], "final", "responsible", "dynamic")
+                display_columns = (*display_columns[:-2], "final", "responsible", "note", "dynamic")
         elif self._current_kind is MdrkKind.FINAL:
             display_columns = (
                 "code",
@@ -2020,7 +2002,7 @@ class MdrkBuilderApp:
                     text=section.display_name,
                     open=True,
                     tags=("section",),
-                    values=("",) * 11,
+                    values=("",) * 12,
                 )
                 for index, domain in grouped[section]:
                     initial = domain.initial.display() if domain.initial else ""
@@ -2037,7 +2019,7 @@ class MdrkBuilderApp:
                         else ""
                         for value in range(5)
                     )
-                    responsible = domain.note or (
+                    responsible = (
                         ""
                         if domain.specialist is SpecialistRole.OTHER
                         else domain.specialist.display_name
@@ -2053,6 +2035,7 @@ class MdrkBuilderApp:
                             initial,
                             final,
                             responsible,
+                            domain.note,
                             domain.dynamic_marker or "",
                         ),
                     )
@@ -2063,7 +2046,7 @@ class MdrkBuilderApp:
                 iid="new:icf",
                 text="",
                 tags=("new",),
-                values=("＋ Новая строка МКФ…", "", "", "", "", "", "", "", "", "", ""),
+                values=("＋ Новая строка МКФ…",) + ("",) * 11,
             )
             return
         for index, domain in visible_rows:
@@ -2376,6 +2359,7 @@ class MdrkBuilderApp:
         if item_id != "new:icf" or not self.episode:
             return item_id.startswith("section:")
         domain = IcfDomain("", "", SpecialistRole.OTHER)
+        domain.manual_fields.add("initial" if self._current_kind is MdrkKind.INITIAL else "final")
         self.episode.icf_domains.append(domain)
         self._mark_collection_dirty("icf")
         index = len(self.episode.icf_domains) - 1
@@ -2406,15 +2390,9 @@ class MdrkBuilderApp:
         elif column == "final":
             domain.final = parse_qualifier(cleaned)
         elif column == "responsible":
-            if not cleaned:
-                domain.specialist = SpecialistRole.OTHER
-                domain.note = ""
-            elif cleaned in role_names():
-                domain.specialist = role_from_name(cleaned)
-                domain.note = ""
-            else:
-                domain.specialist = SpecialistRole.OTHER
-                domain.note = cleaned
+            domain.specialist = role_from_name(cleaned) if cleaned else SpecialistRole.OTHER
+        elif column == "note":
+            domain.note = cleaned
         mark_manual_changes(previous, domain)
         self._mark_collection_dirty("icf")
         self._refresh_icf()
@@ -2434,6 +2412,9 @@ class MdrkBuilderApp:
         self._icf_drag_origin = None
         target_id = self.icf_tree.identify_row(event.y)
         column = self.icf_tree.identify_column(event.x)
+        if target_id == "new:icf":
+            self._activate_icf_item(target_id)
+            return
         if source_id and origin and abs(event.x - origin[0]) + abs(event.y - origin[1]) >= 6:
             self._move_icf_domain(int(source_id), target_id)
             return
@@ -2516,6 +2497,8 @@ class MdrkBuilderApp:
             else:
                 procedure.frequency = cleaned
         mark_manual_changes(previous, procedure)
+        if column == "frequency" and self._selected_kind() is MdrkKind.INITIAL:
+            procedure.manual_fields.add("planned_frequency")
         self._mark_collection_dirty("procedures")
         self._refresh_procedures()
         self._refresh_issues()
@@ -2538,12 +2521,10 @@ class MdrkBuilderApp:
         self._scale_pair_refs = {}
         finding = self._selected_specialist_finding()
         self._displayed_specialist_finding = finding
+        self.specialist_conclusion = self._specialist_conclusions.show(
+            finding, self.episode.findings if self.episode else ())
         if finding is None or not self.episode:
             self.specialist_header_var.set("")
-            self._loading_specialist = True
-            self.specialist_conclusion.delete("1.0", "end")
-            self.specialist_conclusion.edit_reset()
-            self._loading_specialist = False
             self.specialist_source_button.configure(state="disabled")
             self.conclusion_source_button.configure(state="disabled")
             return
@@ -2553,11 +2534,6 @@ class MdrkBuilderApp:
         source_state = "normal" if finding.source else "disabled"
         self.specialist_source_button.configure(state=source_state)
         self.conclusion_source_button.configure(state=source_state)
-        self._loading_specialist = True
-        self.specialist_conclusion.delete("1.0", "end")
-        self.specialist_conclusion.insert("1.0", finding.conclusion)
-        self.specialist_conclusion.edit_reset()
-        self._loading_specialist = False
         rows = [
             row
             for row in build_snapshot(self.episode, self._current_kind).scale_rows
@@ -2664,15 +2640,15 @@ class MdrkBuilderApp:
         self._refresh_specialist_detail()
         self._refresh_issues()
 
-    def _commit_specialist_conclusion(self, _event: tk.Event | None = None) -> None:
+    def _commit_specialist_conclusion(self, _event: tk.Event | None = None, *, finding=None, widget=None) -> None:
         if self._loading_specialist:
             return
-        finding = getattr(self, "_displayed_specialist_finding", None)
+        finding = finding or getattr(self, "_displayed_specialist_finding", None)
         if finding is None or self.episode is None or not any(
             current is finding for current in self.episode.findings
         ):
             return
-        value = self.specialist_conclusion.get("1.0", "end-1c")
+        value = (widget or self.specialist_conclusion).get("1.0", "end-1c")
         if value != finding.conclusion:
             finding.conclusion = value
             finding.manual_fields.add("conclusion")
@@ -2680,28 +2656,12 @@ class MdrkBuilderApp:
             self._refresh_issues()
 
     def _add_icf(self) -> None:
-        if not self.episode:
-            return
-        dialog = IcfDomainDialog(self.root, kind=self._current_kind)
-        if dialog.result:
-            self.episode.icf_domains.append(dialog.result)
-            self._mark_collection_dirty("icf")
-            self._refresh_icf()
-            self._refresh_issues()
+        self._activate_icf_item("new:icf")
 
     def _edit_icf(self) -> None:
         if not self.episode or (index := self._selected_index(self.icf_tree)) is None:
             return
-        dialog = IcfDomainDialog(
-            self.root,
-            self.episode.icf_domains[index],
-            kind=self._current_kind,
-        )
-        if dialog.result:
-            self.episode.icf_domains[index] = dialog.result
-            self._mark_collection_dirty("icf")
-            self._refresh_icf()
-            self._refresh_issues()
+        self._icf_editor.edit(str(index), "code")
 
     def _delete_icf(self) -> None:
         if not self.episode or not (indices := self._selected_indices(self.icf_tree)):
@@ -2719,43 +2679,15 @@ class MdrkBuilderApp:
             self._refresh_issues()
 
     def _add_procedure(self) -> None:
-        if not self.episode:
-            return
-        dialog = ProcedureDialog(self.root, planned=self._selected_kind() is MdrkKind.INITIAL)
-        if dialog.result:
-            self.episode.procedures.append(dialog.result)
-            self._mark_collection_dirty("procedures")
-            self._refresh_procedures()
-            self._refresh_issues()
+        self._activate_procedure_item("new:procedure")
 
     def _add_scale(self) -> None:
-        if not self.episode:
-            return
-        dialog = ScaleDialog(self.root)
-        if dialog.result:
-            self._append_scale(dialog.result)
-            self._mark_collection_dirty("findings")
-            self._refresh_scales()
-            self._refresh_findings()
-            self._refresh_issues()
+        self._activate_scale_item("new:scale")
 
     def _edit_scale(self) -> None:
-        if not self.episode or (row_index := self._selected_index(self.scale_tree)) is None:
-            return
-        finding_index, scale_index = self._scale_refs[row_index]
-        measurement = self.episode.findings[finding_index].scales[scale_index]
-        dialog = ScaleDialog(self.root, measurement)
-        if not dialog.result:
-            return
-        if dialog.result.specialist is self.episode.findings[finding_index].role:
-            self.episode.findings[finding_index].scales[scale_index] = dialog.result
-        else:
-            self.episode.findings[finding_index].scales.pop(scale_index)
-            self._append_scale(dialog.result)
-        self._refresh_scales()
-        self._mark_collection_dirty("findings")
-        self._refresh_findings()
-        self._refresh_issues()
+        selected = self.scale_tree.selection()
+        if selected:
+            self._scale_editor.edit(selected[0], "name")
 
     def _delete_scale(self) -> None:
         if hasattr(self, "specialist_header_var"):
@@ -2808,27 +2740,10 @@ class MdrkBuilderApp:
             self._refresh_findings()
             self._refresh_issues()
 
-    def _append_scale(self, measurement: ScaleMeasurement) -> None:
-        if not self.episode:
-            return
-        finding = next(
-            (item for item in reversed(self.episode.findings) if item.role is measurement.specialist),
-            None,
-        )
-        if finding is None:
-            finding = SpecialistFinding(role=measurement.specialist)
-            self.episode.findings.append(finding)
-        finding.scales.append(measurement)
-
     def _edit_procedure(self) -> None:
         if not self.episode or (index := self._selected_index(self.procedure_tree)) is None:
             return
-        dialog = ProcedureDialog(self.root, self.episode.procedures[index], planned=self._selected_kind() is MdrkKind.INITIAL)
-        if dialog.result:
-            self.episode.procedures[index] = dialog.result
-            self._mark_collection_dirty("procedures")
-            self._refresh_procedures()
-            self._refresh_issues()
+        self._procedure_editor.edit(str(index), "name")
 
     def _delete_procedure(self) -> None:
         if not self.episode or not (indices := self._selected_indices(self.procedure_tree)):
@@ -2843,30 +2758,6 @@ class MdrkBuilderApp:
                 self.episode.procedures.pop(index)
             self._mark_collection_dirty("procedures")
             self._refresh_procedures()
-            self._refresh_issues()
-
-    def _add_finding(self) -> None:
-        if not self.episode:
-            return
-        dialog = FindingDialog(self.root)
-        if dialog.result:
-            self.episode.findings.append(dialog.result)
-            self._mark_collection_dirty("findings")
-            self._refresh_findings()
-            self._refresh_scales()
-            self._refresh_issues()
-
-    def _edit_finding(self) -> None:
-        if not self.episode or (index := self._selected_index(self.finding_tree)) is None:
-            return
-        dialog = FindingDialog(self.root, self.episode.findings[index])
-        if dialog.result:
-            for measurement in dialog.result.scales:
-                measurement.specialist = dialog.result.role
-            self.episode.findings[index] = dialog.result
-            self._mark_collection_dirty("findings")
-            self._refresh_findings()
-            self._refresh_scales()
             self._refresh_issues()
 
     def _delete_finding(self) -> None:

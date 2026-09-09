@@ -342,7 +342,7 @@ def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "Нейропсихологический статус и топический диагноз: ДИАГНОЗ_НЕЙРОПСИХОЛОГА"
+        "Нейропсихологический статус и топический диагноз: ДИАГНОЗ_НЕЙРОПСИХОЛОГА\nРекомендовано: занятия"
     )
 
 

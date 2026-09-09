@@ -282,6 +282,7 @@ class Episode:
     stage: str = "2 этап"
     course_duration_days: int | None = None
     course_duration_manual: bool = False
+    planned_course_duration_days: int | None = 16
     initial_sections: ClinicalSections = field(default_factory=ClinicalSections)
     sections: ClinicalSections = field(default_factory=ClinicalSections)
     sources: list[SourceDocument] = field(default_factory=list)
@@ -303,6 +304,9 @@ class Episode:
 
     def meeting_at(self, kind: MdrkKind) -> datetime | None:
         return self.initial_meeting_at if kind is MdrkKind.INITIAL else self.final_meeting_at
+
+    def course_duration(self, kind: MdrkKind) -> int | None:
+        return self.planned_course_duration_days if kind is MdrkKind.INITIAL else self.course_duration_days
 
     def has_blocking_issues(self) -> bool:
         return any(issue.severity is ReviewSeverity.BLOCKING for issue in self.issues)

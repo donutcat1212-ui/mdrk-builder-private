@@ -145,7 +145,7 @@ wheels = [
 
 [[package]]
 name = "mdrk-builder"
-version = "1.4.3"
+version = "1.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "lxml" },

@@ -423,7 +423,7 @@ def extract_patient_identity(document: ParsedDocument) -> PatientIdentity:
 
 
 SECTION_STARTS: dict[str, tuple[str, ...]] = {
-    "clinical_diagnosis": (r"заключительный\s+клинический\s+диагноз", r"клинический\s+диагноз"),
+    "clinical_diagnosis": (r"заключительный\s+клинический\s+диагноз", r"клинический\s+диагноз", r"диагноз(?:\s+клинический)?\s*:"),
     "disease_history": (r"анамнез\s+заболевания",),
     "life_history": (r"анамнез\s+жизни",),
     "laboratory_results": (r"лабораторн\w*\s+исследован\w*",),
@@ -500,6 +500,7 @@ def _specialist_rehabilitation_plan(document: ParsedDocument) -> tuple[str, list
     goals: list[str] = []
     tasks: list[str] = []
     for index, line in enumerate(lines):
+        line = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", line)
         if match := _SPECIALIST_STAGE_GOAL_RE.match(line):
             if value := clean_text(match.group(1)):
                 goals.append(value)
@@ -508,7 +509,8 @@ def _specialist_rehabilitation_plan(document: ParsedDocument) -> tuple[str, list
             if value := _clean_task_item(match.group(1)):
                 tasks.append(value)
             continue
-        match = _SPECIALIST_TASK_BLOCK_RE.match(line)
+        match = _SPECIALIST_TASK_BLOCK_RE.match(line) or re.match(
+            r"^задачи\s+медицинской\s+реабилитации\s*[:–—.-]?\s*(.*)$", line, re.I)
         if match is None:
             continue
         if value := _clean_task_item(match.group(1)):
@@ -516,6 +518,8 @@ def _specialist_rehabilitation_plan(document: ParsedDocument) -> tuple[str, list
         for following in lines[index + 1 :]:
             if SECTION_STOP.search(following) or _SPECIALIST_TASK_BLOCK_STOP_RE.match(following):
                 break
+            if re.match(r"^(?:(?:\d+[.)]|[-•])\s*)?(?:кратко|коротко)срочн\w*\s+цел", following, re.I):
+                continue
             if value := _clean_task_item(following):
                 tasks.append(value)
 
@@ -554,7 +558,7 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
         name: extract_section(
             document,
             patterns,
-            preserve_lines=name in {"medication", "tasks"},
+            preserve_lines=name in {"clinical_diagnosis", "medication", "tasks"},
         )
         for name, patterns in SECTION_STARTS.items()
     }
@@ -565,11 +569,21 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
         current_tasks = [
             _clean_task_item(line)
             for line in result["tasks"].splitlines()
-            if _clean_task_item(line)
+            if _clean_task_item(line) and not re.match(
+                r"^(?:кратко|коротко)срочн\w*\s+цел", _clean_task_item(line), re.I)
         ]
         result["tasks"] = "\n".join(dict.fromkeys((*current_tasks, *specialist_tasks)))
     if not result["clinical_diagnosis"]:
-        result["clinical_diagnosis"] = extract_section(document, (r"основное\s+заболевание",))
+        value = extract_section(document, (r"основное\s+заболевание",), preserve_lines=True)
+        result["clinical_diagnosis"] = "Основное заболевание:\n" + value if value else ""
+    result["tasks"] = "\n".join(line for line in result["tasks"].splitlines()
+        if not re.match(r"^(?:кратко|коротко)срочн\w*\s+цел", _clean_task_item(line), re.I))
+    if result["clinical_diagnosis"] and not re.search(r"\bШРМ\b|шкала\s+реабилитационной\s+маршрутизации", result["clinical_diagnosis"], re.I):
+        from mdrk_builder.application.scale_registry import canonical_scale_key
+        shrm = next((row for row in extract_scale_measurements(document, SpecialistRole.NEUROLOGIST, None)
+                     if canonical_scale_key(row.name) == "shrm"), None)
+        if shrm is not None:
+            result["clinical_diagnosis"] += "\nШРМ: " + shrm.value
     if not result["laboratory_results"] or not result["instrumental_results"]:
         lines = _document_lines(document)
         numbered_prefix = r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
@@ -660,7 +674,7 @@ def extract_clinical_sections(document: ParsedDocument) -> dict[str, str]:
     return result
 
 
-def _extract_neuropsych_conclusion(lines: list[str]) -> str:
+def _extract_neuropsych_conclusion(lines: list[str]) -> tuple[str, list[str]] | None:
     """Return the bounded status and rationale, leaving scale tables structured."""
 
     heading_re = re.compile(
@@ -699,11 +713,11 @@ def _extract_neuropsych_conclusion(lines: list[str]) -> str:
         if rationale:
             result.append(clean_text(rationale))
         if len(result) > 1 or heading_re.sub("", result[0]).strip():
-            return "\n".join(result)
-    return ""
+            return "\n".join(result), lines[start:]
+    return None
 
 
-def _extract_logopedist_conclusion(lines: list[str]) -> str:
+def _extract_logopedist_conclusion(lines: list[str]) -> tuple[str, list[str]] | None:
     """Prefer course dynamics plus the final speech status when available."""
 
     dynamics = [
@@ -714,41 +728,25 @@ def _extract_logopedist_conclusion(lines: list[str]) -> str:
         re.IGNORECASE,
     )
     signature_re = re.compile(r"^(?:медицинский\s+логопед|подпись)\b", re.IGNORECASE)
-    if dynamics:
-        start = dynamics[-1]
-        result = [lines[start]]
-        status_index = next(
-            (index for index in range(start + 1, len(lines)) if status_re.match(lines[index])),
-            None,
-        )
-        if status_index is not None:
-            result.append(lines[status_index])
-            for line in lines[status_index + 1 :]:
-                if signature_re.match(line) or re.match(
-                    r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
-                    r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
-                    line,
-                    re.IGNORECASE,
-                ):
-                    break
-                result.append(line)
-        return "\n".join(clean_text(line) for line in result if clean_text(line))
-
     status_indices = [index for index, line in enumerate(lines) if status_re.match(line)]
-    if status_indices:
-        start = status_indices[-1]
-        result = [lines[start]]
-        for line in lines[start + 1 :]:
-            if signature_re.match(line) or re.match(
-                r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
-                r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных)\b",
-                line,
-                re.IGNORECASE,
-            ):
-                break
-            result.append(line)
-        return "\n".join(clean_text(line) for line in result if clean_text(line))
-    return ""
+    if not status_indices or dynamics and dynamics[-1] > status_indices[-1]:
+        return (lines[dynamics[-1]], lines[dynamics[-1]:]) if dynamics else None
+    start = status_index = status_indices[-1]
+    result = [lines[start]]
+    previous_status = status_indices[-2] if len(status_indices) > 1 else -1
+    if (dynamics and previous_status < dynamics[-1] < start
+            and not any(signature_re.match(line) for line in lines[dynamics[-1]:start])):
+        start = dynamics[-1]
+        result.insert(0, lines[start])
+    for line in lines[status_index + 1:]:
+        if signature_re.match(line) or re.match(
+            r"^(?:факторы,?\s+ограничивающие|функциональный\s+диагноз|"
+            r"задач[аи]\s+на\s+этап|короткосрочная\s+задача|на основании данных|рекомендации|рекомендовано)\b",
+            line, re.IGNORECASE,
+        ):
+            break
+        result.append(line)
+    return "\n".join(clean_text(line) for line in result if clean_text(line)), lines[start:]
 
 
 def extract_conclusion(
@@ -757,12 +755,14 @@ def extract_conclusion(
 ) -> str:
     blocks: list[str] = []
     lines = _document_lines(document)
+    selected_start = 0
+    from mdrk_builder.application.specialist_narrative import complete_specialist_conclusion
     if role is SpecialistRole.NEUROPSYCHOLOGIST:
-        if value := _extract_neuropsych_conclusion(lines):
-            return value
+        if selected := _extract_neuropsych_conclusion(lines):
+            return complete_specialist_conclusion(*selected, role)
     if role is SpecialistRole.LOGOPEDIST:
-        if value := _extract_logopedist_conclusion(lines):
-            return value
+        if selected := _extract_logopedist_conclusion(lines):
+            return complete_specialist_conclusion(*selected, role)
     for index, line in enumerate(lines):
         match = re.match(r"^заключение(?:(?:[^:\n]{0,180})?\s*:\s*|\s*$)", line, re.IGNORECASE)
         if not match:
@@ -795,6 +795,7 @@ def extract_conclusion(
         value = clean_text(" ".join(values))
         if value:
             blocks.append(value)
+            selected_start = index
     if not blocks and role in {SpecialistRole.NEUROPSYCHOLOGIST, SpecialistRole.LOGOPEDIST}:
         heading = (
             r"^нейропсихологический статус(?:\s+и\s+топический\s+диагноз)?\s*:"
@@ -818,6 +819,7 @@ def extract_conclusion(
             value = clean_text(" ".join(values))
             if value:
                 blocks.append(value)
+                selected_start = index
             break
     if not blocks and role is SpecialistRole.LOGOPEDIST:
         for index, line in enumerate(lines):
@@ -831,8 +833,9 @@ def extract_conclusion(
             value = clean_text(" ".join(values))
             if value:
                 blocks.append(value)
+                selected_start = index
             break
-    return blocks[-1] if blocks else ""
+    return complete_specialist_conclusion(blocks[-1] if blocks else "", lines[selected_start:], role)
 
 
 @dataclass(frozen=True, slots=True)

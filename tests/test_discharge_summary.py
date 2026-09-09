@@ -185,8 +185,8 @@ def test_discharge_scan_applies_explicit_field_authority_and_chronology(tmp_path
     assert draft.medications == ""
     assert draft.transfusions == ""
     assert draft.final_mdrk_source is None
-    assert draft.rehabilitation_potential == ""
-    assert draft.goal_result == ""
+    assert draft.rehabilitation_potential == "средний"
+    assert draft.goal_result == "достигнут в полном объёме"
     assert draft.recommendations == ""
     assert draft.field_sources["clinical_diagnosis"] == primary_path
     assert draft.field_sources["radiation_exposure"] == discharge_path
@@ -284,14 +284,14 @@ def test_discharge_scan_defaults_radiation_to_zero(tmp_path) -> None:
     assert "radiation_exposure" not in draft.field_sources
 
 
-def test_discharge_scan_blocks_without_current_discharge_source(tmp_path) -> None:
+def test_discharge_scan_builds_project_without_current_discharge_source(tmp_path) -> None:
     _write_document(tmp_path / "первичный осмотр невролога.docx", _primary_lines())
 
     draft = scan_discharge_summary(tmp_path)
 
     assert any(
         issue.code == "discharge_summary_source_missing"
-        for issue in draft.blocking_issues()
+        for issue in draft.issues
     )
 
 
@@ -348,12 +348,12 @@ def test_discharge_scan_never_pairs_conflicting_patients(tmp_path) -> None:
 
     draft = scan_discharge_summary(tmp_path)
 
-    assert draft.discharge_source == discharge_path
-    assert draft.primary_neurologist_source is None
-    assert draft.clinical_diagnosis == ""
-    blocking_codes = {issue.code for issue in draft.blocking_issues()}
-    assert "episode_source_identity_conflict" in blocking_codes
-    assert "primary_neurologist_source_missing" in blocking_codes
+    assert draft.discharge_source is None
+    assert draft.primary_neurologist_source is not None
+    assert "PRIMARY DIAGNOSIS" in draft.clinical_diagnosis
+    assert discharge_path not in draft.field_sources.values()
+    assert draft.identity.medical_record_number == "СКП7777/26"
+    assert draft.discharge_datetime is None
 
 
 def test_discharge_scan_does_not_pair_sources_without_patient_identity(tmp_path) -> None:
@@ -368,10 +368,10 @@ def test_discharge_scan_does_not_pair_sources_without_patient_identity(tmp_path)
 
     draft = scan_discharge_summary(tmp_path)
 
-    assert draft.primary_neurologist_source is None
+    assert draft.discharge_source is None
     blocking_codes = {issue.code for issue in draft.blocking_issues()}
     assert "episode_source_identity_insufficient" in blocking_codes
-    assert "primary_neurologist_source_missing" in blocking_codes
+    assert "required_identity_full_name" in blocking_codes
 
 
 def test_discharge_scan_does_not_pair_same_name_without_episode_anchor(
@@ -388,10 +388,10 @@ def test_discharge_scan_does_not_pair_same_name_without_episode_anchor(
 
     draft = scan_discharge_summary(tmp_path)
 
-    assert draft.primary_neurologist_source is None
+    assert draft.discharge_source is None
     blocking_codes = {issue.code for issue in draft.blocking_issues()}
     assert "episode_source_identity_insufficient" in blocking_codes
-    assert "primary_neurologist_source_missing" in blocking_codes
+    assert "required_identity_medical_record_number" in blocking_codes
 
 
 def test_episode_source_projection_excludes_pre_admission_document() -> None:

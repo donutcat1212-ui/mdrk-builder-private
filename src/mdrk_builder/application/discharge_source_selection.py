@@ -174,12 +174,10 @@ def select_discharge_sources(source_scan: SourceScanResult) -> SourceSelection:
         match.compatibility is EpisodeCompatibility.CONFLICT
         for match in comparisons
     )
-    discharge = discharges[0] if len(discharges) == 1 else None
-    primary = (
-        primaries[0]
-        if discharge is None and len(primaries) == 1
-        else None
-    )
+    # A conflicting historical discharge cannot redefine the current episode.
+    # Preserve the independently identified primary and leave MIS-only fields empty.
+    discharge = None
+    primary = primaries[0] if len(primaries) == 1 else None
     issue = _selection_issue(
         (
             "episode_source_identity_conflict"
@@ -196,6 +194,15 @@ def select_discharge_sources(source_scan: SourceScanResult) -> SourceSelection:
         ),
         [*discharges, *primaries],
     )
+    if primary is not None and primary.identity.full_name and (
+        primary.identity.medical_record_number or primary.admission_at
+    ):
+        issue = ReviewIssue(
+            "unrelated_discharge_excluded",
+            "Несовместимая выписка исключена. Проект собран по текущему первичному осмотру.",
+            ReviewSeverity.WARNING,
+            "discharge_source",
+        )
     selected_candidate = discharge or primary
     return SourceSelection(
         discharge=discharge,

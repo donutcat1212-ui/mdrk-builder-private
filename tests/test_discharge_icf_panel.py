@@ -31,7 +31,8 @@ def test_icf_panel_matches_docx_and_refreshes_on_rescan(tmp_path):
         assert panel.notebook.tab(1, "text") == "МКФ"
         assert tuple(map(str, panel.icf_tree.item("domain:0", "values")))[2:4] == ("2", "1")
         assert tuple(map(str, panel.icf_tree.item("domain:1", "values")))[2:4] == ("3", "")
-        assert tuple(panel.icf_tree.item("domain:2", "values"))[2:] == ("", "", "", "")
+        assert all(panel.icf_tree.set("domain:2", column) == ""
+                   for column in ("initial", "final", "responsible", "note", "dynamic"))
         panel.icf_source_button.invoke()
         assert opened == [draft.final_mdrk_source]
         panel.icf_tree.selection_set("domain:0")

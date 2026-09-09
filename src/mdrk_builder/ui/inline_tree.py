@@ -22,6 +22,7 @@ class InlineTreeEditor:
         values: ValuesCallback | None = None,
         activate: ActivateCallback | None = None,
         is_data_row: Callable[[str], bool] | None = None,
+        multiline: Callable[[str, str], bool] | None = None,
     ) -> None:
         self.tree = tree
         self.editable_columns = editable_columns
@@ -29,7 +30,8 @@ class InlineTreeEditor:
         self.values = values
         self.activate = activate
         self.is_data_row = is_data_row or (lambda _item: True)
-        self._widget: ttk.Entry | ttk.Combobox | None = None
+        self.multiline = multiline or (lambda _item, _column: False)
+        self._widget: ttk.Entry | ttk.Combobox | tk.Text | None = None
         self._closing = False
         tree.bind("<Double-1>", self._on_double_click, add="+")
         tree.bind("<F2>", self._on_f2, add="+")
@@ -47,6 +49,8 @@ class InlineTreeEditor:
         if not item_id:
             return None
         if self.activate is not None and self.activate(item_id):
+            return "break"
+        if not self.is_data_row(item_id):
             return "break"
         column = self._column_name(self.tree.identify_column(event.x))
         if column is None or column not in self.editable_columns:
@@ -72,6 +76,8 @@ class InlineTreeEditor:
             return
         if column not in tuple(self.tree.cget("columns")):
             return
+        if not self.is_data_row(item_id):
+            return
         box = self.tree.bbox(item_id, column)
         if not box:
             self.tree.see(item_id)
@@ -82,7 +88,11 @@ class InlineTreeEditor:
         x, y, width, height = box
         current = str(self.tree.set(item_id, column))
         choices = self.values(item_id, column) if self.values is not None else None
-        if choices is None:
+        if self.multiline(item_id, column):
+            widget = tk.Text(self.tree, wrap="word", undo=True)
+            widget.insert("1.0", current)
+            height = max(height, min(150, max(70, self.tree.winfo_height() - y)))
+        elif choices is None:
             widget: ttk.Entry | ttk.Combobox = ttk.Entry(self.tree)
             widget.insert(0, current)
         else:
@@ -99,7 +109,8 @@ class InlineTreeEditor:
             widget.selection_range(0, "end")
         self._widget = widget
         self._closing = False
-        widget.bind("<Return>", lambda _event: self.accept(item_id, column))
+        widget.bind("<Control-Return>" if isinstance(widget, tk.Text) else "<Return>",
+                    lambda _event: self.accept(item_id, column))
         widget.bind("<Tab>", lambda event: self._next_cell(item_id, column, 1))
         widget.bind("<Shift-Tab>", lambda event: self._next_cell(item_id, column, -1))
         widget.bind("<ISO_Left_Tab>", lambda event: self._next_cell(item_id, column, -1))
@@ -140,7 +151,8 @@ class InlineTreeEditor:
         if self._widget is None or self._closing:
             return "break"
         self._closing = True
-        value = self._widget.get()
+        value = (self._widget.get("1.0", "end-1c")
+                 if isinstance(self._widget, tk.Text) else self._widget.get())
         try:
             self.commit(item_id, column, value)
         except ValueError as exc:

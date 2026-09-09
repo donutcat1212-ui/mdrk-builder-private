@@ -29,6 +29,7 @@ from mdrk_builder.infrastructure.discharge_summary_template import (
 from mdrk_builder.infrastructure.docx_layout import (
     configure_table,
     mark_header_row,
+    set_cant_split,
     set_cell_text,
 )
 from mdrk_builder.infrastructure.docx_output import (
@@ -192,7 +193,9 @@ class _DischargeSummaryRenderer:
                 initial = row.initial_at.strftime("%d.%m.%Y") + "\n" + initial
             if row.current_at:
                 current = row.current_at.strftime("%d.%m.%Y") + "\n" + current
-            for cell, value in zip(table.add_row().cells, (row.name, initial, current)):
+            table_row = table.add_row()
+            set_cant_split(table_row)
+            for cell, value in zip(table_row.cells, (row.name, initial, current)):
                 set_cell_text(cell, value, style=STYLE_TABLE, alignment=WD_ALIGN_PARAGRAPH.LEFT)
 
     def _medical_results(self) -> None:

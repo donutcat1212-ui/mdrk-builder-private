@@ -26,6 +26,9 @@ def app(tmp_path, monkeypatch):
 
 
 def test_automatic_days_and_manual_override_survive_date_edits(app):
+    app._current_kind = MdrkKind.FINAL
+    app.kind_var.set(MdrkKind.FINAL.value)
+    app._populate_from_episode()
     app._entry_variables['admission'].set('12.08.2026 00:00')
     app.root.update()
     assert app._entry_variables['duration'].get()=='5'
@@ -161,16 +164,16 @@ def test_folder_change_clears_auxiliary_undo_before_scan(app,tmp_path):
     assert not panel._table_history.past
 
 
-def test_added_specialist_scale_uses_parent_role_and_both_views(app,monkeypatch):
+def test_added_specialist_scale_uses_parent_role_and_both_views(app):
     from mdrk_builder.domain import DischargeTeamFinding, SpecialistRole
-    from types import SimpleNamespace
     panel=app.discharge_workspace
     role=SpecialistRole.PHYSICAL_THERAPIST
     panel.load(DischargeSummaryDraft(app.episode.folder,team_findings=(DischargeTeamFinding(role,''),)))
     panel.clinical_tree.selection_set('team:0')
-    monkeypatch.setattr('mdrk_builder.ui.discharge_summary_panel.FieldsDialog',lambda *a:SimpleNamespace(result={
-        'name':'Берг','value':'35','initial_value':'20','initial_at':'10.08.2026 00:00','current_at':'18.08.2026 00:00'}))
     panel._edit_clinical_row('add_scale')
+    for name, value in {'name':'Берг','value':'35','initial_value':'20',
+                        'initial_at':'10.08.2026 00:00','current_at':'18.08.2026 00:00'}.items():
+        panel._commit_clinical_cell('team:0:scale:0:field:' + name, 'value', value)
     row=panel.draft.team_findings[0].scales[0]
     assert row.role is role
     assert panel.draft.admission_scale_rows[0].value=='20'

@@ -309,8 +309,10 @@ def select_icf_domains(episode: Episode, kind: MdrkKind) -> tuple[IcfDomain, ...
                 domain = replace(domain, final=domain.initial, final_source=domain.initial_source,
                                  final_measured_at=initial_at)
             domain = replace(domain, initial=None, initial_source=None, initial_measured_at=None)
-        initial_present = domain.initial is not None or domain.initial_source is not None
-        final_present = domain.final is not None or domain.final_source is not None
+        initial_present = (domain.initial is not None or domain.initial_source is not None
+                           or "initial" in domain.manual_fields)
+        final_present = (domain.final is not None or domain.final_source is not None
+                         or "final" in domain.manual_fields)
         initial_at = _icf_initial_datetime(episode, domain)
         final_at = _icf_final_datetime(episode, domain)
 

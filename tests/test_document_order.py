@@ -70,7 +70,7 @@ def test_explicit_goal_result_does_not_require_mdrk2(tmp_path, origin):
         "Цель на этап медицинской реабилитации: ИСХОДНАЯ ЦЕЛЬ"))
     mis_path = tmp_path / "mis.docx"
     _write_document(mis_path, _discharge_lines(full_name=SYNTHETIC_NAME))
-    assert scan_discharge_summary(tmp_path).goal_result == ""
+    assert scan_discharge_summary(tmp_path).goal_result == "достигнут в полном объёме"
     goal = "Достигнута частично"
     result_lines = ("Состояние при выписке: улучшение",
                     "Цель, поставленная на этап медицинской реабилитации: " + goal,

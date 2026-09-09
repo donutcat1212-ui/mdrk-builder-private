@@ -23,6 +23,7 @@ def current_discharge_issues(draft):
     dynamic = {'primary_clinical_diagnosis_missing', 'discharge_datetime_missing', 'discharge_header_missing', 'discharge_current_required', 'scale_value_out_of_range', 'procedure_dates_count_mismatch', 'icf_incomplete_pair', 'icf_initial_missing', 'icf_final_missing'}
     # Drafts saved by earlier versions may still contain this retired warning.
     dynamic.add('final_mdrk_source_missing')
+    dynamic.add('discharge_summary_source_missing')
     issues = [i for i in draft.issues if i.code not in dynamic and not i.code.startswith(('required_', 'scale_initial_missing', 'scale_final_missing'))]
     for name, label in (('clinical_diagnosis', 'Заключительный диагноз'), ('header_text', 'Шапка'), ('discharge_datetime', 'Дата выписки')):
         value = getattr(draft, name)

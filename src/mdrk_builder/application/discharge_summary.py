@@ -31,7 +31,9 @@ from mdrk_builder.application.final_mdrk import (
     apply_final_mdrk_document,
     select_final_mdrk_document,
 )
-from mdrk_builder.application.extractors import extract_clinical_datetime, _infer_procedure_frequency
+from mdrk_builder.application.extractors import extract_clinical_datetime, extract_specialist_name, _infer_procedure_frequency
+from mdrk_builder.application.discharge_identity import complete_identity, episode_header
+from mdrk_builder.application.discharge_examinations import ExaminationSection, partition_examinations
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.application.snapshot import Snapshot, build_snapshot, canonical_scale_name
 from mdrk_builder.application.source_scan import scan_source_documents
@@ -237,6 +239,7 @@ def scan_discharge_summary(
         ),
         source_scan=episode_source_scan,
     )
+    complete_identity(episode, discharge)
     issues = [
         *selection.issues,
         *projection_issues,
@@ -273,7 +276,7 @@ def scan_discharge_summary(
             ReviewIssue(
                 "discharge_summary_source_missing",
                 "Не найден выписной эпикриз текущей госпитализации.",
-                ReviewSeverity.BLOCKING,
+                ReviewSeverity.WARNING,
                 "discharge_source",
             )
         )
@@ -292,7 +295,7 @@ def scan_discharge_summary(
     primary_sections = extract_discharge_clinical_sections(primary_document) if primary_document else {}
     discharge_at = discharge_datetime_override or (discharge.discharge_at if discharge else None)
 
-    header_text = extract_discharge_header(discharge_document) if discharge_document else ""
+    header_text = extract_discharge_header(discharge_document) if discharge_document else episode_header(episode)
     if admission_datetime_override or discharge_datetime_override:
         header_text = update_header_period(header_text, episode.admission_datetime, discharge_at)
     from mdrk_builder.application.diagnosis import compose_diagnosis, diagnosis_choices
@@ -390,6 +393,10 @@ def scan_discharge_summary(
     )
     radiation_exposure = extracted_radiation_exposure or "0 мЗв"
     signatures = extract_signature_block(discharge_document) if discharge_document else ""
+    source_signatures = bool(signatures)
+    if not signatures and primary is not None:
+        doctor = extract_specialist_name(primary_document, primary.scanned.classification.role)
+        signatures = "Лечащий врач: " + doctor + "\nЗаведующий отделением: Поляев Б.Б."
 
     field_sources = {key: value for key, value in episode.field_sources.items()
                      if key.startswith("identity.") or key == "admission_datetime"}
@@ -422,18 +429,16 @@ def scan_discharge_summary(
     }
     for field_name, value in discharge_values.items():
         _field_source(field_sources, field_name, value, discharge)
+    if not source_signatures:
+        field_sources.pop("signatures", None)
+        if primary is not None and doctor:
+            field_sources["signatures.treating_physician"] = primary.path
     _field_source(
         field_sources,
         "radiation_exposure",
         extracted_radiation_exposure,
         discharge,
     )
-    potential_source = episode.field_sources.get("sections.rehabilitation_potential")
-    if (
-        snapshot.sections.rehabilitation_potential
-        and potential_source is not None
-    ):
-        field_sources["rehabilitation_potential"] = potential_source
     imported_goal = ""
     if (final_mdrk is not None
             and episode.field_sources.get("sections.goal") == final_mdrk.document.source_path):
@@ -481,8 +486,30 @@ def scan_discharge_summary(
             primary_values[key] = current_values[key]
     final_values.update({key: value for key, value in current_values.items() if key not in CURRENT_FIELDS})
     field_sources.update(current_sources)
+    if not current_values.get("rehabilitation_potential"):
+        field_sources.pop("rehabilitation_potential", None)
     choices.update(current_choices)
     issues.extend(current_issues)
+    examination_sections = []
+    for candidate in (primary, discharge):
+        if candidate is None:
+            continue
+        document = candidate.scanned.document
+        for name, extract in (
+            ("provided_documents", extract_provided_documents),
+            ("laboratory_results", extract_laboratory_results),
+            ("instrumental_results", extract_instrumental_results),
+        ):
+            value = extract(document)
+            if candidate is discharge and not value:
+                value = discharge_values.get(name, "")
+            examination_sections.append(ExaminationSection(name, value, candidate.path))
+    examination_fields, examination_sources, examination_issues = partition_examinations(
+        examination_sections, episode.admission_datetime, discharge_at)
+    for name in examination_fields:
+        field_sources.pop(name, None)
+    field_sources.update(examination_sources)
+    issues.extend(examination_issues)
 
     generated_output_paths = {
         scanned.document.source_path.resolve()
@@ -520,12 +547,12 @@ def scan_discharge_summary(
         complaints=complaints,
         disease_history=primary_values["disease_history"],
         life_history=primary_values["life_history"],
-        provided_documents=provided_documents,
+        provided_documents=examination_fields["provided_documents"],
         physical_exam=physical_exam,
         neurological_status=neurological_status,
         local_status=local_status,
-        laboratory_results=laboratory_results,
-        instrumental_results=instrumental_results,
+        laboratory_results=examination_fields["laboratory_results"],
+        instrumental_results=examination_fields["instrumental_results"],
         other_consultations=other_consultations,
         medications=final_values.get("medications") or "",
         movement_regimen=primary_values["movement_regimen"],
@@ -537,10 +564,8 @@ def scan_discharge_summary(
         discharge_neurological_status=final_values.get("discharge_neurological_status") or "",
         risks=primary_values["risks"],
         limitations=primary_values["limitations"],
-        rehabilitation_potential=(
-            current_values.get("rehabilitation_potential", snapshot.sections.rehabilitation_potential if potential_source is not None or final_mdrk is not None else "")
-        ),
-        goal_result=final_values.get("goal_result", imported_goal),
+        rehabilitation_potential=current_values.get("rehabilitation_potential") or "средний",
+        goal_result=final_values.get("goal_result") or imported_goal or "достигнут в полном объёме",
         work_capacity=final_values.get("work_capacity", ""),
         radiation_exposure=radiation_exposure,
         recommendations=final_values.get("recommendations", ""),

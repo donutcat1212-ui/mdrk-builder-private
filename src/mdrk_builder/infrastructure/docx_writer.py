@@ -255,9 +255,10 @@ class _DocumentRenderer:
     def _render_rehabilitation_course(self) -> None:
         self._add_section_heading(2, "Сведения о реабилитации")
         self._add_labeled("2.1. Этап медицинской реабилитации: ", self.episode.stage)
+        days = self.episode.course_duration(self.snapshot.kind)
         duration = (
-            f"{self.episode.course_duration_days} дней"
-            if self.episode.course_duration_days is not None
+            f"{days} дней"
+            if days is not None
             else ""
         )
         self._add_labeled("2.2. Длительность курса медицинской реабилитации: ", duration)
@@ -647,6 +648,7 @@ class _DocumentRenderer:
 
     def _add_original_plan_heading(self, text: str) -> None:
         paragraph = self.document.add_paragraph(style=STYLE_BODY)
+        paragraph.paragraph_format.keep_with_next = True
         run = paragraph.add_run(text)
         run.bold = True
         run.underline = True

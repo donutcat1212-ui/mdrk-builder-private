@@ -4,6 +4,30 @@ import re
 from mdrk_builder.application.discharge_extractors import update_header_period
 
 
+def complete_identity(episode, candidate):
+    """Only an already matched MIS export may fill missing episode demographics."""
+    if candidate is None:
+        return
+    for name in ("full_name", "birth_date", "sex", "medical_record_number"):
+        value = getattr(candidate.identity, name)
+        if not getattr(episode.identity, name) and value:
+            setattr(episode.identity, name, value)
+            episode.field_sources["identity." + name] = candidate.path
+
+
+def episode_header(episode):
+    identity = episode.identity
+    birth = identity.birth_date.strftime("%d.%m.%Y") if identity.birth_date else ""
+    text = "\n".join((
+        episode.department,
+        "Номер медицинской карты: " + identity.medical_record_number,
+        "ФИО: " + identity.full_name,
+        "Дата рождения: " + birth,
+        "Пол: " + identity.sex,
+    ))
+    return update_header_period(text, episode.admission_datetime, None)
+
+
 def synchronize_header(draft):
     identity = draft.identity
     reference = draft.discharge_datetime or draft.admission_datetime

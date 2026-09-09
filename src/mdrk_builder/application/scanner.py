@@ -452,7 +452,7 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
                 ]
             if not candidates:
                 continue
-            if field_name in timeline_fields:
+            if field_name in timeline_fields and not (field_name == "clinical_diagnosis" and not include_updates):
                 composed = compose_clinical_timeline(
                     [
                         ClinicalTextObservation(
@@ -600,6 +600,9 @@ def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
         if role not in allowed:
             continue
         conclusion = extract_conclusion(record.document, role)
+        if (not conclusion and role is SpecialistRole.NEUROLOGIST
+                and record.classification.document_type == "initial"):
+            conclusion = "показано проведение курса реабилитационного лечения"
         scales = extract_scale_measurements(record.document, role, record.clinical_datetime)
         if conclusion or scales:
             episode.findings.append(
@@ -1362,6 +1365,12 @@ def _collect_procedures(episode: Episode, records: list[ScannedRecord]) -> None:
                 "procedures.frequency",
             )
         )
+    if any(row.frequency and not row.planned_frequency for row in episode.procedures):
+        episode.issues.append(ReviewIssue(
+            "planned_frequency_from_executions",
+            "Кратность без явного назначения рассчитана по отметкам выполнения; проверьте её в плане МДРК-1.",
+            ReviewSeverity.WARNING, "procedures.frequency",
+        ))
 
 
 def _minimum_field_issues(episode: Episode) -> None:

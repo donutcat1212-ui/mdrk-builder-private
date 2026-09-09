@@ -11,16 +11,17 @@ from mdrk_builder.application.editing import mark_manual_changes, merge_issues, 
 from mdrk_builder.application.workspace import DischargeWorkspaceState
 from mdrk_builder.domain import (
     DischargeScaleRow, DischargeSummaryDraft, DischargeTeamFinding,
-    IcfSection, ReviewIssue, ReviewSeverity, SpecialistRole,
+    IcfDomain, IcfSection, Procedure, ReviewIssue, ReviewSeverity, SpecialistRole,
 )
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
-from mdrk_builder.ui.dialogs import IcfDomainDialog, ProcedureDialog
 from mdrk_builder.ui.discharge_summary_dialog import DISCHARGE_FIELD_GROUPS, apply_discharge_form
 from mdrk_builder.ui.document_controls import OpenPath, add_document_source_access, safe_patient_name
 from mdrk_builder.ui.episode_adapter import (
-    format_date, format_datetime, parse_optional_date, parse_optional_datetime, role_from_name,
+    format_date, format_datetime, parse_optional_date, parse_optional_datetime, parse_qualifier,
+    role_from_name, role_names,
 )
-from mdrk_builder.ui.fields_dialog import FieldsDialog
+from mdrk_builder.ui.inline_tree import InlineTreeEditor
+from mdrk_builder.ui.discharge_table_fields import edit_field, field_rows
 from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
 from mdrk_builder.ui.icf_table import apply_icf_grid_style
 from mdrk_builder.ui.source_access import (
@@ -47,7 +48,7 @@ class DischargeSummaryPanel(ttk.Frame):
         for name, variable in self._identity_vars.items():
             variable.trace_add("write", lambda *_args, field=name: self._mark_identity_dirty(field))
         from mdrk_builder.ui.edit_history import install_history
-        methods = ("_edit_discharge_icf", "_edit_clinical_row")
+        methods = ("_edit_discharge_icf", "_edit_clinical_row", "_commit_icf_cell", "_commit_clinical_cell")
         self._table_history = install_history(self, methods, lambda: self.draft, self._restore_table_state, history=history)
         self._build()
 
@@ -99,6 +100,9 @@ class DischargeSummaryPanel(ttk.Frame):
                 widget.pack(fill="both", expand=True)
                 widget.bind("<<Modified>>", lambda _event, name=field.name: self._on_text_modified(name))
                 self._widgets[field.name] = widget
+                if field.name == "signatures":
+                    from mdrk_builder.ui.signature_fields import SignatureFields
+                    self.signature_fields = SignatureFields(holder, widget)
             for row in range(row_offset, row_offset + (len(fields) + 1) // 2):
                 tab.rowconfigure(row, weight=1)
             tab.columnconfigure(0, weight=1)
@@ -296,8 +300,13 @@ class DischargeSummaryPanel(ttk.Frame):
         self.clinical_detail = scrolledtext.ScrolledText(tab, height=6, wrap="word", state="disabled")
         self.clinical_detail.pack(fill="x", pady=(6, 0))
         self.clinical_tree.bind("<<TreeviewSelect>>", self._show_clinical_detail)
-        self.clinical_tree.bind("<Double-1>", lambda event: self._edit_clinical_row())
-        self.clinical_tree.bind("<F2>", lambda event: self._edit_clinical_row())
+        self._clinical_editor = InlineTreeEditor(
+            self.clinical_tree, editable_columns={"value"}, commit=self._commit_clinical_cell,
+            is_data_row=lambda item: ":field:" in item,
+            activate=self._activate_clinical_row,
+            values=lambda item, _column: role_names() if item.endswith(":field:role") else None,
+            multiline=lambda item, _column: item.endswith(":field:conclusion"),
+        )
         for action, label in (("add","Добавить"),("add_scale","Добавить шкалу специалисту"),("edit","Изменить"),("delete","Удалить"),("source","Вернуть из источника")):
             ttk.Button(bar,text=label,command=lambda a=action:self._edit_clinical_row(a)).pack(side="left")
         self._clinical_links = {}
@@ -341,6 +350,10 @@ class DischargeSummaryPanel(ttk.Frame):
                 if key == "program":
                     links.append(("Расчёт: количество — ячейки с +; кратность — по датам выполнения", None))
                 self._clinical_links[item] = links
+                for name, label, text in field_rows(row):
+                    field_id = f"{item}:field:{name}"
+                    self.clinical_tree.insert(item, "end", iid=field_id, text=label, values=(text,))
+                    self._clinical_links[field_id] = links
                 if key == "team":
                     for scale_index, scale in enumerate(row.scales):
                         scale_id = f"{item}:scale:{scale_index}"
@@ -349,6 +362,10 @@ class DischargeSummaryPanel(ttk.Frame):
                         self._clinical_links[scale_id] = [
                             ("Первичное измерение", scale.initial_source),
                             ("Повторное измерение", scale.source)]
+                        for name, label, text in field_rows(scale, child=True):
+                            field_id = f"{scale_id}:field:{name}"
+                            self.clinical_tree.insert(scale_id, "end", iid=field_id, text=label, values=(text,))
+                            self._clinical_links[field_id] = self._clinical_links[scale_id]
 
     def _build_icf_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=7)
@@ -364,7 +381,7 @@ class DischargeSummaryPanel(ttk.Frame):
         self.icf_source_button.state(["disabled"])
         table = ttk.Frame(tab)
         table.pack(fill="both", expand=True)
-        columns = ("code", "description", "initial", "final", "responsible", "dynamic")
+        columns = ("code", "description", "initial", "final", "responsible", "note", "dynamic")
         self.icf_tree = ttk.Treeview(table, columns=columns, show="tree headings")
         apply_icf_grid_style(self.icf_tree)
         self.icf_tree.heading("#0", text="Раздел")
@@ -374,12 +391,13 @@ class DischargeSummaryPanel(ttk.Frame):
             ("description", "МКФ категория", 300),
             ("initial", "Исх.", 60),
             ("final", "Повт.", 60),
-            ("responsible", "Ответственный / уточнение", 250),
+            ("responsible", "Ответственный специалист", 220),
+            ("note", "Уточнение", 220),
             ("dynamic", "+/−", 50),
         ):
             self.icf_tree.heading(name, text=label)
             self.icf_tree.column(name, width=width, minwidth=width,
-                                 anchor="w" if name in {"description", "responsible"} else "center")
+                                 anchor="w" if name in {"description", "responsible", "note"} else "center")
         vertical = ttk.Scrollbar(table, orient="vertical", command=self.icf_tree.yview)
         horizontal = ttk.Scrollbar(table, orient="horizontal", command=self.icf_tree.xview)
         self.icf_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -392,8 +410,11 @@ class DischargeSummaryPanel(ttk.Frame):
         row_bar = ttk.Frame(tab)
         row_bar.pack(fill="x", pady=(0, 5), before=table)
         ttk.Label(row_bar, text="Источники строки: ПКМ или Shift+F10").pack(side="left")
-        self.icf_tree.bind("<Double-1>", lambda event: self._edit_discharge_icf())
-        self.icf_tree.bind("<F2>", lambda event: self._edit_discharge_icf())
+        self._icf_editor = InlineTreeEditor(
+            self.icf_tree, editable_columns={"code", "description", "initial", "final", "responsible", "note"},
+            commit=self._commit_icf_cell, is_data_row=lambda item: item.startswith("domain:"),
+            values=lambda _item, column: ("", *role_names()) if column == "responsible" else None,
+        )
         for action,label in (("add","Добавить"),("edit","Изменить"),("delete","Удалить"),("source","Вернуть из источника")):
             ttk.Button(row_bar,text=label,command=lambda a=action:self._edit_discharge_icf(a)).pack(side="left")
         self._icf_sources = TableSourceAccess(
@@ -436,7 +457,7 @@ class DischargeSummaryPanel(ttk.Frame):
                 self.icf_tree.insert("", "end", iid=group, text=domain.section.display_name,
                                      open=True, tags=("section",))
             personal = domain.section is IcfSection.PERSONAL_FACTORS
-            responsible = domain.note.strip() or (
+            responsible = (
                 domain.specialist.display_name if domain.specialist is not SpecialistRole.OTHER else ""
             )
             self.icf_tree.insert(group, "end", iid=f"domain:{index}", values=(
@@ -444,6 +465,7 @@ class DischargeSummaryPanel(ttk.Frame):
                 domain.initial.display() if domain.initial is not None and not personal else "",
                 domain.final.display() if domain.final is not None and not personal else "",
                 responsible if not personal else "",
+                domain.note,
                 (domain.dynamic_marker or "") if not personal else "",
             ))
 
@@ -543,10 +565,17 @@ class DischargeSummaryPanel(ttk.Frame):
         if self.draft is None:
             return ()
         links = field_source_links(self.draft.field_sources, name, manual=name in self.draft.manual_fields)
+        if name == "signatures" and "signatures.treating_physician" in self.draft.field_sources:
+            links.append(("Шаблон: заведующий отделением; имя можно изменить отдельно", None))
         if links:
             return links
         if name == "radiation_exposure" and self.draft.radiation_exposure:
             return [("Шаблон: 0 мЗв при отсутствии извлечённых сведений; проверьте значение", None)]
+        defaults = {"rehabilitation_potential": "средний", "goal_result": "достигнут в полном объёме"}
+        if name in defaults and getattr(self.draft, name) == defaults[name]:
+            return [("Шаблон: согласованное значение по умолчанию; врач может изменить", None)]
+        if name == "signatures" and self.draft.signatures:
+            return [("Шаблон: заведующий отделением; лечащий врач — из текущей первички при наличии", None)]
         return []
 
     def _update_source_button(self, name: str) -> None:
@@ -665,99 +694,158 @@ class DischargeSummaryPanel(ttk.Frame):
             return partial(write_discharge_summary_docx, deepcopy(self.draft), Path(output), ignore_issues=bool(issues))
         return write_discharge_summary_docx(self.draft, Path(output), ignore_issues=bool(issues))
 
-    def _edit_discharge_icf(self, action='edit'):
-        if self.draft is None: return
-        selected=self.icf_tree.selection()
-        index=int(selected[0].split(':')[1]) if selected and selected[0].startswith('domain:') else None
-        rows=list(self.draft.icf_domains)
-        if action != 'add' and index is None: return
-        old=rows[index] if index is not None else None
-        if action == 'delete':
-            if not messagebox.askyesno('Удалить строку', 'Удалить выбранный домен? Отменить можно через меню «Правка».', parent=self): return
-            rows.pop(index)
-        elif action == 'source':
-            original=next((r for r in self._baseline.icf_domains if row_key(r)==row_key(old)),None)
-            if original is None: return
-            rows[index]=deepcopy(original)
+    def _commit_icf_cell(self, item, column, value):
+        if self.draft is None or not item.startswith("domain:"):
+            return
+        index = int(item.split(":")[1])
+        rows = list(self.draft.icf_domains)
+        old = rows[index]
+        row = deepcopy(old)
+        value = value.strip()
+        if column in {"initial", "final"}:
+            setattr(row, column, parse_qualifier(value))
+        elif column == "responsible":
+            row.specialist = role_from_name(value) if value else SpecialistRole.OTHER
         else:
-            dialog=IcfDomainDialog(self, old if action=='edit' else None)
-            if not dialog.result:return
-            if action=='add':
-                dialog.result.manual_fields.update({'code', 'initial', 'final'})
-                rows.append(dialog.result)
-            else: rows[index]=dialog.result
-        self.draft.icf_domains=tuple(rows);self._refresh_icf()
+            setattr(row, column, value)
+        mark_manual_changes(old, row)
+        rows[index] = row
+        self.draft.icf_domains = tuple(rows)
+        self._refresh_icf()
+        self.icf_tree.selection_set(item)
+        self._refresh_live_issues()
 
-    def _edit_clinical_row(self, action='edit'):
-        if self.draft is None:return
-        selected=self.clinical_tree.selection()
-        if not selected:return
-        parts=selected[0].split(':');group=parts[0]
-        mapping={'team':'team_findings','program':'completed_procedures','admission':'admission_scale_rows','discharge':'discharge_scale_rows'}
-        if group not in mapping:return
-        attr=mapping[group];rows=list(getattr(self.draft,attr));index=int(parts[1]) if len(parts)>1 else None
-        if action!='add' and index is None:return
-        child=len(parts)==4 and parts[2]=='scale'
+    def _edit_discharge_icf(self, action="edit"):
+        if self.draft is None:
+            return
+        selected = self.icf_tree.selection()
+        index = int(selected[0].split(":")[1]) if selected and selected[0].startswith("domain:") else None
+        rows = list(self.draft.icf_domains)
+        if action != "add" and index is None:
+            return
+        if action == "edit":
+            self._icf_editor.edit(selected[0], "code")
+            return
+        if action == "add":
+            index = len(rows)
+            rows.append(IcfDomain("", "", SpecialistRole.OTHER, manual_fields={"initial", "final"}))
+        elif action == "delete":
+            if not messagebox.askyesno("Удалить строку", "Удалить выбранный домен?", parent=self):
+                return
+            rows.pop(index)
+        elif action == "source":
+            old = rows[index]
+            original = next((r for r in self._baseline.icf_domains if row_key(r) == row_key(old)), None)
+            if original is None:
+                return
+            rows[index] = deepcopy(original)
+        self.draft.icf_domains = tuple(rows)
+        self._refresh_icf()
+        self._refresh_live_issues()
+        if action == "add":
+            item = f"domain:{index}"
+            self.icf_tree.selection_set(item)
+            self.icf_tree.see(item)
+            self.after_idle(lambda: self._icf_editor.edit(item, "code"))
+
+    def _activate_clinical_row(self, item):
+        if ":field:" in item or item.count(":") < 1:
+            return False
+        self.clinical_tree.item(item, open=True)
+        fields = [child for child in self.clinical_tree.get_children(item) if ":field:" in child]
+        if fields:
+            self.clinical_tree.selection_set(fields[0])
+            self.after_idle(lambda: self._clinical_editor.edit(fields[0], "value"))
+        return True
+
+    def _commit_clinical_cell(self, item, _column, value):
+        row_id, name = item.rsplit(":field:", 1)
+        self._edit_clinical_row("cell", row_id=row_id, field=name, value=value)
+        if self.clinical_tree.exists(item):
+            parent = self.clinical_tree.parent(item)
+            while parent:
+                self.clinical_tree.item(parent, open=True)
+                parent = self.clinical_tree.parent(parent)
+            self.clinical_tree.selection_set(item)
+            self.clinical_tree.see(item)
+
+    def _edit_clinical_row(self, action="edit", *, row_id=None, field=None, value=None):
+        if self.draft is None:
+            return
+        selected = self.clinical_tree.selection()
+        if row_id is None:
+            if not selected:
+                return
+            row_id = selected[0].split(":field:")[0]
+        parts = row_id.split(":")
+        group = parts[0]
+        mapping = {"team": "team_findings", "program": "completed_procedures",
+                   "admission": "admission_scale_rows", "discharge": "discharge_scale_rows"}
+        if group not in mapping:
+            return
+        if action == "edit":
+            self._activate_clinical_row(row_id)
+            return
+        attr = mapping[group]
+        rows = list(getattr(self.draft, attr))
+        index = int(parts[1]) if len(parts) > 1 else None
+        child = len(parts) == 4 and parts[2] == "scale"
         if action == "add_scale":
-            if group != "team" or index is None: return
-            child = True
-            action = "add"
-        parent=rows[index] if index is not None else None
-        target=list(parent.scales) if child else rows
-        target_index=(int(parts[3]) if len(parts)==4 else None) if child else index
-        old=target[target_index] if target_index is not None else None
-        if action=='delete':
-            if not messagebox.askyesno('Удалить строку','Удалить выбранную строку? Отмена доступна в меню «Правка».',parent=self):return
+            if group != "team" or index is None:
+                return
+            child, action = True, "add"
+        if action != "add" and index is None:
+            return
+        parent = rows[index] if index is not None else None
+        target = list(parent.scales) if child else rows
+        target_index = (int(parts[3]) if len(parts) == 4 else None) if child else index
+        old = target[target_index] if target_index is not None else None
+        if action == "delete":
+            if not messagebox.askyesno("Удалить строку", "Удалить выбранную строку?", parent=self):
+                return
             target.pop(target_index)
-        elif action=='source':
-            originals=getattr(self._baseline,attr)
+            new = None
+        elif action == "source":
+            originals = getattr(self._baseline, attr)
             if child:
-                original_parent=next((r for r in originals if row_key(r)==row_key(parent)),None)
-                originals=original_parent.scales if original_parent else ()
-            original=next((r for r in originals if row_key(r)==row_key(old)),None)
-            if original is None:return
-            target[target_index]=deepcopy(original)
-        else:
-            if action=='add':old=None
-            if group=='program':
-                dialog=ProcedureDialog(self,old);new=dialog.result
-            elif group=='team' and not child:
-                values={'role':('Специалист',old.role.display_name if old else SpecialistRole.OTHER.display_name),
-                    'specialist_name':('ФИО',old.specialist_name if old else ''),
-                    'occurred_at':('Дата и время',format_datetime(old.occurred_at) if old else ''),
-                    'conclusion':('Заключение',old.conclusion if old else '')}
-                dialog=FieldsDialog(self,'Заключение специалиста',values)
-                if not dialog.result:return
-                data=dialog.result;new=replace(old,role=role_from_name(data['role']),specialist_name=data['specialist_name'],occurred_at=parse_optional_datetime(data['occurred_at']),conclusion=data['conclusion']) if old else DischargeTeamFinding(role_from_name(data['role']),data['conclusion'],specialist_name=data['specialist_name'],occurred_at=parse_optional_datetime(data['occurred_at']))
+                original_parent = next((r for r in originals if row_key(r) == row_key(parent)), None)
+                originals = original_parent.scales if original_parent else ()
+            new = next((deepcopy(r) for r in originals if row_key(r) == row_key(old)), None)
+            if new is None:
+                return
+            target[target_index] = new
+        elif action == "cell":
+            new = edit_field(old, field, value)
+            target[target_index] = new
+        elif action == "add":
+            if group == "program":
+                new = Procedure("", "", None, manual_fields={"name"})
+            elif group == "team" and not child:
+                new = DischargeTeamFinding(SpecialistRole.OTHER, "", manual_fields={"conclusion"})
             else:
-                values={'role':('Специалист',old.role.display_name if old else SpecialistRole.OTHER.display_name),
-                    'name':('Шкала',old.name if old else ''),'value':('Текущее значение',old.value if old else ''),
-                    'initial_value':('Первичное значение',old.initial_value if old else ''),
-                    'initial_at':('Дата первичной оценки',format_datetime(old.initial_at) if old else ''),
-                    'current_at':('Дата текущей оценки',format_datetime(old.current_at) if old else '')}
-                if child:
-                    values.pop('role')
-                dialog=FieldsDialog(self,'Шкала',values)
-                if not dialog.result:return
-                data=dialog.result;data['role']=parent.role if child else role_from_name(data['role'])
-                for k in ('initial_at','current_at'):data[k]=parse_optional_datetime(data[k])
-                new=replace(old,**data) if old else DischargeScaleRow(**data)
-            if new is None:return
-            if old is not None:mark_manual_changes(old,new)
-            elif hasattr(new,'manual_fields'):new.manual_fields.update({'value'} if hasattr(new,'value') else {'name'})
-            if action=='add':target.append(new)
-            else:target[target_index]=new
+                new = DischargeScaleRow(parent.role if child else SpecialistRole.OTHER, "", manual_fields={"value"})
+            target_index = len(target)
+            target.append(new)
+        else:
+            return
         from mdrk_builder.application.shared_edits import synchronize_scale_rows, synchronize_discharge_point, remove_scale_rows
         if child:
             rows[index] = replace(parent, scales=tuple(target))
-            if old is not None:
+            if old is not None and action != "add":
                 remove_scale_rows(self.draft, old)
-            if action != 'delete':
-                synchronize_scale_rows(self.draft, target[-1] if action == 'add' else target[target_index])
+            if new is not None:
+                synchronize_scale_rows(self.draft, new)
         setattr(self.draft, attr, tuple(rows))
-        if group in {'admission', 'discharge'}:
-            synchronize_discharge_point(self.draft, attr, old, None if action == 'delete' else target[-1] if action == 'add' else target[target_index])
-        elif group == 'team' and not child and action == 'delete':
+        if group in {"admission", "discharge"}:
+            synchronize_discharge_point(self.draft, attr, None if action == "add" else old, new)
+        elif group == "team" and not child and action == "delete":
             for row in old.scales:
                 remove_scale_rows(self.draft, row)
         self._refresh_clinical_data()
+        self._refresh_live_issues()
+        if action == "add":
+            item = f"{group}:{index}:scale:{target_index}" if child else f"{group}:{target_index}"
+            self.clinical_tree.item(group, open=True)
+            if child:
+                self.clinical_tree.item(f"{group}:{index}", open=True)
+            self._activate_clinical_row(item)

@@ -72,7 +72,8 @@ def test_discharge_exposes_each_structured_row_and_template_origin(root, tmp_pat
         discharge_scale_rows=(DischargeScaleRow(SpecialistRole.NEUROLOGIST, 'Шкала', '3', source),),
         completed_procedures=(Procedure('Процедура', 'Исполнитель', 2, source=source),))
     panel.load(draft)
-    assert set(panel._clinical_links) == {'team:0', 'admission:0', 'discharge:0', 'program:0'}
+    assert {item for item in panel._clinical_links if ':field:' not in item} == {'team:0', 'admission:0', 'discharge:0', 'program:0'}
+    assert 'program:0:field:frequency' in panel._clinical_links
     assert all(any(path == source for _, path in links) for links in panel._clinical_links.values())
     assert panel._field_links('recommendations') == []
     panel.clinical_tree.selection_set('team:0')
