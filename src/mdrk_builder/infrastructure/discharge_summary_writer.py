@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from pathlib import Path
 import re
 
@@ -67,6 +68,9 @@ def write_discharge_summary_docx(
     template_path: Path | None = None,
     ignore_issues: bool = False,
 ) -> Path:
+    from mdrk_builder.application.admission_only_scales import omit_admission_scales_from_discharge
+    draft = deepcopy(draft)
+    omit_admission_scales_from_discharge(draft)
     if draft.requires_period_rescan():
         raise ValueError("Даты госпитализации изменены. Повторно считайте документы выписки для пересчёта данных.")
     blocking = list(draft.blocking_issues())

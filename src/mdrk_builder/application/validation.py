@@ -137,7 +137,7 @@ def _issue_field_state(episode: Episode, issue: ReviewIssue, kind: MdrkKind) -> 
     if root == "sources":
         return (episode.sources, episode.excluded_source_paths)
     if root == "findings":
-        return (episode.findings, episode.meeting_at(kind))
+        return (episode.findings, episode.assessment_at(kind))
     if root == "scales":
         rows = select_scale_rows(episode, kind)
         return _indexed_item(rows, path[1]) if len(path) > 1 else rows
@@ -374,6 +374,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     selected_meeting = episode.meeting_at(kind)
     if (
         selected_meeting is not None
+        and kind not in episode.assessment_meetings
         and episode.admission_datetime is not None
         and selected_meeting < episode.admission_datetime
     ):
@@ -387,6 +388,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
         )
     if (
         kind is MdrkKind.FINAL
+        and not episode.assessment_meetings
         and episode.initial_meeting_at is not None
         and episode.final_meeting_at is not None
         and episode.final_meeting_at <= episode.initial_meeting_at
@@ -414,7 +416,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
             )
         )
 
-    boundary = episode.meeting_at(kind)
+    boundary = episode.assessment_at(kind)
     selected_findings = {
         finding.role: finding for finding in select_findings(episode, boundary)
     }
@@ -554,7 +556,7 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
                 )
             )
     from mdrk_builder.application.procedures import select_procedures
-    procedures = select_procedures(episode.procedures, episode.admission_datetime, episode.meeting_at(kind), kind)
+    procedures = select_procedures(episode.procedures, episode.admission_datetime, episode.assessment_at(kind), kind)
     for index, procedure in enumerate(procedures):
         checks = (
             ("procedure_specialist_missing", procedure.specialist, "ответственный специалист"),
@@ -652,6 +654,8 @@ def current_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
         if issue.code not in _RECOMPUTED_CODES
         and not issue.code.startswith("required_")
         and not issue.code.startswith("review_")
+        and not (issue.code == "physician_source_after_meeting"
+                 and issue.field in {f"{edited.value}_meeting_at" for edited in episode.assessment_meetings})
     ]
     raw_issues = [*stable, *generation_issues(episode, kind)]
 

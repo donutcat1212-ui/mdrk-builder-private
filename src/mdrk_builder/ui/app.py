@@ -87,11 +87,6 @@ SEVERITY_LABELS = {
     ReviewSeverity.INFO: "ИНФО",
 }
 
-MEETING_RESCAN_MESSAGE = (
-    "Время заседания изменено. Нажмите «Повторить сканирование», чтобы "
-    "заново собрать данные на этот момент. Ручные правки сохранятся."
-)
-
 # Kept as the single reusable safety wording for dialogs and documentation.
 # It is intentionally not rendered as persistent chrome in the main window.
 REVIEW_NOTICE_SHORT = (
@@ -992,10 +987,7 @@ class MdrkBuilderApp:
         from mdrk_builder.ui.episode_adapter import parse_optional_datetime
         try:
             admission = parse_optional_datetime(self._entry_variables['admission'].get())
-            end = self.episode.discharge_datetime or (
-                parse_optional_datetime(self._entry_variables['meeting'].get())
-                if self._current_kind is MdrkKind.FINAL else self.episode.final_meeting_at
-            )
+            end = self.episode.discharge_datetime or self.episode.assessment_at(MdrkKind.FINAL)
         except ValueError:
             return
         value = hospitalization_days(admission, end)
@@ -1063,10 +1055,7 @@ class MdrkBuilderApp:
                 previous.planned_course_duration_days = form.course_duration_days
             else:
                 previous.course_duration_days = form.course_duration_days
-            if self._current_kind is MdrkKind.INITIAL:
-                previous.initial_meeting_at = form.meeting_at
-            else:
-                previous.final_meeting_at = form.meeting_at
+            previous.edit_meeting(self._current_kind, form.meeting_at)
             target_sections = sections_for(previous, self._current_kind)
             for key, value in form.section_values:
                 setattr(target_sections, key, value)
@@ -1129,8 +1118,9 @@ class MdrkBuilderApp:
                             mapping.update({name: path for name, path in old.items()
                                             if name == source_key or name.startswith(source_key + ".")})
         if 'meeting' in entry_fields:
-            episode.initial_meeting_at = previous.initial_meeting_at
-            episode.final_meeting_at = previous.final_meeting_at
+            for kind in previous.assessment_meetings:
+                episode.assessment_meetings.setdefault(kind, episode.meeting_at(kind))
+                episode.edit_meeting(kind, previous.meeting_at(kind))
         if not episode.course_duration_manual:
             from mdrk_builder.application.scanner import _update_course_duration
             _update_course_duration(episode)
@@ -1388,6 +1378,8 @@ class MdrkBuilderApp:
             entry_keys["course_duration_days"] = "planned_duration"
         manual = (entry_keys.get(field_key) in self._dirty_entry_fields or
                   field_key.removeprefix("sections.") in self._dirty_section_fields[self._current_kind])
+        if field_key == "meeting_at":
+            manual = self._current_kind in self.episode.assessment_meetings
         links = list(field_source_links(source_map, field_key, manual=manual))
         if links:
             return links
@@ -1417,7 +1409,8 @@ class MdrkBuilderApp:
             paths = [path for _, path in links if path is not None]
             if paths:
                 self._field_source_paths[field_key] = paths[0]
-            button.configure(text="Источник", state="normal")
+            button.configure(text="Ручная правка" if any(label.startswith("Ручная правка") for label, _ in links)
+                             else "Источник", state="normal")
 
     def _start_scan(self) -> None:
         if self._scanning:
@@ -1482,12 +1475,8 @@ class MdrkBuilderApp:
                     )
                     scan_overrides[override_name] = entered_meeting
             else:
-                initial_meeting = self.episode.initial_meeting_at
-                final_meeting = self.episode.final_meeting_at
-                if self._current_kind is MdrkKind.INITIAL:
-                    initial_meeting = entered_meeting
-                else:
-                    final_meeting = entered_meeting
+                initial_meeting = self.episode.assessment_at(MdrkKind.INITIAL)
+                final_meeting = self.episode.assessment_at(MdrkKind.FINAL)
                 if initial_meeting is not None:
                     scan_overrides["initial_meeting_at"] = initial_meeting
                 if final_meeting is not None:
@@ -1786,11 +1775,6 @@ class MdrkBuilderApp:
             self._render_form_error()
             messagebox.showerror("Проверьте поля", str(exc))
             return False
-        if form.meeting_at != self.episode.meeting_at(target_kind):
-            self._last_form_error = MEETING_RESCAN_MESSAGE
-            self.status_var.set("Время заседания изменено: нужно повторное сканирование.")
-            messagebox.showerror("Нужно повторное сканирование", MEETING_RESCAN_MESSAGE)
-            return False
         apply_episode_form_data(self.episode, target_kind, form)
         for key in self._dirty_entry_fields:
             source_key = {
@@ -1830,20 +1814,8 @@ class MdrkBuilderApp:
                 self.status_var.set("Снимок не переключён: исправьте поля.")
                 messagebox.showerror("Снимок не переключён", str(exc))
                 return
-            if form.meeting_at != self.episode.meeting_at(self._current_kind):
-                self.kind_var.set(self._current_kind.value)
-                if hasattr(self, "document_var"):
-                    self.document_var.set("mdrk1" if self._current_kind is MdrkKind.INITIAL else "mdrk2")
-                self._last_form_error = MEETING_RESCAN_MESSAGE
-                self.status_var.set(
-                    "Снимок не переключён: нужно повторное сканирование."
-                )
-                messagebox.showerror(
-                    "Нужно повторное сканирование",
-                    MEETING_RESCAN_MESSAGE,
-                )
-                return
             apply_episode_form_data(self.episode, self._current_kind, form)
+            self._last_form_error = ""
         self._current_kind = requested_kind
         if self.episode:
             self._populate_from_episode()
@@ -2120,7 +2092,7 @@ class MdrkBuilderApp:
         from mdrk_builder.application.procedures import select_procedures
         kind = self._selected_kind()
         self.procedure_tree.heading("count", text="Назначено" if kind is MdrkKind.INITIAL else "Выполнено")
-        projected = select_procedures(self.episode.procedures, self.episode.admission_datetime, self.episode.meeting_at(kind), kind)
+        projected = select_procedures(self.episode.procedures, self.episode.admission_datetime, self.episode.assessment_at(kind), kind)
         for index, procedure in enumerate(projected):
             self.procedure_tree.insert(
                 "",
@@ -2199,9 +2171,10 @@ class MdrkBuilderApp:
         self._clear_tree(self.finding_tree)
         if not self.episode:
             return
+        from mdrk_builder.application.snapshot import select_findings
         selected_ids = {
             id(finding)
-            for finding in build_snapshot(self.episode, self._current_kind).findings
+            for finding in select_findings(self.episode, self.episode.assessment_at(self._current_kind))
         }
         for index, finding in enumerate(self.episode.findings):
             if id(finding) not in selected_ids:
@@ -2338,9 +2311,6 @@ class MdrkBuilderApp:
             form = self._parsed_form_data()
         except ValueError as exc:
             self._last_form_error = str(exc)
-            return False
-        if form.meeting_at != self.episode.meeting_at(self._current_kind):
-            self._last_form_error = MEETING_RESCAN_MESSAGE
             return False
         apply_episode_form_data(self.episode, self._current_kind, form)
         self._last_form_error = ""

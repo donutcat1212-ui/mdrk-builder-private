@@ -6,6 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from mdrk_builder.application.admission_only_scales import (
+    omit_admission_scales_from_discharge, without_admission_scale_items,
+)
 from mdrk_builder.application.discharge_extractors import update_header_period
 from mdrk_builder.application.editing import mark_manual_changes, merge_issues, merge_rows, row_key
 from mdrk_builder.application.workspace import DischargeWorkspaceState
@@ -188,7 +191,7 @@ class DischargeSummaryPanel(ttk.Frame):
             for key, value in state.text.items():
                 widget = self._widgets[key]
                 widget.delete('1.0', 'end')
-                widget.insert('1.0', value)
+                widget.insert('1.0', without_admission_scale_items(value))
                 widget.edit_reset()
                 widget.edit_modified(False)
         finally:
@@ -218,6 +221,7 @@ class DischargeSummaryPanel(ttk.Frame):
             button.configure(text='Источник не указан', state='disabled')
 
     def load(self, draft: DischargeSummaryDraft) -> None:
+        omit_admission_scales_from_discharge(draft)
         self.draft = draft
         self._baseline = deepcopy(draft)
         if hasattr(self, "_table_history"):
@@ -322,6 +326,8 @@ class DischargeSummaryPanel(ttk.Frame):
         self.clinical_detail.configure(state="disabled")
 
     def _refresh_clinical_data(self) -> None:
+        if self.draft is not None:
+            omit_admission_scales_from_discharge(self.draft)
         self.clinical_tree.delete(*self.clinical_tree.get_children())
         self._show_clinical_detail()
         self._clinical_links = {}
@@ -472,6 +478,7 @@ class DischargeSummaryPanel(ttk.Frame):
     def _populate(self) -> None:
         if self.draft is None:
             return
+        omit_admission_scales_from_discharge(self.draft)
         self._populating = True
         self._identity_vars["full_name"].set(self.draft.identity.full_name)
         self._identity_vars["record_number"].set(self.draft.identity.medical_record_number)

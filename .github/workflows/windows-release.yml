@@ -150,4 +150,9 @@ jobs:
         run: |
           $version = "${{ steps.package.outputs.version }}"
           $notes = "Внутренний Windows x64 ZIP. Локальная работа без сетевой передачи данных. Проверены сборка и запуск EXE в Windows CI. Преобразование DOC/RTF через настольный Microsoft Word на целевом компьютере ещё требует приёмки. Перед использованием прочитайте инструкцию внутри архива и проверьте созданные DOCX."
+          gh release view "${{ github.ref_name }}" --json tagName
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Existing release retained. The verified workflow artifact is available for an explicitly requested update."
+            exit 0
+          }
           gh release create "${{ github.ref_name }}" "${{ steps.release_bundle.outputs.zip_path }}" --verify-tag --draft --prerelease --title "MDRK Builder $version Internal" --notes $notes

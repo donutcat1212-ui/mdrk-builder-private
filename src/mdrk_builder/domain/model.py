@@ -301,9 +301,23 @@ class Episode:
     field_sources: dict[str, Path] = field(default_factory=dict)
     initial_meeting_at: datetime | None = None
     final_meeting_at: datetime | None = None
+    assessment_meetings: dict[MdrkKind, datetime | None] = field(default_factory=dict)
 
     def meeting_at(self, kind: MdrkKind) -> datetime | None:
         return self.initial_meeting_at if kind is MdrkKind.INITIAL else self.final_meeting_at
+
+    def assessment_at(self, kind: MdrkKind) -> datetime | None:
+        """Clinical selection boundary, unchanged by a manual document-date edit."""
+        return self.assessment_meetings.get(kind, self.meeting_at(kind))
+
+    def edit_meeting(self, kind: MdrkKind, value: datetime | None) -> None:
+        if value == self.meeting_at(kind):
+            return
+        self.assessment_meetings.setdefault(kind, self.meeting_at(kind))
+        if kind is MdrkKind.INITIAL:
+            self.initial_meeting_at = value
+        else:
+            self.final_meeting_at = value
 
     def course_duration(self, kind: MdrkKind) -> int | None:
         return self.planned_course_duration_days if kind is MdrkKind.INITIAL else self.course_duration_days

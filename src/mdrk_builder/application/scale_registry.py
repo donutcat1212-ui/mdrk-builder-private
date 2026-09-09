@@ -14,6 +14,8 @@ class ScaleDefinition:
 
 
 SCALE_REGISTRY = (
+    ScaleDefinition("egfr", "скорость клубочковой фильтрации",
+                    ("скф", "egfr", "скорость клубочковой фильтрации"), display_name="СКФ"),
     ScaleDefinition(
         "rivermead",
         "индекс мобильности ривермид",

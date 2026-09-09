@@ -488,14 +488,9 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         "(05 июня 2026 16:00):"
     )
     assert not physician_heading.runs[0].bold
-    final_physician_table = next(
-        table
-        for table in final.tables
-        if any(row.cells[0].text == "СКФ" for row in table.rows[1:])
-    )
-    assert "19.06.2026 13:00" in final_physician_table.rows[0].cells[2].text
-    assert final_physician_table.rows[1].cells[1].text == "63,73"
-    assert final_physician_table.rows[1].cells[2].text == "63,73"
+    assert physician_table.rows[1].cells[1].text == "СКФ"
+    assert physician_table.rows[1].cells[2].text == "63,73"
+    assert not any("СКФ" in text for text in final.element.xpath("//w:t/text()"))
     final_physician_heading = next(
         paragraph
         for paragraph in final.paragraphs

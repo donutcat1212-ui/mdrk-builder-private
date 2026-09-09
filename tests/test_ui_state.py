@@ -377,7 +377,7 @@ def test_invalid_meeting_keeps_current_snapshot_and_text(monkeypatch, tmp_path) 
     assert errors and "Время заседания" in errors[0]
 
 
-def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
+def test_changed_meeting_applies_as_manual_edit_without_losing_data(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -391,6 +391,8 @@ def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
     app._last_form_error = ""
     app._entry_variables = _entry_values("10.08.2026 09:00")
     app._text_fields = {"clinical_diagnosis": _Text("не потерять")}
+    app._dirty_entry_fields = {"meeting"}
+    app._dirty_section_fields = {MdrkKind.INITIAL: set(), MdrkKind.FINAL: set()}
     errors: list[str] = []
     monkeypatch.setattr(
         app_module.messagebox,
@@ -398,15 +400,15 @@ def test_changed_meeting_blocks_generation_form_apply_without_losing_edits(
         lambda _title, message: errors.append(message),
     )
 
-    assert not app._apply_form()
-    assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 8)
-    assert app.episode.identity.full_name == "ПАЦИЕНТ_СОХРАНЁННЫЙ"
-    assert app.episode.initial_sections.clinical_diagnosis == "сохранённый"
+    assert app._apply_form()
+    assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 9)
+    assert app.episode.assessment_at(MdrkKind.INITIAL) == datetime(2026, 8, 10, 8)
+    assert app.episode.initial_sections.clinical_diagnosis == "не потерять"
     assert app._text_fields["clinical_diagnosis"].value == "не потерять"
-    assert errors and "повторить сканирование" in errors[0].casefold()
+    assert not errors
 
 
-def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
+def test_changed_meeting_allows_snapshot_switch(monkeypatch, tmp_path) -> None:
     app = object.__new__(MdrkBuilderApp)
     app.episode = Episode(folder=tmp_path)
     app.episode.initial_meeting_at = datetime(2026, 8, 10, 8)
@@ -417,6 +419,7 @@ def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
     app._last_form_error = ""
     app._entry_variables = _entry_values("10.08.2026 09:00")
     app._text_fields = {"clinical_diagnosis": _Text("не потерять")}
+    app._populate_from_episode = lambda: None
     errors: list[str] = []
     monkeypatch.setattr(
         app_module.messagebox,
@@ -426,12 +429,13 @@ def test_changed_meeting_blocks_snapshot_switch(monkeypatch, tmp_path) -> None:
 
     app._on_kind_changed()
 
-    assert app._current_kind is MdrkKind.INITIAL
-    assert app.kind_var.get() == MdrkKind.INITIAL.value
-    assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 8)
-    assert app.episode.initial_sections.clinical_diagnosis == "сохранённый"
+    assert app._current_kind is MdrkKind.FINAL
+    assert app.kind_var.get() == MdrkKind.FINAL.value
+    assert app.episode.initial_meeting_at == datetime(2026, 8, 10, 9)
+    assert app.episode.assessment_at(MdrkKind.INITIAL) == datetime(2026, 8, 10, 8)
+    assert app.episode.initial_sections.clinical_diagnosis == "не потерять"
     assert app._text_fields["clinical_diagnosis"].value == "не потерять"
-    assert errors and "повторить сканирование" in errors[0].casefold()
+    assert not errors
 
 
 def test_selected_issue_can_be_ignored_after_explicit_confirmation(
@@ -539,7 +543,7 @@ def test_rescan_passes_both_meeting_boundaries_without_destructive_confirmation(
         "scan_session": None,
         "folder": tmp_path,
         "initial_meeting_at": datetime(2026, 8, 10, 8),
-        "final_meeting_at": datetime(2026, 8, 19, 15, 30),
+        "final_meeting_at": datetime(2026, 8, 20, 11),
     }
 
 

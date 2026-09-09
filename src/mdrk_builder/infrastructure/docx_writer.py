@@ -580,7 +580,7 @@ class _DocumentRenderer:
         rows = list(SIGNATORY_ROSTER)
         positions = {_signatory_role_key(row): index for index, row in enumerate(rows)}
         extras: list[SignatoryRow] = []
-        boundary = self.snapshot.meeting_at
+        boundary = self.episode.assessment_at(self.snapshot.kind)
         source_names: dict[str, tuple[datetime, str, str]] = {}
         for source in self.episode.sources:
             full_name = source.specialist_name.strip()

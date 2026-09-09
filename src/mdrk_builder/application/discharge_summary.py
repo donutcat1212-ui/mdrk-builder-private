@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
 
+from mdrk_builder.application.admission_only_scales import omit_admission_scales_from_discharge
 from mdrk_builder.application.discharge_extractors import (
     extract_complaints,
     extract_discharge_clinical_sections,
@@ -517,7 +518,7 @@ def scan_discharge_summary(
         if scanned.classification.is_generated_output
     }
 
-    return DischargeSummaryDraft(
+    draft = DischargeSummaryDraft(
         folder=folder,
         conflict_choices=choices,
         identity=_copy_identity(episode.identity),
@@ -573,3 +574,5 @@ def scan_discharge_summary(
         field_sources=dict(field_sources),
         issues=[replace(issue) for issue in issues],
     )
+    omit_admission_scales_from_discharge(draft)
+    return draft

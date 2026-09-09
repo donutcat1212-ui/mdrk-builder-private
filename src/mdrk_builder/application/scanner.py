@@ -333,7 +333,7 @@ def _update_course_duration(episode: Episode) -> None:
     from mdrk_builder.application.editing import hospitalization_days
     if not episode.course_duration_manual:
         episode.course_duration_days = hospitalization_days(
-            episode.admission_datetime, episode.discharge_datetime or episode.final_meeting_at
+            episode.admission_datetime, episode.discharge_datetime or episode.assessment_at(MdrkKind.FINAL)
         )
 
 

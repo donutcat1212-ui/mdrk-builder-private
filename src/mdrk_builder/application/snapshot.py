@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from difflib import SequenceMatcher
 
 from mdrk_builder.application.procedures import select_procedures
 from mdrk_builder.application.clinical_text import is_empty_clinical_update
+from mdrk_builder.application.admission_only_scales import is_admission_only_scale, without_admission_scale_items
 from mdrk_builder.application.scale_registry import (
     canonical_scale_key,
     canonical_scale_name,
@@ -190,7 +191,7 @@ def _scale_points(values: list[_ScaleCandidate]) -> list[ScaleMeasurement]:
 
 def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
     observations: dict[tuple[SpecialistRole, str], list[_ScaleCandidate]] = {}
-    boundary = episode.meeting_at(kind)
+    boundary = episode.assessment_at(kind)
     for finding in episode.findings:
         # Do not leak measurements copied retrospectively into a document that
         # itself was written after the selected MDRK meeting.
@@ -201,6 +202,8 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         ):
             continue
         for measurement in finding.scales:
+            if kind is MdrkKind.FINAL and is_admission_only_scale(measurement.name):
+                continue
             normalized_measurement = (
                 measurement
                 if measurement.measured_at is not None
@@ -229,7 +232,7 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         points = _scale_points(candidates)
         if not points:
             continue
-        initial_boundary = episode.initial_meeting_at
+        initial_boundary = episode.assessment_at(MdrkKind.INITIAL)
         baseline = [point for point in points if initial_boundary is None or (
             point.measured_at is not None and point.measured_at <= initial_boundary)]
         initial = baseline[0] if baseline else None
@@ -242,7 +245,7 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         "rivermead",
         "rankin",
         "nrs 2002",
-        "скф",
+        "egfr",
         "shrm",
         "barthel",
     )
@@ -291,7 +294,7 @@ def _icf_final_datetime(episode: Episode, domain: IcfDomain) -> datetime | None:
 
 
 def select_icf_domains(episode: Episode, kind: MdrkKind) -> tuple[IcfDomain, ...]:
-    boundary = episode.meeting_at(kind)
+    boundary = episode.assessment_at(kind)
     selected: list[IcfDomain] = []
     for domain in episode.icf_domains:
         initial_at = _icf_initial_datetime(episode, domain)
@@ -302,8 +305,9 @@ def select_icf_domains(episode: Episode, kind: MdrkKind) -> tuple[IcfDomain, ...
                 changes.update({phase: None, phase + "_source": None, phase + "_measured_at": None})
         domain = replace(domain, **changes)
         initial_at = _icf_initial_datetime(episode, domain)
-        if domain.initial is not None and episode.initial_meeting_at is not None and (
-            initial_at is not None and initial_at > episode.initial_meeting_at
+        initial_boundary = episode.assessment_at(MdrkKind.INITIAL)
+        if domain.initial is not None and initial_boundary is not None and (
+            initial_at is not None and initial_at > initial_boundary
         ):
             if domain.final is None:
                 domain = replace(domain, final=domain.initial, final_source=domain.initial_source,
@@ -357,15 +361,24 @@ def select_icf_domains(episode: Episode, kind: MdrkKind) -> tuple[IcfDomain, ...
 
 
 def build_snapshot(episode: Episode, kind: MdrkKind) -> Snapshot:
-    boundary = episode.meeting_at(kind)
+    boundary = episode.assessment_at(kind)
     findings = select_findings(episode, boundary)
     sections = episode.initial_sections if kind is MdrkKind.INITIAL else episode.sections
+    if kind is MdrkKind.FINAL:
+        cleaned = {field.name: value for field in fields(sections)
+                   if (value := without_admission_scale_items(getattr(sections, field.name))) != getattr(sections, field.name)}
+        if cleaned:
+            sections = replace(sections, **cleaned)
+        findings = tuple(replace(finding,
+            conclusion=without_admission_scale_items(finding.conclusion),
+            scales=[row for row in finding.scales if not is_admission_only_scale(row.name)],
+        ) for finding in findings)
     goal = FINAL_GOAL if kind is MdrkKind.FINAL else sections.goal
     tasks = FINAL_TASKS if kind is MdrkKind.FINAL else sections.tasks
     icf_domains = select_icf_domains(episode, kind)
     return Snapshot(
         kind=kind,
-        meeting_at=boundary,
+        meeting_at=episode.meeting_at(kind),
         sections=sections,
         findings=findings,
         scale_rows=select_scale_rows(episode, kind),

@@ -1,5 +1,4 @@
 from datetime import datetime
-from types import SimpleNamespace
 
 import pytest
 
@@ -19,8 +18,7 @@ class Variable:
 
 
 @pytest.mark.parametrize("current", [MdrkKind.INITIAL, MdrkKind.FINAL])
-@pytest.mark.parametrize("invalid_date", [True, False])
-def test_rejected_snapshot_switch_restores_document_selection(tmp_path, monkeypatch, current, invalid_date):
+def test_invalid_date_restores_document_selection(tmp_path, monkeypatch, current):
     app = MdrkBuilderApp.__new__(MdrkBuilderApp)
     app.episode = Episode(folder=tmp_path)
     app.episode.initial_meeting_at = datetime(2026, 8, 10, 8)
@@ -32,9 +30,7 @@ def test_rejected_snapshot_switch_restores_document_selection(tmp_path, monkeypa
     app.status_var = Variable()
 
     def parse_form():
-        if invalid_date:
-            raise ValueError("Некорректная дата")
-        return SimpleNamespace(meeting_at=datetime(2026, 8, 15, 8))
+        raise ValueError("Некорректная дата")
 
     app._parsed_form_data = parse_form
     monkeypatch.setattr("mdrk_builder.ui.app.messagebox.showerror", lambda *args: None)

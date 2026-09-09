@@ -156,10 +156,7 @@ def apply_episode_form_data(
     episode.identity.birth_date = form.birth_date
     episode.identity.sex = form.sex
     episode.admission_datetime = form.admission_datetime
-    if kind is MdrkKind.INITIAL:
-        episode.initial_meeting_at = form.meeting_at
-    else:
-        episode.final_meeting_at = form.meeting_at
+    episode.edit_meeting(kind, form.meeting_at)
     episode.department = form.department
     episode.stage = form.stage
     if kind is MdrkKind.INITIAL:
@@ -170,7 +167,7 @@ def apply_episode_form_data(
         episode.course_duration_days = form.course_duration_days
         if not episode.course_duration_manual:
             from mdrk_builder.application.editing import hospitalization_days
-            episode.course_duration_days = hospitalization_days(episode.admission_datetime, episode.discharge_datetime or episode.final_meeting_at)
+            episode.course_duration_days = hospitalization_days(episode.admission_datetime, episode.discharge_datetime or episode.assessment_at(MdrkKind.FINAL))
     target_sections = sections_for(episode, kind)
     for key, value in form.section_values:
         setattr(target_sections, key, value)
@@ -203,7 +200,7 @@ def episode_signatory_roles(
     episode: Episode,
     kind: MdrkKind,
 ) -> tuple[SpecialistRole, ...]:
-    boundary = episode.meeting_at(kind)
+    boundary = episode.assessment_at(kind)
     roles = {
         source.role
         for source in episode.sources
