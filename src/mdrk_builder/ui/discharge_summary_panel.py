@@ -24,6 +24,7 @@ from mdrk_builder.ui.episode_adapter import (
     role_from_name, role_names,
 )
 from mdrk_builder.ui.inline_tree import InlineTreeEditor
+from mdrk_builder.ui.formatted_text import FormattedText
 from mdrk_builder.ui.discharge_table_fields import edit_field, field_rows
 from mdrk_builder.ui.generation_review_dialog import confirm_generation_with_issues
 from mdrk_builder.ui.icf_table import apply_icf_grid_style
@@ -44,6 +45,8 @@ class DischargeSummaryPanel(ttk.Frame):
         self._dirty_fields: set[str] = set()
         self._dirty_identity: set[str] = set()
         self._populating = False
+        self.on_dates_changed = lambda: None
+        self.combine_statuses = tk.BooleanVar(value=False)
         self._identity_vars = {
             name: tk.StringVar()
             for name in ("full_name", "record_number", "birth_date", "sex", "admission", "discharge")
@@ -99,10 +102,15 @@ class DischargeSummaryPanel(ttk.Frame):
                 button = ttk.Button(bar, text="Источник", command=lambda name=field.name: self._open_field_source(name))
                 button.pack(side="right")
                 self._source_buttons[field.name] = button
-                widget = scrolledtext.ScrolledText(holder, height=max(7, field.height), wrap="word", undo=True)
+                widget = FormattedText(holder, height=max(7, field.height), wrap="word", undo=True)
                 widget.pack(fill="both", expand=True)
                 widget.bind("<<Modified>>", lambda _event, name=field.name: self._on_text_modified(name))
                 self._widgets[field.name] = widget
+                from mdrk_builder.ui.quick_phrases import add_quick_phrases
+                add_quick_phrases(bar, widget, field.name)
+                if field.name == "neurological_status":
+                    ttk.Checkbutton(holder, text="Объединить с локальным статусом в документе",
+                                    variable=self.combine_statuses, command=self._change_status_mode).pack(anchor="w")
                 if field.name == "signatures":
                     from mdrk_builder.ui.signature_fields import SignatureFields
                     self.signature_fields = SignatureFields(holder, widget)
@@ -113,6 +121,9 @@ class DischargeSummaryPanel(ttk.Frame):
 
         self._build_icf_tab()
         self._build_clinical_data_tab()
+        from mdrk_builder.ui.discharge_specialists import DischargeSpecialists
+        self.specialists = DischargeSpecialists(self)
+        self.notebook.insert(2, self.specialists, text="Специалисты")
 
         sources = ttk.Frame(self.notebook, padding=7)
         self.notebook.add(sources, text="Источники")
@@ -201,6 +212,8 @@ class DischargeSummaryPanel(ttk.Frame):
 
     def clear(self):
         self.draft = self._baseline = None
+        if hasattr(self, "specialists"):
+            self.specialists.refresh()
         self._table_history.clear()
         self._dirty_fields.clear()
         self._dirty_identity.clear()
@@ -238,6 +251,9 @@ class DischargeSummaryPanel(ttk.Frame):
             return False
         previous = self.draft
         source_baseline = deepcopy(draft)
+        if "combine_admission_statuses" in previous.manual_fields:
+            draft.combine_admission_statuses = previous.combine_admission_statuses
+            draft.manual_fields.add("combine_admission_statuses")
         from mdrk_builder.application.editing import change_summary
         self._last_change_summary = change_summary(getattr(self, "_baseline", None), draft)
         for collection in ("icf_domains", "completed_procedures", "admission_scale_rows", "discharge_scale_rows", "team_findings"):
@@ -294,7 +310,7 @@ class DischargeSummaryPanel(ttk.Frame):
         self.notebook.add(tab, text="Шкалы и программа")
         bar = ttk.Frame(tab)
         bar.pack(fill="x")
-        ttk.Label(tab, text="Заключения, шкалы и выполненные процедуры. Источники: ПКМ или Shift+F10.").pack(fill="x", before=bar)
+        ttk.Label(tab, text="Врачебные шкалы и выполненные процедуры. Источники: ПКМ или Shift+F10.").pack(fill="x", before=bar)
         self.clinical_tree = ttk.Treeview(tab, columns=("value",), show="tree headings")
         self.clinical_tree.heading("#0", text="Раздел / показатель")
         self.clinical_tree.heading("value", text="Значение")
@@ -311,7 +327,7 @@ class DischargeSummaryPanel(ttk.Frame):
             values=lambda item, _column: role_names() if item.endswith(":field:role") else None,
             multiline=lambda item, _column: item.endswith(":field:conclusion"),
         )
-        for action, label in (("add","Добавить"),("add_scale","Добавить шкалу специалисту"),("edit","Изменить"),("delete","Удалить"),("source","Вернуть из источника")):
+        for action, label in (("add","Добавить"),("edit","Изменить"),("delete","Удалить"),("source","Вернуть из источника")):
             ttk.Button(bar,text=label,command=lambda a=action:self._edit_clinical_row(a)).pack(side="left")
         self._clinical_links = {}
         self._clinical_sources = TableSourceAccess(
@@ -328,25 +344,21 @@ class DischargeSummaryPanel(ttk.Frame):
     def _refresh_clinical_data(self) -> None:
         if self.draft is not None:
             omit_admission_scales_from_discharge(self.draft)
+        if hasattr(self, "specialists"):
+            self.specialists.refresh()
         self.clinical_tree.delete(*self.clinical_tree.get_children())
         self._show_clinical_detail()
         self._clinical_links = {}
         if self.draft is None:
             return
-        groups = (("team", "Заключения специалистов", self.draft.team_findings),
-                  ("admission", "Шкалы при поступлении", self.draft.admission_scale_rows),
+        groups = (("admission", "Шкалы при поступлении", self.draft.admission_scale_rows),
                   ("discharge", "Шкалы при выписке", self.draft.discharge_scale_rows),
                   ("program", "Выполненная программа", self.draft.completed_procedures))
         for key, label, rows in groups:
             self.clinical_tree.insert("", "end", iid=key, text=label, open=True)
             for index, row in enumerate(rows):
                 item = f"{key}:{index}"
-                if key == "team":
-                    title = " ".join(part for part in (row.role.display_name, row.specialist_name) if part)
-                    if row.occurred_at:
-                        title += " от " + row.occurred_at.strftime("%d.%m.%Y")
-                    value = row.conclusion
-                elif key == "program":
+                if key == "program":
                     title = f"{row.code} {row.name}".strip()
                     value = f"{row.specialist}; количество: {row.actual_count if row.actual_count is not None else 'не указано'}; длительность: {row.duration_minutes if row.duration_minutes is not None else 'не указана'}; кратность: {row.frequency}"
                 else:
@@ -360,18 +372,6 @@ class DischargeSummaryPanel(ttk.Frame):
                     field_id = f"{item}:field:{name}"
                     self.clinical_tree.insert(item, "end", iid=field_id, text=label, values=(text,))
                     self._clinical_links[field_id] = links
-                if key == "team":
-                    for scale_index, scale in enumerate(row.scales):
-                        scale_id = f"{item}:scale:{scale_index}"
-                        self.clinical_tree.insert(item, "end", iid=scale_id, text=scale.name,
-                            values=(f"{scale.initial_value or '—'} → {scale.value or '—'}",))
-                        self._clinical_links[scale_id] = [
-                            ("Первичное измерение", scale.initial_source),
-                            ("Повторное измерение", scale.source)]
-                        for name, label, text in field_rows(scale, child=True):
-                            field_id = f"{scale_id}:field:{name}"
-                            self.clinical_tree.insert(scale_id, "end", iid=field_id, text=label, values=(text,))
-                            self._clinical_links[field_id] = self._clinical_links[scale_id]
 
     def _build_icf_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=7)
@@ -476,6 +476,7 @@ class DischargeSummaryPanel(ttk.Frame):
             ))
 
     def _populate(self) -> None:
+        self.combine_statuses.set(self.draft.combine_admission_statuses if self.draft else False)
         if self.draft is None:
             return
         omit_admission_scales_from_discharge(self.draft)
@@ -511,6 +512,11 @@ class DischargeSummaryPanel(ttk.Frame):
         if not self._populating:
             self.after_idle(self._refresh_live_issues)
 
+    def _change_status_mode(self):
+        if self.draft is not None:
+            self.draft.combine_admission_statuses = self.combine_statuses.get()
+            self.draft.manual_fields.add("combine_admission_statuses")
+
     def _mark_dirty(self, name: str) -> None:
         if self._populating:
             return
@@ -523,6 +529,8 @@ class DischargeSummaryPanel(ttk.Frame):
     def _mark_identity_dirty(self, name: str) -> None:
         if not self._populating:
             self._dirty_identity.add(name)
+            if name in {"admission", "discharge"}:
+                self.on_dates_changed()
             self.after_idle(self._refresh_identity_header)
             self.after_idle(self._refresh_live_issues)
 
@@ -647,6 +655,8 @@ class DischargeSummaryPanel(ttk.Frame):
             self._open_path(Path(str(values[1])) if len(values) > 1 else None)
 
     def apply(self) -> bool:
+        if hasattr(self, "specialists"):
+            self.specialists.commit()
         if self.draft is None:
             return False
         try:
@@ -779,6 +789,8 @@ class DischargeSummaryPanel(ttk.Frame):
     def _edit_clinical_row(self, action="edit", *, row_id=None, field=None, value=None):
         if self.draft is None:
             return
+        if hasattr(self, "specialists"):
+            self.specialists.commit()
         selected = self.clinical_tree.selection()
         if row_id is None:
             if not selected:
@@ -850,7 +862,7 @@ class DischargeSummaryPanel(ttk.Frame):
                 remove_scale_rows(self.draft, row)
         self._refresh_clinical_data()
         self._refresh_live_issues()
-        if action == "add":
+        if action == "add" and self.clinical_tree.exists(group):
             item = f"{group}:{index}:scale:{target_index}" if child else f"{group}:{target_index}"
             self.clinical_tree.item(group, open=True)
             if child:

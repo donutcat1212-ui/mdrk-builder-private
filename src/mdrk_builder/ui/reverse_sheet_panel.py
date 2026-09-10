@@ -49,11 +49,13 @@ class ReverseSheetPanel(ttk.Frame):
         self._header_dirty: set[str] = set()
         self._rows_dirty = False
         self._populating = False
+        self.on_dates_changed = lambda: None
         self._header_vars = {
             "full_name": tk.StringVar(),
             "birth_date": tk.StringVar(),
             "record_number": tk.StringVar(),
             "admission": tk.StringVar(),
+            "discharge": tk.StringVar(),
         }
         for name, variable in self._header_vars.items():
             variable.trace_add("write", lambda *_args, field=name: self._mark_header_dirty(field))
@@ -74,6 +76,7 @@ class ReverseSheetPanel(ttk.Frame):
             ("birth_date", "Дата рождения"),
             ("record_number", "Номер медкарты"),
             ("admission", "Поступление"),
+            ("discharge", "Срез на дату (необязательно)"),
         )
         for index, (name, label) in enumerate(labels):
             row, pair = divmod(index, 2)
@@ -253,6 +256,8 @@ class ReverseSheetPanel(ttk.Frame):
             draft.identity.medical_record_number = previous.identity.medical_record_number
         if "admission" in self._header_dirty:
             draft.admission_datetime = previous.admission_datetime
+        if "discharge" in self._header_dirty:
+            draft.discharge_datetime = previous.discharge_datetime
         for name in self._header_dirty:
             draft.field_sources.pop(name, None)
             origin = previous.field_sources.get(name, previous.header_source)
@@ -273,6 +278,7 @@ class ReverseSheetPanel(ttk.Frame):
         self._header_vars["birth_date"].set(format_date(self.draft.identity.birth_date))
         self._header_vars["record_number"].set(self.draft.identity.medical_record_number)
         self._header_vars["admission"].set(format_datetime(self.draft.admission_datetime))
+        self._header_vars["discharge"].set(format_datetime(self.draft.discharge_datetime))
         self._populating = False
         if self.draft.header_source is None and not self.draft.field_sources and not self._header_dirty:
             self.header_source_button.configure(text="Источник не указан", state="disabled")
@@ -285,6 +291,8 @@ class ReverseSheetPanel(ttk.Frame):
     def _mark_header_dirty(self, field: str) -> None:
         if not self._populating:
             self._header_dirty.add(field)
+            if field in {"admission", "discharge"}:
+                self.on_dates_changed()
 
     def _refresh_groups(self) -> None:
         self.group_tree.delete(*self.group_tree.get_children())
@@ -444,6 +452,7 @@ class ReverseSheetPanel(ttk.Frame):
         try:
             birth_date = parse_optional_date(self._header_vars["birth_date"].get())
             admission = parse_optional_datetime(self._header_vars["admission"].get())
+            discharge = parse_optional_datetime(self._header_vars["discharge"].get())
         except ValueError as exc:
             messagebox.showerror("Проверьте поля", str(exc), parent=self)
             return False
@@ -451,6 +460,7 @@ class ReverseSheetPanel(ttk.Frame):
         self.draft.identity.birth_date = birth_date
         self.draft.identity.medical_record_number = self._header_vars["record_number"].get().strip()
         self.draft.admission_datetime = admission
+        self.draft.discharge_datetime = discharge
         return True
 
     def review_issues(self) -> tuple[ReviewIssue, ...]:

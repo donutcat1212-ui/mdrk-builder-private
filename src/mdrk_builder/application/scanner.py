@@ -333,7 +333,7 @@ def _update_course_duration(episode: Episode) -> None:
     from mdrk_builder.application.editing import hospitalization_days
     if not episode.course_duration_manual:
         episode.course_duration_days = hospitalization_days(
-            episode.admission_datetime, episode.discharge_datetime or episode.assessment_at(MdrkKind.FINAL)
+            episode.admission_datetime, episode.course_end_at
         )
 
 
@@ -586,6 +586,7 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
 
 
 def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
+    from mdrk_builder.application.specialist_narrative import specialist_title
     allowed = {
         SpecialistRole.FRM,
         SpecialistRole.NEUROLOGIST,
@@ -612,6 +613,7 @@ def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
                     source_datetime=record.clinical_datetime,
                     source=record.document.source_path,
                     scales=scales,
+                    specialist_title=specialist_title(record.document, role),
                 )
             )
 
@@ -626,20 +628,6 @@ def _normalized_icf_description(value: str) -> str:
             for character in value.casefold().replace("ё", "е")
         ).split()
     )
-
-
-def _observation_map(
-    observations: list[IcfObservation],
-) -> dict[tuple[str, str], IcfObservation]:
-    """Keep distinct same-code domains; wording is part of ICF identity."""
-
-    return {
-        (
-            _normalized_icf_code(item.code),
-            _normalized_icf_description(item.description),
-        ): item
-        for item in observations
-    }
 
 
 def _description_markers(value: str) -> frozenset[str]:
@@ -854,7 +842,7 @@ def _profile_records(records: list[ScannedRecord]) -> dict[SpecialistRole, list[
                 continue
             effective_owner = owner or (
                 SpecialistRole.OTHER
-                if source_role in physician_roles
+                if source_role in physician_roles or observation.code.casefold().startswith("s")
                 else source_role
             )
             by_owner[effective_owner].append(observation)
@@ -923,25 +911,27 @@ def _eligible_icf_occurrences(
 def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
     _merge_personal_factors(episode, records)
     for role, profiles in _profile_records(records).items():
-        profile_maps = [(record, _observation_map(values)) for record, values in profiles]
         clusters: dict[
-            tuple[str, str], list[tuple[ScannedRecord, IcfObservation]]
+            tuple[str, str, str], list[tuple[ScannedRecord, IcfObservation]]
         ] = {}
-        representatives_by_code: dict[str, list[tuple[str, str]]] = defaultdict(list)
-        for record, observations in profile_maps:
-            for (code, description), observation in observations.items():
+        representatives_by_code: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        for record, observations in profiles:
+            for observation in observations:
+                code = _normalized_icf_code(observation.code)
+                description = _normalized_icf_description(observation.description)
+                note = " ".join(observation.note.casefold().split())
                 representative = next(
                     (
                         candidate
                         for candidate in representatives_by_code[code]
-                        if _near_duplicate_icf_description(
+                        if candidate[2] == note and _near_duplicate_icf_description(
                             candidate[1], description
                         )
                     ),
                     None,
                 )
                 if representative is None:
-                    representative = (code, description)
+                    representative = (code, description, note)
                     representatives_by_code[code].append(representative)
                     clusters[representative] = []
                 clusters[representative].append((record, observation))

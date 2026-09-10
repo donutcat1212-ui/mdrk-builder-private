@@ -14,6 +14,7 @@ class ScaleDefinition:
 
 
 SCALE_REGISTRY = (
+    ScaleDefinition("wasserman", "шкала вассермана", ("вассерман",), display_name="Шкала Вассермана Л.И."),
     ScaleDefinition("egfr", "скорость клубочковой фильтрации",
                     ("скф", "egfr", "скорость клубочковой фильтрации"), display_name="СКФ"),
     ScaleDefinition(

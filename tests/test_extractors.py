@@ -313,7 +313,7 @@ def test_conclusion_ignores_historical_label_and_uses_neuropsych_status() -> Non
     )
 
 
-def test_conclusion_keeps_neuropsych_status_and_basis_but_not_later_dynamics() -> None:
+def test_conclusion_prefers_explicit_course_outcome_over_initial_status_and_plan() -> None:
     document = _document(
         "\n".join(
             (
@@ -322,17 +322,13 @@ def test_conclusion_keeps_neuropsych_status_and_basis_but_not_later_dynamics() -
                 "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.",
                 "Количественная оценка данных обследования:",
                 "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ",
-                "Отмечается положительная динамика: НЕ_ВКЛЮЧАТЬ",
+                "Отмечается положительная динамика: ИТОГ_КУРСА",
             )
         )
     )
 
     assert extract_conclusion(document, SpecialistRole.NEUROPSYCHOLOGIST) == (
-        "Нейропсихологический статус и топический диагноз :\n"
-        "1. ЗАКЛЮЧЕНИЕ_СТРОКА_1.\n"
-        "2. ЗАКЛЮЧЕНИЕ_СТРОКА_2.\n"
-        "На основании данных рекомендован курс: ВКЛЮЧИТЬ_ОБОСНОВАНИЕ"
-    )
+        "Отмечается положительная динамика: ИТОГ_КУРСА")
 
 
 def test_neuropsych_topical_diagnosis_keeps_text_on_heading_line() -> None:

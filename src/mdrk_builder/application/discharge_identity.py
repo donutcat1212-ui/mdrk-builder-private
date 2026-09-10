@@ -1,7 +1,7 @@
 """Keep displayed discharge demographics consistent with confirmed identity fields."""
 import re
 
-from mdrk_builder.application.discharge_extractors import update_header_period
+from mdrk_builder.application.discharge_extractors import update_header_period, clean_discharge_header
 
 
 def complete_identity(episode, candidate):
@@ -45,7 +45,7 @@ def synchronize_header(draft):
         (r'^(?:Номер медицинской карты[^:]*|Номер ИБ|Номер медкарты)\s*:?', identity.medical_record_number),
     )
     lines = []
-    for line in draft.header_text.splitlines():
+    for line in clean_discharge_header(draft.header_text).splitlines():
         for pattern, value in rules:
             match = re.match(pattern, line, re.I)
             if match:

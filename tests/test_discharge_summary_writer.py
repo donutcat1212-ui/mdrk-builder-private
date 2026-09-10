@@ -133,10 +133,11 @@ def test_writer_composes_shared_clinical_tables(tmp_path) -> None:
         table
         for table in document.tables
         if [cell.text for cell in table.rows[0].cells]
-        == ["Специалист", "Шкала/опросник", "Результат"]
+        == ["Шкала/опросник", "Результат"]
     ]
-    assert scale_tables[0].rows[1].cells[2].text == "6"
-    assert scale_tables[1].rows[1].cells[2].text == "9"
+    assert scale_tables[0].rows[1].cells[1].text == "6"
+    assert scale_tables[1].rows[1].cells[1].text == "9"
+    assert all(len(table.columns) == 2 for table in scale_tables)
 
 
 def test_writer_refuses_to_overwrite_template_or_source(tmp_path) -> None:

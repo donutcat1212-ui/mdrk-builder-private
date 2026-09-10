@@ -72,13 +72,12 @@ def test_discharge_exposes_each_structured_row_and_template_origin(root, tmp_pat
         discharge_scale_rows=(DischargeScaleRow(SpecialistRole.NEUROLOGIST, 'Шкала', '3', source),),
         completed_procedures=(Procedure('Процедура', 'Исполнитель', 2, source=source),))
     panel.load(draft)
-    assert {item for item in panel._clinical_links if ':field:' not in item} == {'team:0', 'admission:0', 'discharge:0', 'program:0'}
+    assert {item for item in panel._clinical_links if ':field:' not in item} == {'admission:0', 'discharge:0', 'program:0'}
     assert 'program:0:field:frequency' in panel._clinical_links
     assert all(any(path == source for _, path in links) for links in panel._clinical_links.values())
     assert panel._field_links('recommendations') == []
-    panel.clinical_tree.selection_set('team:0')
-    panel._show_clinical_detail()
-    assert panel.clinical_detail.get('1.0', 'end-1c') == 'Полное заключение'
+    assert panel.specialists.owner.source == source
+    assert panel.specialists.text.get('1.0', 'end-1c') == 'Полное заключение'
 
 
 def test_manual_discharge_text_keeps_before_edit_source_across_rescan(root, tmp_path):

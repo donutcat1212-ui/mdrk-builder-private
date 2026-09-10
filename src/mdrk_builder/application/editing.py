@@ -27,7 +27,8 @@ def row_key(row: EditableRow) -> tuple[str, ...]:
     if isinstance(row, ReverseSheetRow):
         return ('reverse', _normalized(row.intervention), source, str(row.performed_at or ''))
     if isinstance(row, ScaleMeasurement):
-        return ('measurement', row.specialist.value, _normalized(row.name), source, str(row.measured_at or ''))
+        key = ('measurement', row.specialist.value, _normalized(row.name), source, str(row.measured_at or ''))
+        return (*key, row.phase.value) if row.phase else key
     if isinstance(row, SpecialistFinding):
         return ('finding', row.role.value, source, str(row.source_datetime or ''))
     if isinstance(row, DischargeScaleRow):

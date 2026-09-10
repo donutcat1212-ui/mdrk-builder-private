@@ -241,7 +241,8 @@ def set_cell_text(
     paragraph.style = style
     paragraph.alignment = alignment
     paragraph.paragraph_format.keep_with_next = keep_with_next
-    paragraph.add_run("" if text is None else str(text))
+    from mdrk_builder.infrastructure.formatted_text import add_formatted_text
+    add_formatted_text(paragraph, "" if text is None else str(text))
     cell.vertical_alignment = vertical_alignment
 
 

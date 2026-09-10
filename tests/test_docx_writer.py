@@ -456,7 +456,8 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert final_environment_header.cells[14].text == "+/-"
 
-    initial_scale = _find_table(initial, "Шкала/опросник")
+    initial_scale = next(table for table in initial.tables
+                         if any(row.cells[0].text == "Шкала Тинетти" for row in table.rows))
     final_scale = next(
         table
         for table in final.tables
@@ -471,13 +472,11 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     assert final_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[2].text == "24 балла"
 
-    physician_table = _find_table(initial, "Дата и время\nрасчета шкалы")
-    assert len(physician_table.columns) == 3
-    assert [cell.text for cell in physician_table.rows[0].cells] == [
-        "Дата и время\nрасчета шкалы",
-        "Шкала/опросник",
-        "Результат расчета",
-    ]
+    physician_table = next(table for table in initial.tables
+                           if any(row.cells[0].text == "СКФ" for row in table.rows))
+    assert len(physician_table.columns) == 2
+    assert physician_table.rows[0].cells[0].text == "Шкала/опросник"
+    assert "05.06.2026" in physician_table.rows[0].cells[1].text
     physician_heading = next(
         paragraph
         for paragraph in initial.paragraphs
@@ -488,8 +487,8 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
         "(05 июня 2026 16:00):"
     )
     assert not physician_heading.runs[0].bold
-    assert physician_table.rows[1].cells[1].text == "СКФ"
-    assert physician_table.rows[1].cells[2].text == "63,73"
+    assert physician_table.rows[1].cells[0].text == "СКФ"
+    assert physician_table.rows[1].cells[1].text == "63,73"
     assert not any("СКФ" in text for text in final.element.xpath("//w:t/text()"))
     final_physician_heading = next(
         paragraph
@@ -514,15 +513,10 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     expected_roles = [
         "Врач ФРМ",
         "Специалист по физической реабилитации",
-        "Медицинский психолог/нейропсихолог",
-        "Медицинский психолог/патопсихолог",
-        "Медицинский логопед",
-        "Специалист по эргореабилитации",
-        "Консультанты",
         "Заведующий отделением",
     ]
     assert [row.cells[0].text for row in signatures.rows[1:]] == expected_roles
-    assert [row.cells[0].text for row in final_signatures.rows[1:]] == expected_roles
+    assert [row.cells[0].text for row in final_signatures.rows[1:]] == ["Врач ФРМ", "Медицинский логопед", "Заведующий отделением"]
     assert signatures.rows[1].cells[1].text == "СОТРУДНИК_1"
     assert signatures.rows[2].cells[1].text == "СОТРУДНИК_2"
     assert signatures.rows[1].cells[2].text == ""

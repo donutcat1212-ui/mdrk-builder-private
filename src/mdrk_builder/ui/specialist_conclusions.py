@@ -1,5 +1,6 @@
 """Keep each specialist's editable text and undo buffer bound to that finding."""
 from tkinter import scrolledtext, ttk
+from mdrk_builder.ui.formatted_text import FormattedText
 
 
 class SpecialistConclusions(ttk.Frame):
@@ -14,7 +15,12 @@ class SpecialistConclusions(ttk.Frame):
         self._empty.pack(fill="both", expand=True)
 
     def _new_text(self):
-        return scrolledtext.ScrolledText(self, height=12, wrap="word", undo=True)
+        text = FormattedText(self, height=12, wrap="word", undo=True)
+        from mdrk_builder.ui.quick_phrases import add_quick_phrases
+        bar = ttk.Frame(text.frame)
+        bar.pack(side="top", fill="x", before=text.vbar)
+        add_quick_phrases(bar, text, "conclusion")
+        return text
 
     def show(self, finding, active_findings):
         self.text.pack_forget()

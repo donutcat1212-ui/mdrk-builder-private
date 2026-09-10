@@ -152,13 +152,21 @@ def extract_discharge_header(document: ParsedDocument) -> str:
     )
     if end is None:
         return ""
-    return "\n".join(lines[start:end])
+    return clean_discharge_header("\n".join(lines[start:end]))
+
+
+def clean_discharge_header(text: str) -> str:
+    return "\n".join(line for line in text.splitlines()
+                     if not re.match(r"^\s*(?:модель\b|настоящая\s+госпитализация\b)", line, re.I))
 
 
 def extract_summary_discharge_datetime(document: ParsedDocument) -> datetime | None:
     for line in document_lines(document):
         if "период нахождения" not in line.casefold():
             continue
+        numeric = re.search(r"\bпо\s+(\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?)", line, re.I)
+        if numeric:
+            return parse_first_datetime(numeric[1])
         match = re.search(
             r"\bпо\s+[«\" ]*(\d{1,2})[»\" ]+"
             r"(январ[ья]|феврал[ья]|марта?|апрел[ья]|ма[йя]|июн[ья]|июл[ья]|"

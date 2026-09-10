@@ -18,6 +18,8 @@ from mdrk_builder.domain import (
     ReviewIssue,
     SpecialistRole,
 )
+from mdrk_builder.infrastructure.formatted_text import add_formatted_text, clinical_paragraphs
+from mdrk_builder.application.discharge_extractors import clean_discharge_header
 from mdrk_builder.infrastructure.clinical_tables import (
     render_completed_program,
     render_final_icf_profile,
@@ -51,7 +53,7 @@ from mdrk_builder.infrastructure.docx_template import (
 
 
 BODY_FONT_SIZE_PT = 10
-SCALE_WIDTHS = (1900, 5900, 1545)
+SCALE_WIDTHS = (6900, 2445)
 
 
 class DischargeSummaryGenerationBlockedError(ValueError):
@@ -126,7 +128,7 @@ class _DischargeSummaryRenderer:
             (r"^Результат госпитализации", r"улучшение\s*[-–—]\s*2"),
             (r"^Форма оказания медицинской помощи", r"плановая\s*[-–—]\s*1"),
         )
-        for line in self.draft.header_text.splitlines():
+        for line in clean_discharge_header(self.draft.header_text).splitlines():
             paragraph = self.document.add_paragraph(style=STYLE_BODY)
             pattern = next((value for heading, value in defaults if re.match(heading, line.strip(), re.I)), None)
             match = re.search(pattern, line, re.I) if pattern else None
@@ -135,7 +137,7 @@ class _DischargeSummaryRenderer:
                 paragraph.add_run(match.group()).bold = True
                 paragraph.add_run(line[match.end():])
             else:
-                paragraph.add_run(line)
+                add_formatted_text(paragraph, line)
 
     def _diagnoses(self) -> None:
         self._section("Заключительный клинический диагноз")
@@ -165,38 +167,45 @@ class _DischargeSummaryRenderer:
             self.draft.provided_documents,
         )
         self._labeled("Физикальное обследование", self.draft.physical_exam)
-        self._labeled("Неврологический статус", self.draft.neurological_status)
-        self._labeled("Локальный статус", self.draft.local_status)
+        if self.draft.combine_admission_statuses:
+            value = "\n".join(text for text in (self.draft.neurological_status, self.draft.local_status) if text.strip())
+            self._labeled("Неврологический и локальный статус", value)
+        else:
+            self._labeled("Неврологический статус", self.draft.neurological_status)
+            self._labeled("Локальный статус", self.draft.local_status)
         self._section("Шкалы при поступлении")
         self._scale_table(tuple(row for row in self.draft.admission_scale_rows
-                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}))
+                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}),
+                          self.draft.initial_assessment_datetime or self.draft.admission_datetime)
 
     def _team_results(self) -> None:
         self._section("Проведенные обследования, лечение, медицинская реабилитация")
         for finding in self.draft.team_findings:
             if finding.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST} and not finding.conclusion.strip():
                 continue
-            heading = " ".join(part for part in (finding.role.display_name, finding.specialist_name) if part)
+            title = finding.specialist_title or finding.role.display_name
+            heading = " ".join(part for part in (title, finding.specialist_name) if part)
             if finding.occurred_at:
                 heading += " от " + finding.occurred_at.strftime("%d.%m.%Y")
             self._section(heading)
-            if finding.scales:
-                self._specialist_scale_table(finding.scales)
+            if finding.scales and finding.role not in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:
+                self._specialist_scale_table(finding.scales, finding.occurred_at)
             self._labeled("Заключение", finding.conclusion)
 
-    def _specialist_scale_table(self, rows: Sequence[DischargeScaleRow]) -> None:
+    def _specialist_scale_table(self, rows: Sequence[DischargeScaleRow], occurred_at=None) -> None:
         table = self.document.add_table(rows=1, cols=3)
         configure_table(table, (5345, 2000, 2000))
-        for cell, value in zip(table.rows[0].cells, ("Шкала/опросник", "Первичное", "Повторное")):
+        initial_at = max((row.initial_at for row in rows if row.initial_at), default=self.draft.initial_assessment_datetime)
+        current_at = max((row.current_at for row in rows if row.current_at), default=None)
+        current_at = max((value for value in (current_at, occurred_at) if value), default=self.draft.discharge_datetime)
+        headers = ("Шкала/опросник", _dated_header("Первичный осмотр", initial_at),
+                   _dated_header("Заключительный осмотр", current_at))
+        for cell, value in zip(table.rows[0].cells, headers):
             set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.CENTER)
         mark_header_row(table.rows[0])
         for row in rows:
             initial = row.initial_value
             current = row.value
-            if row.initial_at:
-                initial = row.initial_at.strftime("%d.%m.%Y") + "\n" + initial
-            if row.current_at:
-                current = row.current_at.strftime("%d.%m.%Y") + "\n" + current
             table_row = table.add_row()
             set_cant_split(table_row)
             for cell, value in zip(table_row.cells, (row.name, initial, current)):
@@ -236,7 +245,8 @@ class _DischargeSummaryRenderer:
     def _discharge_state(self) -> None:
         self._section("Шкалы при выписке")
         self._scale_table(tuple(row for row in self.draft.discharge_scale_rows
-                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}))
+                                if row.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}),
+                          self.draft.discharge_datetime)
         self._section("Состояние при выписке")
         self._multiline(self.draft.discharge_condition)
         self._manual_block(
@@ -285,11 +295,11 @@ class _DischargeSummaryRenderer:
         run.bold = True
         if value.strip():
             lines = value.splitlines()
-            paragraph.add_run(lines[0].strip())
+            add_formatted_text(paragraph, lines[0].strip())
             for line in lines[1:]:
                 if line.strip():
                     paragraph.add_run().add_break()
-                    paragraph.add_run(line.strip())
+                    add_formatted_text(paragraph, line.strip())
 
     def _manual_block(self, label: str, value: str, *, blank_lines: int) -> None:
         self._labeled(label, value)
@@ -299,19 +309,19 @@ class _DischargeSummaryRenderer:
             self.document.add_paragraph("", style=STYLE_BODY)
 
     def _multiline(self, value: str) -> None:
-        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        lines = list(clinical_paragraphs(value))
         if not lines:
             self.document.add_paragraph("", style=STYLE_BODY)
             return
         for line in lines:
-            self.document.add_paragraph(line, style=STYLE_BODY)
+            add_formatted_text(self.document.add_paragraph(style=STYLE_BODY), line)
 
-    def _scale_table(self, rows: Sequence[DischargeScaleRow]) -> None:
-        table = self.document.add_table(rows=max(1, len(rows)) + 1, cols=3)
+    def _scale_table(self, rows: Sequence[DischargeScaleRow], assessment_at=None) -> None:
+        table = self.document.add_table(rows=max(1, len(rows)) + 1, cols=2)
         configure_table(table, SCALE_WIDTHS)
         for cell, text in zip(
             table.rows[0].cells,
-            ("Специалист", "Шкала/опросник", "Результат"),
+            ("Шкала/опросник", _dated_header("Результат", assessment_at)),
             strict=True,
         ):
             set_cell_text(
@@ -333,7 +343,6 @@ class _DischargeSummaryRenderer:
             return
         for table_row, scale_row in zip(table.rows[1:], rows, strict=True):
             values = (
-                scale_row.role.display_name,
                 scale_row.name,
                 scale_row.value,
             )
@@ -345,6 +354,10 @@ class _DischargeSummaryRenderer:
                     alignment=WD_ALIGN_PARAGRAPH.LEFT,
                     vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP,
                 )
+
+
+def _dated_header(label, value):
+    return label + ("\n" + value.strftime("%d.%m.%Y") if value else "")
 
 
 def _retain_letterhead(document: DocxDocument) -> None:

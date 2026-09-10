@@ -1,4 +1,5 @@
 from __future__ import annotations
+from mdrk_builder.infrastructure.formatted_text import add_formatted_text, clinical_paragraphs
 
 import re
 from collections.abc import Sequence
@@ -348,6 +349,8 @@ class _DocumentRenderer:
         if source_datetime is None:
             source_datetime = _first_scale_datetime(scale_rows, self.snapshot.kind)
         heading = _specialist_result_heading(role, source_datetime)
+        if finding is not None and finding.specialist_title:
+            heading = finding.specialist_title + (" от " + source_datetime.strftime("%d.%m.%Y") if source_datetime else "")
         paragraph = self.document.add_paragraph(style=STYLE_BODY)
         paragraph.paragraph_format.keep_with_next = True
         paragraph.add_run(heading)
@@ -396,7 +399,7 @@ class _DocumentRenderer:
         conclusion.paragraph_format.keep_with_next = bool(conclusion_text)
         conclusion.add_run("Заключение: ")
         if conclusion_text:
-            conclusion.add_run(conclusion_text)
+            add_formatted_text(conclusion, conclusion_text)
 
     def _render_outcomes(self) -> None:
         self._add_section_value(
@@ -421,10 +424,10 @@ class _DocumentRenderer:
         if not task_lines:
             self.document.add_paragraph("Задачи не указаны", style=STYLE_WARNING)
         elif self.snapshot.kind is MdrkKind.FINAL and len(task_lines) == 1:
-            self.document.add_paragraph(task_lines[0], style=STYLE_BODY)
+            add_formatted_text(self.document.add_paragraph(style=STYLE_BODY), task_lines[0])
         else:
             for task in task_lines:
-                self.document.add_paragraph(task, style=STYLE_TASK)
+                add_formatted_text(self.document.add_paragraph(style=STYLE_TASK), task)
 
     def _render_plan(self) -> None:
         title = (
@@ -468,43 +471,7 @@ class _DocumentRenderer:
         self,
         rows: Sequence[ScaleRow],
     ) -> None:
-        table = self.document.add_table(
-            rows=len(rows) + 1,
-            cols=len(ORDINARY_SCALE_WIDTHS),
-        )
-        configure_table(table, ORDINARY_SCALE_WIDTHS)
-        headers = (
-            "Дата и время\nрасчета шкалы",
-            "Шкала/опросник",
-            "Результат расчета",
-        )
-        for cell, value in zip(table.rows[0].cells, headers, strict=True):
-            set_cell_text(
-                cell,
-                value,
-                style=STYLE_TABLE,
-                alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                keep_with_next=True,
-            )
-        mark_header_row(table.rows[0])
-
-        for table_row, scale_row in zip(table.rows[1:], rows, strict=True):
-            measurement = scale_row.initial
-            values = (
-                _format_original_scale_datetime(
-                    measurement.measured_at if measurement is not None else None
-                ),
-                scale_row.name,
-                measurement.value if measurement is not None else "",
-            )
-            for cell, value in zip(table_row.cells, values, strict=True):
-                set_cell_text(
-                    cell,
-                    value,
-                    style=STYLE_TABLE,
-                    alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                    vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP,
-                )
+        self._render_scale_table(rows)
 
     def _render_scale_table(self, rows: Sequence[ScaleRow]) -> None:
         final_mode = self.snapshot.kind is MdrkKind.FINAL
@@ -513,10 +480,10 @@ class _DocumentRenderer:
         configure_table(table, widths)
 
         initial_date = _common_measurement_datetime([row.initial for row in rows])
-        current_date = _common_measurement_datetime([row.current for row in rows])
-        headers = ["Шкала/опросник", _format_scale_header(initial_date, "Исходно")]
+        current_date = self.snapshot.meeting_at or _common_measurement_datetime([row.current or row.initial for row in rows])
+        headers = ["Шкала/опросник", "Исходно\n" + _format_scale_header(initial_date, "")]
         if final_mode:
-            headers.append(_format_scale_header(current_date, "Повторно"))
+            headers.append("На дату МДРК\n" + _format_scale_header(current_date, ""))
         for cell, value in zip(table.rows[0].cells, headers, strict=True):
             set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.LEFT, keep_with_next=True)
         for cell in table.rows[0].cells[1:]:
@@ -534,7 +501,7 @@ class _DocumentRenderer:
             if final_mode:
                 set_cell_text(
                     table_row.cells[2],
-                    _format_scale_value(scale_row.current, current_date),
+                    _format_scale_value(scale_row.current or scale_row.initial, current_date),
                     style=STYLE_TABLE,
                     alignment=WD_ALIGN_PARAGRAPH.CENTER,
                 )
@@ -624,7 +591,8 @@ class _DocumentRenderer:
         )
 
         consultant_index = positions["consultants"]
-        return tuple((*rows[:consultant_index], *extras, *rows[consultant_index:]))
+        return tuple(row for row in (*rows[:consultant_index], *extras, *rows[consultant_index:])
+                     if row.full_name.strip() or _signatory_role_key(row) in {"frm", "department_head"})
 
     def _add_section_heading(self, number: int, title: str) -> None:
         self.document.add_paragraph(f"{number}. {title}", style=STYLE_SECTION)
@@ -632,7 +600,7 @@ class _DocumentRenderer:
     def _add_section_value(self, number: int, title: str, value: str) -> None:
         paragraph = self.document.add_paragraph(style=STYLE_SECTION)
         paragraph.add_run(f"{number}. {title}: ")
-        paragraph.add_run(value or "")
+        add_formatted_text(paragraph, value or "")
 
     def _add_labeled(self, label: str, value: object) -> None:
         paragraph = self.document.add_paragraph(style=STYLE_BODY)
@@ -640,7 +608,7 @@ class _DocumentRenderer:
             paragraph.paragraph_format.keep_with_next = True
         label_run = paragraph.add_run(label)
         label_run.style = STYLE_LABEL
-        paragraph.add_run("" if value is None else str(value))
+        add_formatted_text(paragraph, "" if value is None else str(value))
 
     def _add_blank_paragraph(self, *, keep_with_next: bool = False) -> None:
         paragraph = self.document.add_paragraph(style=STYLE_BODY)
@@ -684,9 +652,9 @@ class _DocumentRenderer:
             self.document.add_paragraph(missing_text, style=STYLE_WARNING)
 
     def _add_multiline(self, value: str) -> None:
-        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        lines = list(clinical_paragraphs(value))
         for line in lines or [value.strip()]:
-            self.document.add_paragraph(line, style=STYLE_BODY)
+            add_formatted_text(self.document.add_paragraph(style=STYLE_BODY), line)
 
 
 
@@ -872,7 +840,7 @@ def _common_measurement_datetime(
     measurements: Sequence[ScaleMeasurement | None],
 ) -> datetime | None:
     dates = {item.measured_at for item in measurements if item is not None and item.measured_at is not None}
-    return dates.pop() if len(dates) == 1 else None
+    return max(dates, default=None)
 
 
 def _format_scale_header(value: datetime | None, fallback: str) -> str:
@@ -885,9 +853,7 @@ def _format_scale_value(
 ) -> str:
     if measurement is None:
         return ""
-    if measurement.measured_at is None or measurement.measured_at == shared_datetime:
-        return measurement.value
-    return f"{measurement.value}\n{_format_short_datetime(measurement.measured_at)}"
+    return measurement.value
 
 
 def _split_tasks(value: str) -> list[str]:

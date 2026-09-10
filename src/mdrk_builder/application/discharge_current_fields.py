@@ -4,11 +4,16 @@ from mdrk_builder.application.clinical_text import is_empty_clinical_update
 from mdrk_builder.application.discharge_extractors import (
     extract_discharge_clinical_sections, extract_discharge_final_fields,
     extract_physical_exam, extract_neurological_status,
+    extract_summary_discharge_datetime,
 )
 from mdrk_builder.application.extractors import extract_clinical_datetime, extract_clinical_sections, extract_mdrk_document_datetime
 from mdrk_builder.domain import MdrkKind, ReviewIssue, ReviewSeverity, SpecialistRole
 
 CURRENT_FIELDS = ('movement_regimen', 'diet', 'risks', 'limitations', 'rehabilitation_potential')
+
+
+def _absence(value):
+    return value.casefold().strip(" .;:—-\n") in {"нет", "отсутствуют", "отсутствует", "не выявлены", "не выявлено", "не отмечаются"}
 
 
 def select_current_fields(documents, admission, discharge, mis_path=None):
@@ -17,9 +22,13 @@ def select_current_fields(documents, admission, discharge, mis_path=None):
         classification = item.classification
         if classification.is_generated_output:
             continue
-        if classification.role not in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM} and item.document.source_path != mis_path and not classification.is_mdrk:
+        physician = classification.role in {SpecialistRole.NEUROLOGIST, SpecialistRole.FRM}
+        is_mis = item.document.source_path == mis_path
+        if classification.role is SpecialistRole.OTHER and not is_mis and not classification.is_mdrk:
             continue
-        stamp = discharge if item.document.source_path == mis_path else extract_mdrk_document_datetime(item.document) if classification.is_mdrk else extract_clinical_datetime(item.document)
+        stamp = ((extract_summary_discharge_datetime(item.document) or extract_clinical_datetime(item.document))
+                 if is_mis else extract_mdrk_document_datetime(item.document)
+                 if classification.is_mdrk else extract_clinical_datetime(item.document))
         if stamp is None or (admission and stamp.date() < admission.date()) or (discharge and stamp.date() > discharge.date()):
             continue
         sections = extract_clinical_sections(item.document)
@@ -35,7 +44,10 @@ def select_current_fields(documents, admission, discharge, mis_path=None):
             values = {'rehabilitation_potential': sections.get('rehabilitation_potential', '')}
         if classification.document_type == "initial" or classification.mdrk_kind is MdrkKind.INITIAL:
             values.pop("rehabilitation_potential", None)
+        if not physician and not is_mis and not classification.is_mdrk:
+            values = {key: value for key, value in values.items() if key in {"risks", "limitations"}}
         for key, value in values.items():
+            value = "\n".join(line.strip().strip("|").strip() for line in value.splitlines() if line.strip("| \t"))
             if value and not is_empty_clinical_update(value):
                 candidates[key].append((stamp, value, item.document.source_path))
     values, sources, choices, issues = {}, {}, {}, []
@@ -46,6 +58,12 @@ def select_current_fields(documents, admission, discharge, mis_path=None):
         distinct = {' '.join(value.casefold().split()) for value, _ in latest}
         value, path = latest[0]
         values[key], sources[key] = value, path
+        if key in {"risks", "limitations"} and _absence(value):
+            positive = [(text, source) for _, text, source in sorted(rows, key=lambda row: row[0], reverse=True)
+                        if not _absence(text)]
+            if positive:
+                latest = list(dict.fromkeys([*latest, *positive]))
+                distinct = {' '.join(text.casefold().split()) for text, _ in latest}
         if len(distinct) > 1:
             choices[key] = list(dict.fromkeys(latest))
             issues.append(ReviewIssue('current_field_conflict',

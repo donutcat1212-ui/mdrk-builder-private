@@ -8,6 +8,7 @@ from pathlib import Path
 from mdrk_builder.application.scale_registry import canonical_scale_label
 from mdrk_builder.domain import (
     IcfQualifier,
+    MdrkKind,
     PatientIdentity,
     Procedure,
     ScaleMeasurement,
@@ -734,6 +735,21 @@ def _extract_logopedist_conclusion(lines: list[str]) -> tuple[str, list[str]] | 
     start = status_index = status_indices[-1]
     result = [lines[start]]
     previous_status = status_indices[-2] if len(status_indices) > 1 else -1
+    status_value = status_re.sub("", lines[status_index]).strip(" .:;")
+    if previous_status >= 0 and re.fullmatch(
+        r"(?:прежн(?:ий|яя|ее)|без\s+(?:существенных\s+)?изменений|не\s+измен[её]н)",
+        status_value, re.IGNORECASE,
+    ):
+        previous = [status_re.sub("", lines[previous_status]).strip()]
+        for line in lines[previous_status + 1:status_index]:
+            if re.match(r"^(?:шкала|факторы|функциональный\s+диагноз|"
+                        r"реабилитационный\s+диагноз|задач[аи]|короткосрочная|"
+                        r"на основании|динамика|рекоменд)", line, re.IGNORECASE) or "|" in line:
+                break
+            previous.append(line)
+        detailed_status = "\n".join(value for value in previous if value)
+        if detailed_status and detailed_status.strip(" .:;").casefold() != status_value.casefold():
+            result = ["Логопедический статус при выписке: " + detailed_status]
     if (dynamics and previous_status < dynamics[-1] < start
             and not any(signature_re.match(line) for line in lines[dynamics[-1]:start])):
         start = dynamics[-1]
@@ -756,11 +772,16 @@ def extract_conclusion(
     blocks: list[str] = []
     lines = _document_lines(document)
     selected_start = 0
-    from mdrk_builder.application.specialist_narrative import complete_specialist_conclusion
+    from mdrk_builder.application.specialist_narrative import (
+        complete_specialist_conclusion, current_examination_lines, extract_course_outcome,
+    )
+    if outcome := extract_course_outcome(lines, role):
+        return outcome
     if role is SpecialistRole.NEUROPSYCHOLOGIST:
         if selected := _extract_neuropsych_conclusion(lines):
             return complete_specialist_conclusion(*selected, role)
     if role is SpecialistRole.LOGOPEDIST:
+        lines = current_examination_lines(lines)
         if selected := _extract_logopedist_conclusion(lines):
             return complete_specialist_conclusion(*selected, role)
     for index, line in enumerate(lines):
@@ -1077,6 +1098,8 @@ def extract_scale_measurements(
                 )
 
     if role is SpecialistRole.LOGOPEDIST:
+        from mdrk_builder.application.speech_scales import speech_narrative_scores
+        measurements.extend(speech_narrative_scores(_document_lines(document), document_datetime, document.source_path))
         narrative_patterns = (
             ("Шкала дизартрии", r"^Шкала(?:\s+оценки)?\s+дизартрии\s*[–—-]\s*([^.(]+(?:\s+балл\w*)?)"),
             (
@@ -1112,9 +1135,9 @@ def extract_scale_measurements(
             for item in measurements
             if any(token in item.name.casefold() for token in PHYSICIAN_SCALE_TOKENS)
         ]
-    unique: dict[tuple[str, str, datetime | None], ScaleMeasurement] = {}
+    unique: dict[tuple[str, str, datetime | None, MdrkKind | None], ScaleMeasurement] = {}
     for item in measurements:
-        unique[(item.name.casefold(), item.value, item.measured_at)] = item
+        unique[(item.name.casefold(), item.value, item.measured_at, item.phase)] = item
     return list(unique.values())
 
 

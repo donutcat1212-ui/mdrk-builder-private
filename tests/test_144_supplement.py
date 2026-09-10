@@ -120,3 +120,12 @@ def test_removing_egfr_item_preserves_neighbouring_semicolon_items():
 def test_egfr_mention_within_clinical_diagnosis_preserves_complete_diagnosis():
     diagnosis = 'Хроническая болезнь почек 3А ст СКФ 57,22 (МКБ10 N18.3)'
     assert without_admission_scale_items(diagnosis) == diagnosis
+
+
+def test_egfr_sentence_inside_anthropometry_keeps_neighbouring_facts():
+    text = ('Антропометрия: рост 170 см. Клиренс креатинина: 90 мл/мин (Кокрофт-Голт). '
+            'Скорость клубочковой фильтрации: 80,5 мл/мин/1,73кв.м (MDRD). '
+            'Питание сохранено.')
+    assert without_admission_scale_items(text) == (
+        'Антропометрия: рост 170 см. Клиренс креатинина: 90 мл/мин (Кокрофт-Голт). '
+        'Питание сохранено.')

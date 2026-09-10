@@ -19,6 +19,7 @@ DISCHARGE_SUMMARY_TEMPLATE = Path(
 RUNTIME_TEMPLATES = {CANONICAL_TEMPLATE, DISCHARGE_SUMMARY_TEMPLATE}
 ALLOWED_STAFF_NAMES = ("Поляев Б.Б.",)
 ALLOWED_ORGANIZATION_NAMES = ("ФГБУ «ФЦМН» ФМБА РОССИИ",)
+ALLOWED_CLINICAL_TERMS = ("Шкала Вассермана Л.И.",)
 APPROVED_DISCHARGE_MEDIA = {
     "word/media/image1.png": "bf790a517fad5ffcf3cf05043b284aee5a075ffd47dff6b87a90c0e8f6515434",
     "word/media/image2.png": "146c9f8747d25dbd7b34d63dd4ec9e3adc21ce800bb73d71d800b329dee276e9",
@@ -200,6 +201,8 @@ def _without_allowed_text(text: str) -> str:
         text = text.replace(full_name, "РАЗРЕШЕННЫЙ_СОТРУДНИК")
     for organization_name in ALLOWED_ORGANIZATION_NAMES:
         text = text.replace(organization_name, "РАЗРЕШЕННАЯ_ОРГАНИЗАЦИЯ")
+    for clinical_term in ALLOWED_CLINICAL_TERMS:
+        text = text.replace(clinical_term, "НАЗВАНИЕ_ШКАЛЫ")
     return text
 
 

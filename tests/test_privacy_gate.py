@@ -72,3 +72,13 @@ def test_release_gate_allows_empty_feedback(tmp_path):
     candidate.mkdir()
     (candidate / "issues.txt").write_bytes(b"\xef\xbb\xbf")
     assert audit_release_candidate(candidate) == []
+
+
+def test_scale_eponym_exception_does_not_allow_a_patient_name(tmp_path):
+    from tools.privacy_gate import ALLOWED_CLINICAL_TERMS
+    term = ALLOWED_CLINICAL_TERMS[0]
+    path = tmp_path / 'scale.py'
+    path.write_text(term, encoding='utf-8')
+    assert audit_source_tree(tmp_path) == []
+    path.write_text('Пациент: ' + term.removeprefix('Шкала '), encoding='utf-8')
+    assert any(f.reason == 'реалистичная фамилия с инициалами' for f in audit_source_tree(tmp_path))

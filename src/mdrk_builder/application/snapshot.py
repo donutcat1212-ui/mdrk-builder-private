@@ -180,10 +180,11 @@ def _prefer_scale_candidate(values: list[_ScaleCandidate]) -> _ScaleCandidate:
 
 def _scale_points(values: list[_ScaleCandidate]) -> list[ScaleMeasurement]:
     dated = [item for item in values if item.effective_datetime is not None]
-    eligible = dated or values
-    by_datetime: dict[datetime | None, list[_ScaleCandidate]] = {}
+    eligible = (dated + [item for item in values if item.effective_datetime is None
+                         and item.measurement.phase is MdrkKind.INITIAL]) if dated else values
+    by_datetime: dict[tuple[datetime | None, MdrkKind | None], list[_ScaleCandidate]] = {}
     for item in eligible:
-        by_datetime.setdefault(item.effective_datetime, []).append(item)
+        by_datetime.setdefault((item.effective_datetime, item.measurement.phase), []).append(item)
     selected = [_prefer_scale_candidate(items) for items in by_datetime.values()]
     selected.sort(key=lambda item: item.effective_datetime or datetime.min)
     return [item.measurement for item in selected]
@@ -206,7 +207,7 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
                 continue
             normalized_measurement = (
                 measurement
-                if measurement.measured_at is not None
+                if measurement.measured_at is not None or measurement.phase is MdrkKind.INITIAL
                 else replace(measurement, measured_at=finding.source_datetime)
             )
             measurement_at = normalized_measurement.measured_at
@@ -233,10 +234,12 @@ def select_scale_rows(episode: Episode, kind: MdrkKind) -> tuple[ScaleRow, ...]:
         if not points:
             continue
         initial_boundary = episode.assessment_at(MdrkKind.INITIAL)
-        baseline = [point for point in points if initial_boundary is None or (
-            point.measured_at is not None and point.measured_at <= initial_boundary)]
+        baseline = [point for point in points if point.phase is MdrkKind.INITIAL or (
+            point.phase is not MdrkKind.FINAL and (initial_boundary is None or (
+                point.measured_at is not None and point.measured_at <= initial_boundary)))]
         initial = baseline[0] if baseline else None
-        current = points[-1] if kind is MdrkKind.FINAL and points[-1] is not initial else None
+        current_points = [point for point in points if point.phase is not MdrkKind.INITIAL and point is not initial]
+        current = current_points[-1] if kind is MdrkKind.FINAL and current_points else None
         if initial is None and current is None:
             continue
         sample = current or initial

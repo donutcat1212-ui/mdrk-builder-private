@@ -167,7 +167,7 @@ def apply_episode_form_data(
         episode.course_duration_days = form.course_duration_days
         if not episode.course_duration_manual:
             from mdrk_builder.application.editing import hospitalization_days
-            episode.course_duration_days = hospitalization_days(episode.admission_datetime, episode.discharge_datetime or episode.assessment_at(MdrkKind.FINAL))
+            episode.course_duration_days = hospitalization_days(episode.admission_datetime, episode.course_end_at)
     target_sections = sections_for(episode, kind)
     for key, value in form.section_values:
         setattr(target_sections, key, value)

@@ -124,18 +124,19 @@ def _project_team_findings(snapshot: Snapshot, sources=()) -> tuple[DischargeTea
     return tuple(
         DischargeTeamFinding(
             role=finding.role,
+            specialist_title=finding.specialist_title,
             conclusion=finding.conclusion,
             source=finding.source,
             specialist_name=next((source.specialist_name for source in sources if source.path == finding.source), ""),
             occurred_at=finding.source_datetime,
             scales=tuple(DischargeScaleRow(
                 row.role, row.name,
-                value=row.current.value if row.current else "",
-                source=row.current.source if row.current else None,
+                value=(row.current or row.initial).value if (row.current or row.initial) else "",
+                source=(row.current or row.initial).source if (row.current or row.initial) else None,
                 initial_value=row.initial.value if row.initial else "",
                 initial_source=row.initial.source if row.initial else None,
                 initial_at=row.initial.measured_at if row.initial else None,
-                current_at=row.current.measured_at if row.current else None,
+                current_at=(row.current or row.initial).measured_at if (row.current or row.initial) else None,
             ) for row in snapshot.scale_rows if row.role is finding.role),
         )
         for finding in snapshot.findings
@@ -177,10 +178,7 @@ def _project_scale_rows(
                 if row.current is not None
                 else (
                     row.initial.value
-                    if final_mdrk_source is not None
-                    and row.current is None
-                    and row.initial is not None
-                    and row.initial.source in final_sources
+                    if row.initial is not None
                     else ""
                 )
             ),

@@ -227,6 +227,8 @@ class ScaleMeasurement:
     source: Path | None = None
     manual_fields: set[str] = field(default_factory=set)
     origin_key: tuple[str, ...] | None = None
+    # An explicitly labelled narrative pair may have no date for its baseline.
+    phase: MdrkKind | None = None
 
 
 
@@ -239,6 +241,7 @@ class SpecialistFinding:
     scales: list[ScaleMeasurement] = field(default_factory=list)
     manual_fields: set[str] = field(default_factory=set)
     origin_key: tuple[str, ...] | None = None
+    specialist_title: str = ""
 
 
 
@@ -302,12 +305,17 @@ class Episode:
     initial_meeting_at: datetime | None = None
     final_meeting_at: datetime | None = None
     assessment_meetings: dict[MdrkKind, datetime | None] = field(default_factory=dict)
+    course_end_override: datetime | None = None
+
+    @property
+    def course_end_at(self) -> datetime | None:
+        return self.course_end_override or self.discharge_datetime or self.assessment_at(MdrkKind.FINAL)
 
     def meeting_at(self, kind: MdrkKind) -> datetime | None:
         return self.initial_meeting_at if kind is MdrkKind.INITIAL else self.final_meeting_at
 
     def assessment_at(self, kind: MdrkKind) -> datetime | None:
-        """Clinical selection boundary, unchanged by a manual document-date edit."""
+        """Source boundary of the completed scan; date edits rebuild it asynchronously."""
         return self.assessment_meetings.get(kind, self.meeting_at(kind))
 
     def edit_meeting(self, kind: MdrkKind, value: datetime | None) -> None:

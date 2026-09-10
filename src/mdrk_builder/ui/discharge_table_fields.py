@@ -14,6 +14,7 @@ PROCEDURE_FIELDS = (
 )
 FINDING_FIELDS = (
     ("role", "Специалист"), ("specialist_name", "ФИО специалиста"),
+    ("specialist_title", "Должность в документе"),
     ("occurred_at", "Дата осмотра"), ("conclusion", "Заключение и рекомендации"),
 )
 SCALE_FIELDS = (

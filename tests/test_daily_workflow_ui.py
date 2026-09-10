@@ -169,8 +169,7 @@ def test_added_specialist_scale_uses_parent_role_and_both_views(app):
     panel=app.discharge_workspace
     role=SpecialistRole.PHYSICAL_THERAPIST
     panel.load(DischargeSummaryDraft(app.episode.folder,team_findings=(DischargeTeamFinding(role,''),)))
-    panel.clinical_tree.selection_set('team:0')
-    panel._edit_clinical_row('add_scale')
+    panel.specialists._add_scale()
     for name, value in {'name':'Берг','value':'35','initial_value':'20',
                         'initial_at':'10.08.2026 00:00','current_at':'18.08.2026 00:00'}.items():
         panel._commit_clinical_cell('team:0:scale:0:field:' + name, 'value', value)

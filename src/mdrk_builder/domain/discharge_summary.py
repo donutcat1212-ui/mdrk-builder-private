@@ -24,6 +24,7 @@ class DischargeTeamFinding:
     scales: tuple[DischargeScaleRow, ...] = ()
     manual_fields: set[str] = field(default_factory=set)
     origin_key: tuple[str, ...] | None = None
+    specialist_title: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,7 @@ class DischargeSummaryDraft:
     manual_fields: set[str] = field(default_factory=set)
     field_sources: dict[str, Path] = field(default_factory=dict)
     issues: list[ReviewIssue] = field(default_factory=list)
+    combine_admission_statuses: bool = False
 
     def requires_period_rescan(self) -> bool:
         return self.projection_period is not None and self.projection_period != (

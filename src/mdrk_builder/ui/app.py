@@ -62,6 +62,7 @@ from mdrk_builder.ui.inline_tree import InlineTreeEditor
 from mdrk_builder.ui.icf_table import apply_icf_grid_style
 from mdrk_builder.ui.source_access import TableSourceAccess, SourceLinks, icf_source_links, field_source_links, row_source_links, open_source_links, open_source_path
 from mdrk_builder.ui.background_job import BackgroundJobRunner
+from mdrk_builder.ui.formatted_text import FormattedText
 from mdrk_builder.ui.discharge_summary_panel import DischargeSummaryPanel
 from mdrk_builder.ui.reverse_sheet_panel import ReverseSheetPanel
 from mdrk_builder.ui.episode_adapter import (
@@ -181,6 +182,10 @@ class MdrkBuilderApp:
             history=self._table_editor.history)
         self._build_menu()
         self._build_layout()
+        from mdrk_builder.ui.document_dates import DocumentDateRebuilds
+        self._date_rebuilds = DocumentDateRebuilds(self)
+        self.discharge_workspace.on_dates_changed = lambda: self._date_rebuilds.changed("discharge")
+        self.reverse_workspace.on_dates_changed = lambda: self._date_rebuilds.changed("reverse")
         self._workspace = WorkspacePersistence(
             root, capture=self._capture_workspace, restore=self._apply_workspace,
             folder=self._state_folder, busy=lambda: self._scanning, status=self.status_var.set,
@@ -224,6 +229,8 @@ class MdrkBuilderApp:
         self._workspace.refresh_indicator()
 
     def _clear_workspace(self):
+        if hasattr(self, "_date_rebuilds"):
+            self._date_rebuilds.queue.clear()
         self._clear_manual_edits()
         self._scan_baseline = None
         self._invalidate_episode()
@@ -670,7 +677,7 @@ class MdrkBuilderApp:
             )
             button.pack(side="right")
             self._field_source_buttons[source_key] = button
-            widget = scrolledtext.ScrolledText(field_frame, height=max(7, height), wrap="word", undo=True)
+            widget = FormattedText(field_frame, height=max(7, height), wrap="word", undo=True)
             widget.pack(fill="both", expand=True)
             widget.bind(
                 "<KeyRelease>",
@@ -962,6 +969,8 @@ class MdrkBuilderApp:
                 self.episode.course_duration_manual = True
             if key in {"admission", "meeting"}:
                 self.root.after_idle(self._refresh_duration)
+                if hasattr(self, "_date_rebuilds"):
+                    self._date_rebuilds.changed("mdrk")
             source_key = {
                 "full_name": "identity.full_name",
                 "record_number": "identity.medical_record_number",
@@ -987,7 +996,7 @@ class MdrkBuilderApp:
         from mdrk_builder.ui.episode_adapter import parse_optional_datetime
         try:
             admission = parse_optional_datetime(self._entry_variables['admission'].get())
-            end = self.episode.discharge_datetime or self.episode.assessment_at(MdrkKind.FINAL)
+            end = self.episode.course_end_at
         except ValueError:
             return
         value = hospitalization_days(admission, end)
@@ -1080,6 +1089,7 @@ class MdrkBuilderApp:
         if not isinstance(previous, Episode):
             return
         episode.course_duration_manual = previous.course_duration_manual
+        episode.course_end_override = previous.course_end_override
         episode.planned_course_duration_days = previous.planned_course_duration_days
         if previous.course_duration_manual:
             episode.course_duration_days = previous.course_duration_days
@@ -1318,7 +1328,8 @@ class MdrkBuilderApp:
                 return ()
             links = list(row_source_links(row.initial, "Исходное значение")) if row.initial else [("Исходное значение", None)]
             if self._current_kind is MdrkKind.FINAL:
-                links.extend(row_source_links(row.current, "Итоговое значение") if row.current else [("Итоговое значение", None)])
+                latest = row.current or row.initial
+                links.extend(row_source_links(latest, "Последняя доступная оценка") if latest else [("Итоговое значение", None)])
             return links
         if table == "issue":
             issue = self._issue_refs.get(item)
@@ -1821,6 +1832,8 @@ class MdrkBuilderApp:
             self._populate_from_episode()
 
     def _generate(self) -> None:
+        if hasattr(self, "_date_rebuilds") and self._date_rebuilds.defer_save():
+            return
         if self._scanning:
             return
         document_variable = getattr(self, "document_var", None)
@@ -2519,7 +2532,7 @@ class MdrkBuilderApp:
                 values=(
                     row.name,
                     row.initial.value if row.initial else "",
-                    row.current.value if self._current_kind is MdrkKind.FINAL and row.current else "",
+                    (row.current or row.initial).value if self._current_kind is MdrkKind.FINAL and (row.current or row.initial) else "",
                 ),
             )
         self.scale_tree.insert(

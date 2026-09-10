@@ -186,6 +186,8 @@ def scan_reverse_sheet(
     *,
     normalizer: DocumentNormalizer | None = None,
     scan_session=None,
+    admission_datetime_override: datetime | None = None,
+    discharge_datetime_override: datetime | None = None,
 ) -> ReverseSheetDraft:
     folder = folder.resolve()
     draft = ReverseSheetDraft(folder=folder)
@@ -314,6 +316,9 @@ def scan_reverse_sheet(
                 )
             )
 
+    if admission_datetime_override is not None:
+        draft.admission_datetime = admission_datetime_override
+    draft.discharge_datetime = discharge_datetime_override
     rows: list[ReverseSheetRow] = []
     mdrk_index = 0
     for document, classification in parsed:
@@ -416,6 +421,11 @@ def scan_reverse_sheet(
 
     deduplicated: dict[tuple[str, datetime | None, str], ReverseSheetRow] = {}
     for row in rows:
+        if row.performed_at is not None:
+            if draft.admission_datetime and row.performed_at.date() < draft.admission_datetime.date():
+                continue
+            if draft.discharge_datetime and row.performed_at.date() > draft.discharge_datetime.date():
+                continue
         key = (row.intervention.casefold(), row.performed_at, row.performer.casefold())
         deduplicated.setdefault(key, row)
     draft.rows = sorted(
