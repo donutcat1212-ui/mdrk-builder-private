@@ -465,9 +465,9 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert len(initial_scale.columns) == 2
     assert len(final_scale.columns) == 3
-    assert "05.06.2026 16:00" in initial_scale.rows[0].cells[1].text
-    assert "05.06.2026 16:00" in final_scale.rows[0].cells[1].text
-    assert "19.06.2026 13:00" in final_scale.rows[0].cells[2].text
+    assert initial_scale.rows[0].cells[1].text == "05.06.2026"
+    assert final_scale.rows[0].cells[1].text == "05.06.2026"
+    assert final_scale.rows[0].cells[2].text == "19.06.2026"
     assert initial_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[1].text == "14 баллов"
     assert final_scale.rows[1].cells[2].text == "24 балла"
@@ -484,7 +484,7 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert physician_heading.text == (
         "Результат осмотра врача физической и реабилитационной медицины "
-        "(05 июня 2026 16:00):"
+        "(05.06.2026, 16:00)"
     )
     assert not physician_heading.runs[0].bold
     assert physician_table.rows[1].cells[0].text == "СКФ"
@@ -497,7 +497,7 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert final_physician_heading.text == (
         "Результат осмотра врача физической и реабилитационной медицины "
-        "(19 июня 2026 13:00):"
+        "(19.06.2026, 13:00)"
     )
 
     procedures = _find_table(initial, "Реабилитационные процедуры")

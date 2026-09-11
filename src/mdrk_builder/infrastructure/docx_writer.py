@@ -26,6 +26,7 @@ from mdrk_builder.domain import (
 )
 
 from .clinical_tables import render_completed_program, render_icf_profile
+from .specialist_headings import specialist_result_heading
 from .docx_layout import (
     ORDINARY_SCALE_WIDTHS,
     SCALE_FINAL_WIDTHS,
@@ -348,9 +349,17 @@ class _DocumentRenderer:
             source_datetime = self.snapshot.meeting_at
         if source_datetime is None:
             source_datetime = _first_scale_datetime(scale_rows, self.snapshot.kind)
-        heading = _specialist_result_heading(role, source_datetime)
-        if finding is not None and finding.specialist_title:
-            heading = finding.specialist_title + (" от " + source_datetime.strftime("%d.%m.%Y") if source_datetime else "")
+        specialist_name = next(
+            (source.specialist_name for source in self.episode.sources
+             if finding is not None and source.path == finding.source),
+            "",
+        )
+        heading = specialist_result_heading(
+            role,
+            source_datetime,
+            specialist_name=specialist_name,
+            specialist_title=finding.specialist_title if finding is not None else "",
+        )
         paragraph = self.document.add_paragraph(style=STYLE_BODY)
         paragraph.paragraph_format.keep_with_next = True
         paragraph.add_run(heading)
@@ -481,9 +490,9 @@ class _DocumentRenderer:
 
         initial_date = _common_measurement_datetime([row.initial for row in rows])
         current_date = self.snapshot.meeting_at or _common_measurement_datetime([row.current or row.initial for row in rows])
-        headers = ["Шкала/опросник", "Исходно\n" + _format_scale_header(initial_date, "")]
+        headers = ["Шкала/опросник", _format_scale_header(initial_date, "")]
         if final_mode:
-            headers.append("На дату МДРК\n" + _format_scale_header(current_date, ""))
+            headers.append(_format_scale_header(current_date, ""))
         for cell, value in zip(table.rows[0].cells, headers, strict=True):
             set_cell_text(cell, value, style=STYLE_TABLE_HEADER, alignment=WD_ALIGN_PARAGRAPH.LEFT, keep_with_next=True)
         for cell in table.rows[0].cells[1:]:
@@ -758,35 +767,6 @@ def _physician_final_scale_rows(
     return tuple(result)
 
 
-def _specialist_result_heading(
-    role: SpecialistRole,
-    source_datetime: datetime | None,
-) -> str:
-    if role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:
-        specialist = "врача физической и реабилитационной медицины"
-        date_text = (
-            f"{source_datetime.day:02d} {_MONTHS[source_datetime.month]} "
-            f"{source_datetime.year} {source_datetime:%H:%M}"
-            if source_datetime is not None
-            else "дата, время"
-        )
-    else:
-        specialist = {
-            SpecialistRole.PHYSICAL_THERAPIST: "специалиста по физической реабилитации",
-            SpecialistRole.LOGOPEDIST: "медицинского логопеда",
-            SpecialistRole.NEUROPSYCHOLOGIST: "медицинского психолога/нейропсихолога",
-            SpecialistRole.PATHOPSYCHOLOGIST: "медицинского психолога/патопсихолога",
-            SpecialistRole.OCCUPATIONAL_THERAPIST: "специалиста по эргореабилитации",
-            SpecialistRole.OTHER: "консультанта",
-        }[role]
-        date_text = (
-            source_datetime.strftime("%d.%m.%Y, %H:%M")
-            if source_datetime is not None
-            else "дата, время"
-        )
-    return f"Результат осмотра {specialist} ({date_text}):"
-
-
 def _deduplicate_physician_scale_rows(
     rows: Sequence[ScaleRow],
 ) -> tuple[ScaleRow, ...]:
@@ -844,7 +824,7 @@ def _common_measurement_datetime(
 
 
 def _format_scale_header(value: datetime | None, fallback: str) -> str:
-    return _format_short_datetime(value) if value is not None else fallback
+    return value.strftime("%d.%m.%Y") if value is not None else fallback
 
 
 def _format_scale_value(

@@ -45,7 +45,6 @@ def render_icf_profile(
     *,
     repeat_missing_final: bool = True,
     assessment_labels: tuple[str, str] = ("", ""),
-    shade_latest: bool = False,
 ) -> None:
     grouped: OrderedDict[IcfSection, list[IcfDomain]] = OrderedDict()
     for domain in domains:
@@ -151,7 +150,6 @@ def render_icf_profile(
                 kind,
                 personal_factor=section is IcfSection.PERSONAL_FACTORS,
                 repeat_missing_final=repeat_missing_final,
-                shade_latest=shade_latest,
             )
             if environment_group and domain_index < len(category_domains) - 1:
                 for cell in domain_row.cells:
@@ -166,7 +164,6 @@ def render_final_icf_profile(
     *,
     repeat_missing_final: bool = True,
     assessment_labels: tuple[str, str] = ("", ""),
-    shade_latest: bool = False,
 ) -> None:
     render_icf_profile(
         document,
@@ -174,7 +171,6 @@ def render_final_icf_profile(
         domains,
         repeat_missing_final=repeat_missing_final,
         assessment_labels=assessment_labels,
-        shade_latest=shade_latest,
     )
 
 
@@ -379,7 +375,6 @@ def _fill_mcf_domain_row(
     *,
     personal_factor: bool,
     repeat_missing_final: bool,
-    shade_latest: bool = False,
 ) -> None:
     cells = row.cells
     set_cell_text(
@@ -412,7 +407,8 @@ def _fill_mcf_domain_row(
             style=STYLE_TABLE,
             alignment=WD_ALIGN_PARAGRAPH.CENTER,
         )
-    _shade_initial_qualifier(cells, (domain.final or domain.initial) if shade_latest else domain.initial)
+    qualifier = (domain.final or domain.initial) if kind is MdrkKind.FINAL else domain.initial
+    _shade_qualifier(cells, qualifier)
     initial = domain.initial.display() if domain.initial is not None else ""
     final_qualifier = domain.final
     if (
@@ -461,7 +457,7 @@ def _mcf_responsible(domain: IcfDomain) -> str:
     return domain.specialist.display_name
 
 
-def _shade_initial_qualifier(
+def _shade_qualifier(
     cells: Sequence[_Cell],
     qualifier: IcfQualifier | None,
 ) -> None:

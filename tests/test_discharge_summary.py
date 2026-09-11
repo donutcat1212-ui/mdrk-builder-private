@@ -724,7 +724,7 @@ def test_discharge_requested_header_specialists_icf_and_primary_format(tmp_path)
     paragraphs = [p.text for p in document.paragraphs]
     for text in ('в стационар - 1', 'в стационаре', 'выписан - 1', 'улучшение - 2', 'плановая - 1'):
         assert any(run.text == text and run.bold for p in document.paragraphs for run in p.runs)
-    assert 'Специалист по физической реабилитации ТЕСТОВЫЙ А.А. от 10.08.2026' in paragraphs
+    assert 'Результат осмотра специалиста по физической реабилитации ТЕСТОВЫЙ А.А. (10.08.2026, 12:00)' in paragraphs
     icf = next(table for table in document.tables if 'МКФ категориальный профиль' in table.cell(0, 0).text)
     assert '10.08.' in icf.cell(1, 11).text and '17.08.' in icf.cell(1, 12).text
     row = next(row for row in icf.rows if row.cells[0].text == 's110')

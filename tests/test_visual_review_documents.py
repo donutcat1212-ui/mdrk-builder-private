@@ -28,8 +28,8 @@ def test_specialist_tables_have_header_dates_and_no_duplicate_physician_scores(t
     assert "11.08.2026" in motor_table.rows[0].cells[2].text
     assert [c.text for c in motor_table.rows[1].cells] == ["Двигательная шкала", "3", "4"]
     assert not any(c.text == "Специалист" for t in document.tables for c in t.rows[0].cells)
-    assert any(p.text == "Врач физической и реабилитационной медицины" for p in document.paragraphs)
-    assert any(p.text.startswith("Специалист по физической реабилитации") for p in document.paragraphs)
+    assert any(p.text.startswith("Результат осмотра врача физической и реабилитационной медицины (") for p in document.paragraphs)
+    assert any(p.text.startswith("Результат осмотра специалиста по физической реабилитации (") for p in document.paragraphs)
 
 
 def test_combined_status_keeps_both_texts_and_removes_only_unwanted_header_lines(tmp_path):

@@ -19,6 +19,7 @@ from mdrk_builder.domain import (
     SpecialistRole,
 )
 from mdrk_builder.infrastructure.formatted_text import add_formatted_text, clinical_paragraphs
+from .specialist_headings import specialist_result_heading
 from mdrk_builder.application.discharge_extractors import clean_discharge_header
 from mdrk_builder.infrastructure.clinical_tables import (
     render_completed_program,
@@ -152,7 +153,6 @@ class _DischargeSummaryRenderer:
                     "Перв.\n" + (self.draft.initial_assessment_datetime.strftime("%d.%m.\n%Y") if self.draft.initial_assessment_datetime else ""),
                     "Вып.\n" + (self.draft.discharge_datetime.strftime("%d.%m.\n%Y") if self.draft.discharge_datetime else ""),
                 ),
-                shade_latest=True,
             )
         else:
             self._multiline("")
@@ -183,11 +183,12 @@ class _DischargeSummaryRenderer:
         for finding in self.draft.team_findings:
             if finding.role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST} and not finding.conclusion.strip():
                 continue
-            title = finding.specialist_title or finding.role.display_name
-            heading = " ".join(part for part in (title, finding.specialist_name) if part)
-            if finding.occurred_at:
-                heading += " от " + finding.occurred_at.strftime("%d.%m.%Y")
-            self._section(heading)
+            self._section(specialist_result_heading(
+                finding.role,
+                finding.occurred_at,
+                specialist_name=finding.specialist_name,
+                specialist_title=finding.specialist_title,
+            ))
             if finding.scales and finding.role not in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:
                 self._specialist_scale_table(finding.scales, finding.occurred_at)
             self._labeled("Заключение", finding.conclusion)
