@@ -36,9 +36,12 @@ def select_procedures(rows, admission: datetime | None, boundary: datetime | Non
     result = []
     for row in rows:
         if kind is MdrkKind.INITIAL:
-            # The prescribed count stays separate. A known execution schedule can
-            # supply a reviewable frequency when no explicit plan was recorded.
-            result.append(replace(row, actual_count=row.planned_count,
+            # Preserve the source plan separately; completed marks supply the
+            # displayed count only when no explicit or manually cleared plan exists.
+            count = (row.planned_count
+                     if row.planned_count is not None or 'planned_count' in row.manual_fields
+                     else row.actual_count)
+            result.append(replace(row, actual_count=count,
                                   frequency=(row.planned_frequency if 'planned_frequency' in row.manual_fields
                                              else row.planned_frequency or row.frequency), performed_dates=()))
             continue

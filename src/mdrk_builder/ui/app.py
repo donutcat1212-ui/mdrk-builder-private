@@ -2495,6 +2495,8 @@ class MdrkBuilderApp:
             else:
                 procedure.frequency = cleaned
         mark_manual_changes(previous, procedure)
+        if column == "count" and self._selected_kind() is MdrkKind.INITIAL:
+            procedure.manual_fields.add("planned_count")
         if column == "frequency" and self._selected_kind() is MdrkKind.INITIAL:
             procedure.manual_fields.add("planned_frequency")
         self._mark_collection_dirty("procedures")

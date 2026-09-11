@@ -206,3 +206,20 @@ def test_plan_count_edit_does_not_replace_completed_count(app):
     app.kind_var.set(MdrkKind.FINAL.value)
     app._refresh_procedures()
     assert str(app.procedure_tree.set('0', 'count')) == '4'
+
+
+def test_initial_count_from_marks_can_be_cleared_and_restored_as_a_manual_plan(app):
+    app.episode.procedures = [Procedure('ЛФК', 'ФТ', 4)]
+    app.kind_var.set(MdrkKind.INITIAL.value)
+    app._refresh_procedures()
+    assert str(app.procedure_tree.set('0', 'count')) == '4'
+    app._commit_procedure_cell('0', 'count', '')
+    assert app.procedure_tree.set('0', 'count') == ''
+    assert 'planned_count' in app.episode.procedures[0].manual_fields
+    app.kind_var.set(MdrkKind.FINAL.value)
+    app._refresh_procedures()
+    assert str(app.procedure_tree.set('0', 'count')) == '4'
+    app.kind_var.set(MdrkKind.INITIAL.value)
+    app._commit_procedure_cell('0', 'count', '6')
+    assert str(app.procedure_tree.set('0', 'count')) == '6'
+    assert app.episode.procedures[0].actual_count == 4

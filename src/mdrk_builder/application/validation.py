@@ -32,6 +32,7 @@ _RECOMPUTED_CODES = {
     "icf_final_missing",
     "procedure_specialist_missing",
     "procedure_count_missing",
+    "planned_count_from_executions",
     "procedure_duration_missing",
     "procedure_frequency_missing",
     "rehab_daily_minutes_below_minimum",
@@ -558,6 +559,16 @@ def generation_issues(episode: Episode, kind: MdrkKind) -> list[ReviewIssue]:
     from mdrk_builder.application.procedures import select_procedures
     procedures = select_procedures(episode.procedures, episode.admission_datetime, episode.assessment_at(kind), kind)
     for index, procedure in enumerate(procedures):
+        if (kind is MdrkKind.INITIAL and procedure.planned_count is None
+                and procedure.actual_count is not None
+                and 'planned_count' not in procedure.manual_fields):
+            issues.append(ReviewIssue(
+                code="planned_count_from_executions",
+                message=f"Для «{procedure.name}» отдельное назначенное количество не указано; в МДРК-1 использовано количество выполненных занятий.",
+                severity=ReviewSeverity.INFO,
+                field=f"procedures.{index}",
+                source=procedure.source,
+            ))
         checks = (
             ("procedure_specialist_missing", procedure.specialist, "ответственный специалист"),
             ("procedure_count_missing", procedure.actual_count, "назначенное количество" if kind is MdrkKind.INITIAL else "фактическое количество"),
