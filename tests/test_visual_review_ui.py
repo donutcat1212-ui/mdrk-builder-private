@@ -125,11 +125,11 @@ def test_discharge_date_changes_during_scan_then_save_uses_latest_period(root, t
 
 
 def test_quick_phrase_is_explicit_and_status_mode_survives_draft_and_rescan(root, tmp_path):
-    from mdrk_builder.ui.quick_phrases import PHRASES, insert_phrase
+    from mdrk_builder.ui.quick_phrases import insert_phrase
     panel = DischargeSummaryPanel(root, open_path=lambda _: None)
     panel.load(DischargeSummaryDraft(tmp_path, neurological_status="NEURO", local_status="LOCAL"))
     assert panel._widgets["laboratory_results"].get("1.0", "end-1c") == ""
-    insert_phrase(panel._widgets["laboratory_results"], PHRASES["laboratory_results"][0])
+    insert_phrase(panel._widgets["laboratory_results"], "Фраза врача для исследований.")
     panel.combine_statuses.set(True)
     panel._change_status_mode()
     assert panel.merge_scan(DischargeSummaryDraft(tmp_path, neurological_status="NEURO", local_status="LOCAL"))
@@ -138,4 +138,4 @@ def test_quick_phrase_is_explicit_and_status_mode_survives_draft_and_rescan(root
     panel.restore_state(restored)
     assert panel.combine_statuses.get()
     assert panel.draft.neurological_status == "NEURO" and panel.draft.local_status == "LOCAL"
-    assert panel.draft.laboratory_results == "Не проводились."
+    assert panel.draft.laboratory_results == "Фраза врача для исследований."

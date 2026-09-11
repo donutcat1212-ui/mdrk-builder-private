@@ -1,6 +1,6 @@
 """Native Tk bold tags with a portable draft representation; fonts stay fixed."""
 import tkinter as tk
-from tkinter import font, scrolledtext, ttk
+from tkinter import font, scrolledtext
 
 from mdrk_builder.domain.formatted_text import emphasis_runs, emphasize
 
@@ -11,9 +11,6 @@ class FormattedText(scrolledtext.ScrolledText):
         self._bold_font = font.Font(self, font=self.cget("font"))
         self._bold_font.configure(weight="bold")
         self.tag_configure("bold", font=self._bold_font)
-        bar = ttk.Frame(self.frame)
-        bar.pack(side="top", fill="x", before=self.vbar)
-        ttk.Button(bar, text="Ж", width=3, takefocus=False, command=self.toggle_bold).pack(side="left")
         self.bind("<Control-b>", self.toggle_bold)
         self.bind("<Control-B>", self.toggle_bold)
         if self.tk.call("tk", "windowingsystem") == "aqua":
@@ -32,6 +29,7 @@ class FormattedText(scrolledtext.ScrolledText):
                       and self.compare(fully_bold[1], ">=", last))
         (self.tag_remove if remove else self.tag_add)("bold", first, last)
         self.edit_modified(True)
+        self.event_generate("<<UserTextEdit>>")
         return "break"
 
     def insert(self, index, chars, *tags):

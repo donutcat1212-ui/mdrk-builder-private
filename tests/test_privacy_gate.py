@@ -74,6 +74,12 @@ def test_release_gate_allows_empty_feedback(tmp_path):
     assert audit_release_candidate(candidate) == []
 
 
+def test_user_phrase_file_is_excluded_even_when_empty(tmp_path):
+    (tmp_path / "user_phrases.json").write_text('{"schema_version": 1, "fields": {}}')
+    assert any("фраз" in finding.reason for finding in audit_source_tree(tmp_path))
+    assert any("фраз" in finding.reason for finding in audit_release_candidate(tmp_path))
+
+
 def test_scale_eponym_exception_does_not_allow_a_patient_name(tmp_path):
     from tools.privacy_gate import ALLOWED_CLINICAL_TERMS
     term = ALLOWED_CLINICAL_TERMS[0]

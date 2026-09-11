@@ -26,6 +26,9 @@ workspace/
 issues.txt
 issues.txt.lock
 .issues-pending-*.txt
+user_phrases.json
+user_phrases.json.lock
+.user_phrases-*.tmp
 
 # Clinical/source documents are denied by default. Only sanitized runtime
 # templates are allowed in version control.

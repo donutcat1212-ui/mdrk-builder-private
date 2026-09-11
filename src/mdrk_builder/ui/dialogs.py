@@ -29,6 +29,7 @@ from mdrk_builder.ui.episode_adapter import (
     role_from_name,
     role_names,
 )
+from mdrk_builder.ui.formatted_text import FormattedText
 
 
 _LATIN_CONTROL_SHORTCUTS = {
@@ -132,6 +133,10 @@ def _show_edit_context_menu(event: Any) -> str | None:
             menu.add_separator()
             select_state = "disabled" if disabled_widget else "normal"
             menu.add_command(label="Выделить всё", state=select_state, command=lambda: _select_all_text(widget))
+            if isinstance(widget, FormattedText):
+                menu.add_separator()
+                menu.add_command(label="Полужирный", accelerator="Ctrl+B", state=cut_state,
+                                 command=widget.toggle_bold)
         menu.tk_popup(event.x_root, event.y_root)
     except (AttributeError, tk.TclError):
         return None

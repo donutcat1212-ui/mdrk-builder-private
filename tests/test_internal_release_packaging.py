@@ -34,6 +34,9 @@ def test_builds_minimal_copy_ready_internal_folder(tmp_path: Path) -> None:
     _write_project_version(tmp_path, project="1.0.0", package="1.0.0")
     source_exe = tmp_path / "MDRK_Builder.exe"
     source_exe.write_bytes(b"minimal-test-executable")
+    phrases = tmp_path / "user_phrases.json"
+    phrases.write_text('{"schema_version": 1, "fields": {"conclusion": ["Фраза врача"]}}')
+    original_phrases = phrases.read_bytes()
 
     package_dir = package_internal_release.build_internal_package(
         project_root=tmp_path,
@@ -50,6 +53,7 @@ def test_builds_minimal_copy_ready_internal_folder(tmp_path: Path) -> None:
     }
     assert (package_dir / "MDRK_Builder.exe").read_bytes() == source_exe.read_bytes()
     assert (package_dir / "issues.txt").read_bytes() == b"\xef\xbb\xbf"
+    assert phrases.read_bytes() == original_phrases
 
     readme = (package_dir / "README_ПЕРЕД_ИСПОЛЬЗОВАНИЕМ.txt").read_text(
         encoding="utf-8-sig"

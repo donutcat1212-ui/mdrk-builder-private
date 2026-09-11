@@ -679,11 +679,13 @@ class MdrkBuilderApp:
             self._field_source_buttons[source_key] = button
             widget = FormattedText(field_frame, height=max(7, height), wrap="word", undo=True)
             widget.pack(fill="both", expand=True)
+            from mdrk_builder.ui.quick_phrases import add_quick_phrases
+            add_quick_phrases(label_row, widget, key)
             widget.bind(
                 "<KeyRelease>",
                 lambda _event, field_key=key: self._mark_section_dirty(field_key),
             )
-            for virtual_event in ("<<Paste>>", "<<Cut>>", "<<Undo>>", "<<Redo>>"):
+            for virtual_event in ("<<Paste>>", "<<Cut>>", "<<Undo>>", "<<Redo>>", "<<UserTextEdit>>"):
                 widget.bind(
                     virtual_event,
                     lambda _event, field_key=key: self._mark_section_dirty(field_key),

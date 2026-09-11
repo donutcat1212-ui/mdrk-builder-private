@@ -304,6 +304,9 @@ def audit_source_tree(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in _source_paths(root):
         relative = _relative(path, root)
+        if path.name == "user_phrases.json":
+            findings.append(Finding(relative, "Пользовательский файл фраз запрещён в исходном дереве"))
+            continue
         suffix = path.suffix.casefold()
         if suffix in PATIENT_SOURCE_SUFFIXES:
             if relative in RUNTIME_TEMPLATES:
@@ -329,6 +332,9 @@ def audit_release_candidate(candidate: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in _candidate_files(candidate):
         shown = _relative(path, candidate.parent if candidate.is_file() else candidate)
+        if path.name == "user_phrases.json":
+            findings.append(Finding(shown, "Пользовательский файл фраз не входит в новый комплект поставки"))
+            continue
         if path.name.casefold() == "issues.txt":
             # A new delivery contains only an empty feedback file. Never inspect
             # or reproduce the contents of a used clinical feedback log.
