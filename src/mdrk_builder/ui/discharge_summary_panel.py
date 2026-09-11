@@ -10,6 +10,7 @@ from mdrk_builder.application.admission_only_scales import (
     omit_admission_scales_from_discharge, without_admission_scale_items,
 )
 from mdrk_builder.application.discharge_extractors import update_header_period
+from mdrk_builder.domain.document_dates import discharge_document_datetime
 from mdrk_builder.application.editing import mark_manual_changes, merge_issues, merge_rows, row_key
 from mdrk_builder.application.workspace import DischargeWorkspaceState
 from mdrk_builder.domain import (
@@ -486,7 +487,7 @@ class DischargeSummaryPanel(ttk.Frame):
         self._identity_vars["birth_date"].set(format_date(self.draft.identity.birth_date))
         self._identity_vars["sex"].set(self.draft.identity.sex)
         self._identity_vars["admission"].set(format_datetime(self.draft.admission_datetime))
-        self._identity_vars["discharge"].set(format_datetime(self.draft.discharge_datetime))
+        self._identity_vars["discharge"].set(format_datetime(discharge_document_datetime(self.draft.discharge_datetime)))
         for name, widget in self._widgets.items():
             widget.delete("1.0", "end")
             widget.insert("1.0", getattr(self.draft, name))
@@ -662,7 +663,7 @@ class DischargeSummaryPanel(ttk.Frame):
         try:
             birth_date = parse_optional_date(self._identity_vars["birth_date"].get())
             admission = parse_optional_datetime(self._identity_vars["admission"].get())
-            discharge = parse_optional_datetime(self._identity_vars["discharge"].get())
+            discharge = discharge_document_datetime(parse_optional_datetime(self._identity_vars["discharge"].get()))
         except ValueError as exc:
             messagebox.showerror("Проверьте поля", str(exc), parent=self)
             return False
@@ -675,6 +676,13 @@ class DischargeSummaryPanel(ttk.Frame):
         self.draft.identity.sex = self._identity_vars["sex"].get().strip()
         self.draft.admission_datetime = admission
         self.draft.discharge_datetime = discharge
+        if self._identity_vars["discharge"].get() != format_datetime(discharge):
+            previous_populating = self._populating
+            self._populating = True
+            try:
+                self._identity_vars["discharge"].set(format_datetime(discharge))
+            finally:
+                self._populating = previous_populating
         text_values = {name: widget.get("1.0", "end-1c") for name, widget in self._widgets.items()}
         for name, value in text_values.items():
             if value != getattr(self.draft, name):
@@ -701,6 +709,7 @@ class DischargeSummaryPanel(ttk.Frame):
             return None
         output = filedialog.asksaveasfilename(
             parent=self, title="Сохранить выписной эпикриз", defaultextension=".docx",
+            initialdir=str(self.draft.folder),
             filetypes=(("Документ Word", "*.docx"),),
             initialfile=f"Выписной эпикриз {safe_patient_name(self.draft.identity.full_name)}.docx",
         )

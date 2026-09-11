@@ -497,7 +497,7 @@ def test_writer_renders_initial_and_final_from_one_template(tmp_path) -> None:
     )
     assert final_physician_heading.text == (
         "Результат осмотра врача физической и реабилитационной медицины "
-        "(19.06.2026, 13:00)"
+        "(19.06.2026, 11:00)"
     )
 
     procedures = _find_table(initial, "Реабилитационные процедуры")

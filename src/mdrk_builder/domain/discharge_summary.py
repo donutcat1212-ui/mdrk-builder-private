@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .document_dates import discharge_document_datetime
+
 from .model import (
     IcfDomain,
     PatientIdentity,
@@ -101,9 +103,11 @@ class DischargeSummaryDraft:
     combine_admission_statuses: bool = False
 
     def requires_period_rescan(self) -> bool:
-        return self.projection_period is not None and self.projection_period != (
-            self.admission_datetime, self.discharge_datetime
-        )
+        if self.projection_period is None:
+            return False
+        admission, discharge = self.projection_period
+        return (admission, discharge_document_datetime(discharge)) != (
+            self.admission_datetime, discharge_document_datetime(self.discharge_datetime))
 
     def blocking_issues(self) -> tuple[ReviewIssue, ...]:
         return tuple(

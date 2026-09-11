@@ -5,6 +5,8 @@ from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from .document_dates import end_of_day, final_mdrk_datetime
+
 
 class MdrkKind(StrEnum):
     INITIAL = "initial"
@@ -312,13 +314,16 @@ class Episode:
         return self.course_end_override or self.discharge_datetime or self.assessment_at(MdrkKind.FINAL)
 
     def meeting_at(self, kind: MdrkKind) -> datetime | None:
-        return self.initial_meeting_at if kind is MdrkKind.INITIAL else self.final_meeting_at
+        return self.initial_meeting_at if kind is MdrkKind.INITIAL else final_mdrk_datetime(self.final_meeting_at)
 
     def assessment_at(self, kind: MdrkKind) -> datetime | None:
         """Source boundary of the completed scan; date edits rebuild it asynchronously."""
-        return self.assessment_meetings.get(kind, self.meeting_at(kind))
+        value = self.assessment_meetings.get(kind, self.meeting_at(kind))
+        return end_of_day(value) if kind is MdrkKind.FINAL else value
 
     def edit_meeting(self, kind: MdrkKind, value: datetime | None) -> None:
+        if kind is MdrkKind.FINAL:
+            value = final_mdrk_datetime(value)
         if value == self.meeting_at(kind):
             return
         self.assessment_meetings.setdefault(kind, self.meeting_at(kind))

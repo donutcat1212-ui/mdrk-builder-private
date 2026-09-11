@@ -7,6 +7,7 @@ from docx import Document
 
 from mdrk_builder.application.admission_only_scales import without_admission_scale_items
 from mdrk_builder.application.snapshot import build_snapshot
+from mdrk_builder.domain.document_dates import end_of_day, final_mdrk_datetime
 from mdrk_builder.application.validation import current_issues
 from mdrk_builder.domain import (
     DischargeScaleRow, DischargeSummaryDraft, DischargeTeamFinding,
@@ -35,12 +36,15 @@ def test_manual_meeting_changes_header_without_reselecting_clinical_data(app, ki
     original_signatures = next(table for table in Document(original_output).tables
                                if table.cell(0, 0).text == 'Специалист МДРК')
     original = app.episode.meeting_at(kind)
+    original_boundary = app.episode.assessment_at(kind)
     changed = original - timedelta(days=2, hours=3)
+    if kind is MdrkKind.FINAL:
+        changed = final_mdrk_datetime(changed)
     app._entry_variables['meeting'].set(changed.strftime('%d.%m.%Y %H:%M'))
     assert app._apply_form()
     assert not app._test_errors
     assert app.episode.meeting_at(kind) == changed
-    assert app.episode.assessment_at(kind) == original
+    assert app.episode.assessment_at(kind) == original_boundary
     after = build_snapshot(app.episode, kind)
     assert replace(after, meeting_at=before.meeting_at) == before
     assert not any(i.code in {'meeting_before_admission', 'final_meeting_not_after_initial',
@@ -49,13 +53,13 @@ def test_manual_meeting_changes_header_without_reselecting_clinical_data(app, ki
     app._pending_manual_state = app._capture_manual_state()
     fresh = deepcopy(app._scan_baseline)
     app._merge_manual_state(fresh)
-    assert fresh.meeting_at(kind) == changed and fresh.assessment_at(kind) == original
+    assert fresh.meeting_at(kind) == changed and fresh.assessment_at(kind) == original_boundary
     restored = decode(encode(fresh))
-    assert restored.meeting_at(kind) == changed and restored.assessment_at(kind) == original
+    assert restored.meeting_at(kind) == changed and restored.assessment_at(kind) == original_boundary
     assert build_snapshot(restored, kind) == after
     output = write_mdrk_docx(restored, kind, app.episode.folder / 'manual-date.docx', ignore_issues=True)
     expected_heading = ('"03" июня 2026 г. время: 13 час. 00 мин.' if kind is MdrkKind.INITIAL
-                        else '"17" июня 2026 г. время: 10 час. 00 мин.')
+                        else '"17" июня 2026 г. время: 11 час. 00 мин.')
     assert expected_heading in _text(output)
     revised_signatures = next(table for table in Document(output).tables
                               if table.cell(0, 0).text == 'Специалист МДРК')
@@ -69,7 +73,7 @@ def test_legacy_episode_keeps_its_original_selection_boundary(tmp_path):
     saved['fields'].pop('assessment_meetings')
     restored = decode(saved)
     assert restored.assessment_at(MdrkKind.INITIAL) == episode.initial_meeting_at
-    assert restored.assessment_at(MdrkKind.FINAL) == episode.final_meeting_at
+    assert restored.assessment_at(MdrkKind.FINAL) == end_of_day(episode.final_meeting_at)
 
 
 def test_egfr_is_only_rendered_in_mdrk1_and_sources_are_unchanged(tmp_path):

@@ -7,7 +7,7 @@ from mdrk_builder.domain import SpecialistRole
 
 _GENITIVE_TITLES = {
     SpecialistRole.FRM: "врача физической и реабилитационной медицины",
-    SpecialistRole.NEUROLOGIST: "врача-невролога",
+    SpecialistRole.NEUROLOGIST: "врача физической и реабилитационной медицины",
     SpecialistRole.PHYSICAL_THERAPIST: "специалиста по физической реабилитации",
     SpecialistRole.OCCUPATIONAL_THERAPIST: "специалиста по эргореабилитации",
     SpecialistRole.LOGOPEDIST: "медицинского логопеда",
@@ -25,10 +25,12 @@ def specialist_result_heading(
     specialist_title: str = "",
 ) -> str:
     title = " ".join(specialist_title.split())
-    if not title or title.casefold() == role.display_name.casefold():
+    if role in {SpecialistRole.FRM, SpecialistRole.NEUROLOGIST}:
+        title = _GENITIVE_TITLES[SpecialistRole.FRM]
+    elif not title or title.casefold() == role.display_name.casefold():
         title = _GENITIVE_TITLES[role]
     else:
-        # Source titles may retain the expanded FRM post or a clinician's edit.
+        # Non-physician source titles may retain a clinician's edit.
         # Inflect known professional nouns without replacing the written post.
         title = title[0].lower() + title[1:]
         words = {"врач": "врача", "невролог": "невролога",

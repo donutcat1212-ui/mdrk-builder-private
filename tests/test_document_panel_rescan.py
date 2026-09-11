@@ -61,7 +61,7 @@ def test_confirmed_date_is_passed_to_background_scan_and_manual_text_survives(ro
     from mdrk_builder.ui.app import MdrkBuilderApp
     from mdrk_builder.domain import Procedure
     panel = DischargeSummaryPanel(root, open_path=lambda _: None)
-    start, old_end, new_end = datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 18)
+    start, old_end, new_end = datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 18, 12)
     old = DischargeSummaryDraft(folder=tmp_path, admission_datetime=start,
         discharge_datetime=old_end, projection_period=(start, old_end))
     panel.load(old)

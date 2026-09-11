@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
 
+from mdrk_builder.domain.document_dates import discharge_document_datetime
+
 from mdrk_builder.application.admission_only_scales import omit_admission_scales_from_discharge
 from mdrk_builder.application.discharge_extractors import (
     extract_complaints,
@@ -292,10 +294,10 @@ def scan_discharge_summary(
     discharge_document = discharge.scanned.document if discharge else None
     primary_document = primary.scanned.document if primary else None
     primary_sections = extract_discharge_clinical_sections(primary_document) if primary_document else {}
-    discharge_at = discharge_datetime_override or (discharge.discharge_at if discharge else None)
+    discharge_at = discharge_document_datetime(discharge_datetime_override or (discharge.discharge_at if discharge else None))
 
     header_text = extract_discharge_header(discharge_document) if discharge_document else episode_header(episode)
-    if admission_datetime_override or discharge_datetime_override:
+    if discharge_at is not None and header_text.strip():
         header_text = update_header_period(header_text, episode.admission_datetime, discharge_at)
     from mdrk_builder.application.diagnosis import compose_diagnosis, diagnosis_choices
     diagnosis_candidates = []

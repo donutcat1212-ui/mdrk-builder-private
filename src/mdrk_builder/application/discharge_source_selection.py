@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
 
+from mdrk_builder.application.identifiers import normalize_medical_record_number, normalize_patient_full_name
+
 from mdrk_builder.application.episode_identity import (
     DischargeEpisodeKey,
     EpisodeCompatibility,
@@ -24,6 +26,7 @@ from mdrk_builder.application.source_scan import (
     SourceScanResult,
 )
 from mdrk_builder.domain import (
+    Episode,
     MdrkKind,
     PatientIdentity,
     ReviewIssue,
@@ -66,6 +69,24 @@ class _SourcePair:
     discharge: SourceCandidate
     primary: SourceCandidate
     match: EpisodeMatch
+
+
+def select_mdrk_discharge_source(source_scan: SourceScanResult, episode: Episode) -> SourceCandidate | None:
+    """Accept only a MIS discharge positively matched to the selected episode."""
+    selection = select_discharge_sources(source_scan)
+    candidate = selection.discharge
+    if candidate is None or selection.primary is None or selection.issues:
+        return None
+    key = DischargeEpisodeKey(
+        normalized_full_name=normalize_patient_full_name(episode.identity.full_name),
+        medical_record_number=normalize_medical_record_number(episode.identity.medical_record_number),
+        admission_at=episode.admission_datetime,
+        episode_root=episode.folder,
+    )
+    match = key.match(candidate.episode_key)
+    if match.compatibility is not EpisodeCompatibility.VERIFIED or not match.confirms_episode():
+        return None
+    return candidate if candidate.discharge_at is not None else None
 
 
 def select_discharge_sources(source_scan: SourceScanResult) -> SourceSelection:

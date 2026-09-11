@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 import re
 
+from mdrk_builder.domain.document_dates import discharge_document_datetime
+
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
@@ -20,7 +22,7 @@ from mdrk_builder.domain import (
 )
 from mdrk_builder.infrastructure.formatted_text import add_formatted_text, clinical_paragraphs
 from .specialist_headings import specialist_result_heading
-from mdrk_builder.application.discharge_extractors import clean_discharge_header
+from mdrk_builder.application.discharge_extractors import clean_discharge_header, update_header_period
 from mdrk_builder.infrastructure.clinical_tables import (
     render_completed_program,
     render_final_icf_profile,
@@ -73,6 +75,9 @@ def write_discharge_summary_docx(
 ) -> Path:
     from mdrk_builder.application.admission_only_scales import omit_admission_scales_from_discharge
     draft = deepcopy(draft)
+    draft.discharge_datetime = discharge_document_datetime(draft.discharge_datetime)
+    if draft.header_text.strip():
+        draft.header_text = update_header_period(draft.header_text, draft.admission_datetime, draft.discharge_datetime)
     omit_admission_scales_from_discharge(draft)
     if draft.requires_period_rescan():
         raise ValueError("Даты госпитализации изменены. Повторно считайте документы выписки для пересчёта данных.")

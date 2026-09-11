@@ -450,7 +450,7 @@ def update_header_period(header: str, admission: datetime | None, discharge: dat
             prefix = line.split(":", 1)[0]
             lines[i] = prefix + ": " + period
             found = True
-        elif re.match(r"^Дата (?:выписки|поступления)", line, re.I):
+        elif re.match(r"^Дата (?:и время )?(?:выписки|поступления)", line, re.I):
             value = discharge if "выписки" in line.casefold() else admission
             lines[i] = line.split(":", 1)[0] + f": {value:%d.%m.%Y %H:%M}"
         elif re.match(r"^Количество дней нахождения", line, re.I):

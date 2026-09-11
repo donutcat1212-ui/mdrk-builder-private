@@ -420,6 +420,7 @@ class DischargeSummaryDialog(tk.Toplevel):
         output = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить выписной эпикриз",
+            initialdir=str(self.draft.folder),
             defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
             initialfile=f"Выписной эпикриз {patient or 'пациент'}.docx",

@@ -1787,6 +1787,15 @@ class MdrkBuilderApp:
             messagebox.showerror("Проверьте поля", str(exc))
             return False
         apply_episode_form_data(self.episode, target_kind, form)
+        if target_kind is MdrkKind.FINAL:
+            meeting_text = format_datetime(self.episode.meeting_at(target_kind))
+            if self._entry_variables["meeting"].get() != meeting_text:
+                previous_populating = self._populating
+                self._populating = True
+                try:
+                    self._entry_variables["meeting"].set(meeting_text)
+                finally:
+                    self._populating = previous_populating
         for key in self._dirty_entry_fields:
             source_key = {
                 "full_name": "identity.full_name",
@@ -1873,6 +1882,7 @@ class MdrkBuilderApp:
         default_name = self._default_output_name(kind)
         output = filedialog.asksaveasfilename(
             title="Сохранить МДРК",
+            initialdir=str(self.episode.folder),
             defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
             initialfile=default_name,
@@ -1899,10 +1909,13 @@ class MdrkBuilderApp:
         self._save_workspace()
         self.status_var.set(f"DOCX создан: {created}")
         window=tk.Toplevel(self.root);window.title("Документ сохранён")
+        def open_and_close(path):
+            window.destroy()
+            self._open_path(path)
         ttk.Label(window,text=str(created),wraplength=650,padding=12).pack()
         bar=ttk.Frame(window,padding=8);bar.pack(fill="x")
-        ttk.Button(bar,text="Открыть документ",command=lambda:self._open_path(created)).pack(side="left",padx=4)
-        ttk.Button(bar,text="Показать в папке",command=lambda:self._open_path(created.parent)).pack(side="left",padx=4)
+        ttk.Button(bar,text="Открыть документ",command=lambda:open_and_close(created)).pack(side="left",padx=4)
+        ttk.Button(bar,text="Показать в папке",command=lambda:open_and_close(created.parent)).pack(side="left",padx=4)
         ttk.Button(bar,text="Закрыть",command=window.destroy).pack(side="right",padx=4)
 
     def _save_auxiliary_document(self, save):

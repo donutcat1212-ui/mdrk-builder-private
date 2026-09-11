@@ -7,7 +7,7 @@ from docx import Document
 from mdrk_builder.application.discharge_summary import _project_team_findings
 from mdrk_builder.application.snapshot import build_snapshot
 from mdrk_builder.domain import (
-    DischargeSummaryDraft, IcfDomain, IcfQualifier, MdrkKind,
+    DischargeSummaryDraft, DischargeTeamFinding, IcfDomain, IcfQualifier, MdrkKind,
     SourceDocument, SpecialistFinding, SpecialistRole,
 )
 from mdrk_builder.infrastructure.discharge_summary_writer import write_discharge_summary_docx
@@ -89,3 +89,28 @@ def test_result_headings_include_the_selected_exam_name_title_and_timestamp(tmp_
         "Результат осмотра медицинского логопеда СОТРУДНИК_ПОВТОРНЫЙ П.П. (18.06.2026, 14:35)"
     )
     assert expected in [p.text for p in Document(output).paragraphs]
+
+
+@pytest.mark.parametrize("output_kind", ["initial", "final", "discharge"])
+@pytest.mark.parametrize("role", [SpecialistRole.NEUROLOGIST, SpecialistRole.FRM])
+def test_physician_exam_is_always_presented_as_frm(tmp_path, output_kind, role):
+    episode = _representative_episode(tmp_path)
+    at = episode.initial_meeting_at
+    source = tmp_path / "physician.docx"
+    name = "СОТРУДНИК И.И."
+    episode.sources = [SourceDocument(source, role, at, specialist_name=name)]
+    episode.findings = [SpecialistFinding(role, "КОНТРОЛЬНЫЙ ОСМОТР", at, source,
+                                          specialist_title="Врач-невролог")]
+    output = tmp_path / (output_kind + ".docx")
+    if output_kind == "discharge":
+        draft = DischargeSummaryDraft(tmp_path, team_findings=(
+            DischargeTeamFinding(role, "КОНТРОЛЬНЫЙ ОСМОТР", occurred_at=at,
+                                 specialist_name=name, specialist_title="Врач-невролог"),))
+        write_discharge_summary_docx(draft, output)
+    else:
+        write_mdrk_docx(episode, MdrkKind(output_kind), output)
+    headings = [p.text for p in Document(output).paragraphs if p.text.startswith("Результат осмотра")]
+    assert any(heading.startswith(f"Результат осмотра врача физической и реабилитационной медицины {name} (")
+               for heading in headings)
+    assert not any("невролог" in heading.casefold() for heading in headings)
+    assert episode.findings[0].specialist_title == "Врач-невролог"

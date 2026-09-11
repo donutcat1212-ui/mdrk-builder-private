@@ -476,6 +476,7 @@ class ReverseSheetPanel(ttk.Frame):
             return None
         output = filedialog.asksaveasfilename(
             parent=self, title="Сохранить оборотный лист", defaultextension=".docx",
+            initialdir=str(self.draft.folder),
             filetypes=(("Документ Word", "*.docx"),),
             initialfile=f"Оборотный лист {safe_patient_name(self.draft.identity.full_name)}.docx",
         )

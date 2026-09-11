@@ -268,7 +268,7 @@ def test_meeting_dates_use_clinic_weekend_rule_and_ignore_discharge_boundary() -
 
     assert episode.admission_datetime == datetime(2026, 6, 5, 12, 12)
     assert episode.initial_meeting_at == datetime(2026, 6, 8, 8, 0)
-    assert episode.final_meeting_at == datetime(2026, 6, 19, 11, 30)
+    assert episode.final_meeting_at == datetime(2026, 6, 19, 11)
     assert episode.discharge_datetime is None
     assert episode.course_duration_days == 14
 
@@ -301,7 +301,7 @@ def test_explicit_final_mdrk_schedule_overrides_latest_specialist_time() -> None
     _merge_dates(episode, [clinical, schedule])
 
     assert episode.initial_meeting_at == datetime(2026, 6, 8, 8)
-    assert episode.final_meeting_at == datetime(2026, 6, 19, 15, 30)
+    assert episode.final_meeting_at == datetime(2026, 6, 19, 11)
 
 
 def test_discharge_date_is_not_materialized_or_used_as_course_boundary() -> None:
@@ -362,7 +362,7 @@ def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
         tmp_path / "невролог повторный.docx",
         heading="Повторный осмотр невролога",
         examined_at="19.06.2026 16:00",
-        diagnosis="слишком поздний",
+        diagnosis="повторный осмотр в тот же день",
         icf_code="s999",
     )
 
@@ -371,9 +371,10 @@ def test_scan_meeting_override_is_applied_before_sections_and_icf_materialize(
         final_meeting_at=datetime(2026, 6, 19, 15, 30),
     )
 
-    assert episode.final_meeting_at == datetime(2026, 6, 19, 15, 30)
-    assert episode.sections.clinical_diagnosis == "исходный"
-    assert {domain.code for domain in episode.icf_domains} == {"s110"}
+    assert episode.final_meeting_at == datetime(2026, 6, 19, 11)
+    assert "исходный" in episode.sections.clinical_diagnosis
+    assert "повторный осмотр в тот же день" in episode.sections.clinical_diagnosis
+    assert {domain.code for domain in episode.icf_domains} == {"s110", "s999"}
 
 
 def test_scan_preserves_specialist_name_for_signature_roster(tmp_path) -> None:

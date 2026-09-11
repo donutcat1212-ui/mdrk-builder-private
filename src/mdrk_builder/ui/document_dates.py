@@ -7,6 +7,7 @@ from mdrk_builder.application.discharge_summary import scan_discharge_summary
 from mdrk_builder.application.reverse_sheet import scan_reverse_sheet
 from mdrk_builder.application.scanner import scan_patient_folder
 from mdrk_builder.domain import MdrkKind
+from mdrk_builder.domain.document_dates import discharge_document_datetime
 from mdrk_builder.ui.date_rebuild import DateRebuildQueue, RebuildRequest
 from mdrk_builder.ui.episode_adapter import parse_optional_datetime
 
@@ -101,13 +102,18 @@ class DocumentDateRebuilds:
         variables = panel._identity_vars if key == "discharge" else panel._header_vars
         admission = parse_optional_datetime(variables["admission"].get())
         discharge = parse_optional_datetime(variables["discharge"].get())
+        if key == "discharge":
+            discharge = discharge_document_datetime(discharge)
         if admission is None or (key == "discharge" and discharge is None):
             raise ValueError("Incomplete period")
         if discharge and admission.date() > discharge.date():
             raise ValueError("Reversed period")
         baseline = panel.source_baseline if key == "discharge" else panel._baseline
         signature = (admission, discharge)
-        if baseline and signature == (baseline.admission_datetime, baseline.discharge_datetime):
+        baseline_discharge = baseline.discharge_datetime if baseline else None
+        if key == "discharge":
+            baseline_discharge = discharge_document_datetime(baseline_discharge)
+        if baseline and signature == (baseline.admission_datetime, baseline_discharge):
             return None
         folder = draft.folder
         scan = scan_discharge_summary if key == "discharge" else scan_reverse_sheet

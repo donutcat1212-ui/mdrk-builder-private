@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, time, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -44,6 +44,7 @@ from mdrk_builder.domain import (
     ReviewIssue,
     ReviewSeverity,
     SourceDocument,
+    ScaleMeasurement,
     SpecialistFinding,
     SpecialistRole,
 )
@@ -326,6 +327,7 @@ def _merge_dates(
                     or record.clinical_datetime == episode.final_meeting_at):
                 episode.field_sources["final_meeting_at"] = record.document.source_path
                 break
+    episode.final_meeting_at = episode.meeting_at(MdrkKind.FINAL)
     _update_course_duration(episode)
 
 
@@ -380,22 +382,25 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
         *,
         include_updates: bool,
     ) -> None:
-        physician_eligible = eligible_as_of(physician_records, boundary)
+        eligible_records = [record for record in clinical_records
+                            if include_updates or not record.classification.is_discharge_summary]
+        eligible_physicians = [record for record in physician_records if record in eligible_records]
+        physician_eligible = eligible_as_of(eligible_physicians, boundary)
         future_physician_records = (
             sorted(
                 (
                     item
-                    for item in physician_records
+                    for item in eligible_physicians
                     if item.clinical_datetime is not None
                     and item.clinical_datetime > boundary
                     and item.classification.document_type != "final"
                 ),
                 key=lambda item: item.clinical_datetime or datetime.max,
             )
-            if boundary is not None
+            if boundary is not None and not include_updates
             else []
         )
-        all_eligible = eligible_as_of(clinical_records, boundary)
+        all_eligible = eligible_as_of(eligible_records, boundary)
         specialist_fallback_fields = {"laboratory_results", "instrumental_results"}
         timeline_fields = {
             "clinical_diagnosis",
@@ -570,14 +575,14 @@ def _latest_clinical_sections(episode: Episode, records: list[ScannedRecord]) ->
     fill_as_of(
         episode.sections,
         episode.field_sources,
-        episode.final_meeting_at,
+        episode.assessment_at(MdrkKind.FINAL),
         "final_meeting_at",
         include_updates=True,
     )
     merge_specialist_plan_as_of(
         episode.sections,
         episode.field_sources,
-        episode.final_meeting_at,
+        episode.assessment_at(MdrkKind.FINAL),
     )
     if not episode.initial_sections.rehabilitation_potential.strip():
         episode.initial_sections.rehabilitation_potential = "средний"
@@ -599,6 +604,14 @@ def _collect_findings(episode: Episode, records: list[ScannedRecord]) -> None:
     for record in records:
         role = record.classification.role
         if role not in allowed:
+            continue
+        if record.classification.is_discharge_summary:
+            from mdrk_builder.application.discharge_extractors import extract_discharge_scale_values
+            scales = [ScaleMeasurement(name, value, record.clinical_datetime, role, record.document.source_path)
+                      for name, value in extract_discharge_scale_values(record.document).items()]
+            if scales:
+                episode.findings.append(SpecialistFinding(role, source_datetime=record.clinical_datetime,
+                    source=record.document.source_path, scales=scales))
             continue
         conclusion = extract_conclusion(record.document, role)
         if (not conclusion and role is SpecialistRole.NEUROLOGIST
@@ -759,7 +772,7 @@ def _select_personal_factor(
 def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> None:
     for occurrences in _personal_factor_records(records).values():
         initial = _select_personal_factor(occurrences, episode.initial_meeting_at, episode.admission_datetime)
-        final = _select_personal_factor(occurrences, episode.final_meeting_at, episode.admission_datetime)
+        final = _select_personal_factor(occurrences, episode.assessment_at(MdrkKind.FINAL), episode.admission_datetime)
         if final is None:
             continue
 
@@ -796,8 +809,8 @@ def _merge_personal_factors(episode: Episode, records: list[ScannedRecord]) -> N
             item
             for item in occurrences
             if item[0].clinical_datetime is None
-            or episode.final_meeting_at is None
-            or item[0].clinical_datetime <= episode.final_meeting_at
+            or episode.assessment_at(MdrkKind.FINAL) is None
+            or item[0].clinical_datetime <= episode.assessment_at(MdrkKind.FINAL)
         ]
         descriptions = {
             _normalized_personal_factor_description(item[1].description)
@@ -938,10 +951,10 @@ def _merge_icf(episode: Episode, records: list[ScannedRecord]) -> None:
 
         for occurrences in clusters.values():
             temporal_points = _eligible_icf_occurrences(
-                occurrences, episode.final_meeting_at, episode.admission_datetime
+                occurrences, episode.assessment_at(MdrkKind.FINAL), episode.admission_datetime
             )
             if not temporal_points:
-                # A source written after MDRK-2 cannot introduce or update a row.
+                # Later calendar days cannot introduce or update a row.
                 continue
 
             initial_record, initial_obs = temporal_points[0]
@@ -1157,7 +1170,7 @@ def _merge_mdrk1_baseline(
             # This protects against an MDRK-2 with accidentally empty repeat
             # columns being mistaken for MDRK-1.
             continue
-        if episode.final_meeting_at is not None and measured_at > episode.final_meeting_at:
+        if episode.assessment_at(MdrkKind.FINAL) is not None and measured_at > episode.assessment_at(MdrkKind.FINAL):
             continue
         eligible.append(record)
     eligible.sort(
@@ -1235,7 +1248,7 @@ def _merge_mdrk1_baseline(
             measured_at = measurement.measured_at or fallback_at
             if measured_at > fallback_at:
                 continue
-            if episode.final_meeting_at is not None and measured_at > episode.final_meeting_at:
+            if episode.assessment_at(MdrkKind.FINAL) is not None and measured_at > episode.assessment_at(MdrkKind.FINAL):
                 continue
             matching_course_scale = next(
                 (
@@ -1559,6 +1572,21 @@ def scan_patient_folder(
             episode_records,
             admission_datetime_override=admission_datetime_override,
         )
+        from mdrk_builder.application.discharge_source_selection import select_mdrk_discharge_source
+        discharge = select_mdrk_discharge_source(source_scan, episode)
+        if discharge is not None:
+            source = discharge.scanned.document
+            role = SpecialistRole.NEUROLOGIST
+            classification = replace(discharge.scanned.classification, role=role)
+            episode_records.append(ScannedRecord(source, classification, discharge.discharge_at))
+            episode.sources.append(SourceDocument(source.source_path, role, discharge.discharge_at,
+                "discharge_summary", sha256=source.sha256,
+                extraction_method="docx" if source.source_path.suffix.casefold() == ".docx" else "converted",
+                specialist_name=extract_specialist_name(source, role)))
+            if final_meeting_at is None and (episode.final_meeting_at is None
+                    or discharge.discharge_at.date() > episode.final_meeting_at.date()):
+                episode.final_meeting_at = discharge.discharge_at
+                episode.field_sources["final_meeting_at"] = source.source_path
         episode.materialized_medical_record_number = episode.identity.medical_record_number
         episode.materialized_admission_datetime = episode.admission_datetime
         if initial_meeting_at is not None:
@@ -1567,6 +1595,7 @@ def scan_patient_folder(
             if final_meeting_at != episode.final_meeting_at:
                 episode.field_sources.pop("final_meeting_at", None)
             episode.final_meeting_at = final_meeting_at
+        episode.final_meeting_at = episode.meeting_at(MdrkKind.FINAL)
         _update_course_duration(episode)
         _latest_clinical_sections(episode, episode_records)
         _collect_findings(episode, episode_records)

@@ -543,7 +543,7 @@ def test_rescan_passes_both_meeting_boundaries_without_destructive_confirmation(
         "scan_session": None,
         "folder": tmp_path,
         "initial_meeting_at": datetime(2026, 8, 10, 8),
-        "final_meeting_at": datetime(2026, 8, 20, 11),
+        "final_meeting_at": datetime(2026, 8, 20, 23, 59, 59, 999999),
     }
 
 

@@ -303,6 +303,7 @@ class ReverseSheetDialog(tk.Toplevel):
         output = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить оборотный лист",
+            initialdir=str(self.draft.folder),
             defaultextension=".docx",
             filetypes=(("Документ Word", "*.docx"),),
             initialfile=f"Оборотный лист {patient or 'пациент'}.docx",
