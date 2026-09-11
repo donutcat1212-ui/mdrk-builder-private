@@ -35,7 +35,7 @@ def test_builds_minimal_copy_ready_internal_folder(tmp_path: Path) -> None:
     source_exe = tmp_path / "MDRK_Builder.exe"
     source_exe.write_bytes(b"minimal-test-executable")
     phrases = tmp_path / "user_phrases.json"
-    phrases.write_text('{"schema_version": 1, "fields": {"conclusion": ["Фраза врача"]}}')
+    phrases.write_text('{"schema_version": 1, "fields": {"conclusion": ["Фраза врача"]}}', encoding="utf-8")
     original_phrases = phrases.read_bytes()
 
     package_dir = package_internal_release.build_internal_package(

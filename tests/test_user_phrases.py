@@ -44,7 +44,7 @@ def test_version_one_contract_preserves_unknown_fields_and_metadata(tmp_path):
     store = PhraseStore(path)
     assert store.phrases("conclusion") == ("Сохранено ранее",)
     store.add("conclusion", "Добавлено сейчас")
-    saved = json.loads(path.read_text())
+    saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["schema_version"] == 1
     assert saved["future_metadata"] == fixture["future_metadata"]
     assert saved["fields"]["future_field"] == fixture["fields"]["future_field"]

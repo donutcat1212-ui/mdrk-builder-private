@@ -75,7 +75,7 @@ def test_release_gate_allows_empty_feedback(tmp_path):
 
 
 def test_user_phrase_file_is_excluded_even_when_empty(tmp_path):
-    (tmp_path / "user_phrases.json").write_text('{"schema_version": 1, "fields": {}}')
+    (tmp_path / "user_phrases.json").write_text('{"schema_version": 1, "fields": {}}', encoding="utf-8")
     assert any("фраз" in finding.reason for finding in audit_source_tree(tmp_path))
     assert any("фраз" in finding.reason for finding in audit_release_candidate(tmp_path))
 
